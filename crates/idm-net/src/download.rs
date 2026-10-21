@@ -1,0 +1,850 @@
+//! The coordinator: one whole download, start to finish.
+//!
+//! Everything else in the engine is a mechanism; this is the part that drives
+//! them. It resolves the URL, probes it, preallocates, opens a journal, spawns
+//! the writer, keeps a target number of fetch tasks in flight, decides when to
+//! steal and when to hedge, checkpoints on a timer, and finalises.
+//!
+//! # Ownership
+//!
+//! The coordinator owns the ledger, the connection controller, the journal and
+//! the writer; nothing else may touch them. Fetch tasks get only a cloned
+//! writer handle, a cloned budget, a lane and an `Arc<LiveClaim>`. That is what
+//! keeps the scheduling state single-threaded and lock-free while the network
+//! work is fully concurrent.
+//!
+//! # The checkpoint order
+//!
+//! Flush, drain, flush, commit. Draining before the first flush would miss the
+//! acks that flush itself produces — a short run sits un-issued in the writer's
+//! reorder buffer, so no ack exists yet, and a final checkpoint would commit
+//! nothing and leave the journal unaware of the last chunk. The second flush
+//! costs almost nothing and makes every drained range durable even if other
+//! fetchers wrote concurrently.
+
+use std::collections::HashMap;
+use std::fs::File;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use idm_core::journal::{
+    Journal, JournalMeta, JournalStrings, ValidatorKind, VerifyMode, flags as journal_flags,
+};
+use idm_core::sched::conn::{ConnController, ConnDecision, ConnPolicy, Observation, SettleReason};
+use idm_core::sched::probe::{ProbeOutcome, classify};
+use idm_core::sched::steal::{Action, StealPolicy, next_action};
+use idm_core::sched::{ClaimId, ClaimSnapshot, LiveClaim, Protocol, WorkLedger, ledger};
+use idm_core::win::prealloc::{self, PreallocOptions, WriteMode};
+use idm_core::writer::{WriteAck, Writer, WriterConfig};
+use idm_core::{ByteRange, ExtentError, FileIdentity};
+use reqwest::header::{CONTENT_DISPOSITION, RANGE};
+
+use crate::budget::AsyncBudget;
+use crate::client::{HttpConfig, LanePool, lane_topology};
+use crate::facts::OwnedFacts;
+use crate::fetch::{FetchConfig, FetchOutcome, FetchStop, SegmentRequest, fetch_claim};
+
+/// The probe reads this much, and it doubles as the first segment, so no round
+/// trip is wasted learning the file's shape.
+const PROBE_BYTES: u64 = 1 << 20;
+
+#[derive(Debug, Clone)]
+pub struct DownloadConfig {
+    pub url: String,
+    pub output_dir: PathBuf,
+    /// Overrides the server-supplied and URL-derived name.
+    pub filename: Option<String>,
+    /// Pins the connection count, disabling the adaptive ramp. Useful for
+    /// benchmarking; left `None` in normal use, because no fixed number can be
+    /// right for every host.
+    pub fixed_connections: Option<u32>,
+    pub http: HttpConfig,
+    pub fetch: FetchConfig,
+    pub conn: ConnPolicy,
+    pub steal: StealPolicy,
+    /// Opt in to `SetFileValidData`. Off by default: it skips zero-filling by
+    /// exposing stale on-disk content.
+    pub allow_set_valid_data: bool,
+    pub checkpoint_interval: Duration,
+    /// How often the connection controller is given a measurement window.
+    ///
+    /// Deliberately separate from the checkpoint cadence. Tying the two
+    /// together means the ramp can only act as often as the journal is
+    /// flushed, so a 250 ms fast-ramp interval behind a 500 ms checkpoint
+    /// never fires and the download spends its first seconds at the starting
+    /// connection count.
+    pub conn_tick_interval: Duration,
+    /// Pin lanes to distinct resolved edge addresses.
+    pub pin_edges: bool,
+    pub referrer: Option<String>,
+    pub cookies: Option<String>,
+}
+
+impl DownloadConfig {
+    pub fn new(url: impl Into<String>, output_dir: impl Into<PathBuf>) -> Self {
+        Self {
+            url: url.into(),
+            output_dir: output_dir.into(),
+            filename: None,
+            fixed_connections: None,
+            http: HttpConfig::default(),
+            fetch: FetchConfig::default(),
+            conn: ConnPolicy::default(),
+            steal: StealPolicy::default(),
+            allow_set_valid_data: false,
+            checkpoint_interval: Duration::from_millis(500),
+            conn_tick_interval: Duration::from_millis(150),
+            pin_edges: true,
+            referrer: None,
+            cookies: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct DownloadStats {
+    pub requests: u64,
+    pub steals: u64,
+    pub hedges: u64,
+    pub refusals: u64,
+    pub retries: u64,
+    pub bytes_rewritten: u64,
+}
+
+/// A periodic snapshot for the UI or CLI.
+#[derive(Debug, Clone, Copy)]
+pub struct Progress {
+    pub durable: u64,
+    pub total: u64,
+    pub rate_bps: f64,
+    pub connections: u32,
+    pub elapsed: Duration,
+    /// Set once the ramp has stopped, so a caller can say *why* -- "disk-limited"
+    /// is a very different message than "the server is throttling you".
+    pub settled: Option<SettleReason>,
+}
+
+impl Progress {
+    pub fn fraction(&self) -> f64 {
+        if self.total == 0 { 0.0 } else { self.durable as f64 / self.total as f64 }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct DownloadReport {
+    pub path: PathBuf,
+    pub total: u64,
+    pub elapsed: Duration,
+    pub connections_settled_at: u32,
+    pub settle_reason: Option<SettleReason>,
+    pub write_mode: WriteMode,
+    pub lanes: usize,
+    pub stats: DownloadStats,
+    pub resumed_bytes: u64,
+}
+
+impl DownloadReport {
+    pub fn mean_bytes_per_sec(&self) -> f64 {
+        let secs = self.elapsed.as_secs_f64();
+        if secs <= 0.0 { 0.0 } else { (self.total - self.resumed_bytes) as f64 / secs }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum DownloadError {
+    #[error("client setup failed: {0}")]
+    Client(#[from] crate::client::ClientError),
+    #[error("request failed: {0}")]
+    Request(#[source] reqwest::Error),
+    #[error("fetch failed: {0}")]
+    Fetch(#[from] crate::fetch::FetchError),
+    #[error("I/O failed: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("preallocation failed: {0}")]
+    Prealloc(#[from] prealloc::PreallocError),
+    #[error("journal failed: {0}")]
+    Journal(#[from] idm_core::JournalError),
+    #[error("range arithmetic failed: {0}")]
+    Extent(#[from] ExtentError),
+    #[error("server does not support ranges, so this file cannot be fetched in parallel")]
+    NoRangeSupport,
+    #[error("the file has no known length, so it cannot be fetched in parallel")]
+    UnknownLength,
+    #[error("the server's response could not be used: {0:?}")]
+    Unusable(ProbeOutcome),
+    #[error("the file changed on the server mid-download; the partial file was kept")]
+    RepresentationChanged,
+    #[error("gave up after {attempts} attempts without finishing")]
+    Stalled { attempts: u32 },
+}
+
+/// What the probe learned about the target.
+#[derive(Debug, Clone)]
+pub struct Target {
+    pub pinned_url: String,
+    pub total: u64,
+    pub validator: ValidatorKind,
+    pub etag: Option<String>,
+    pub filename: String,
+    pub facts: OwnedFacts,
+}
+
+/// Resolves and probes the URL with a single ranged GET.
+///
+/// Deliberately not a HEAD: HEAD is answered from a different cache tier,
+/// returns 405 on some origins, is rejected by some signed URLs, and can report
+/// a `Content-Length` that disagrees with the GET that follows.
+pub async fn probe(config: &DownloadConfig) -> Result<Target, DownloadError> {
+    let resolver = crate::client::redirect_resolver(&config.http)?;
+    let requested = ByteRange::try_new(0, PROBE_BYTES)?;
+
+    let mut request = resolver.get(&config.url).header(RANGE, requested.to_range_header()?);
+    if let Some(referrer) = &config.referrer {
+        request = request.header(reqwest::header::REFERER, referrer);
+    }
+    if let Some(cookies) = &config.cookies {
+        request = request.header(reqwest::header::COOKIE, cookies);
+    }
+
+    let response = request.send().await.map_err(DownloadError::Request)?;
+    let facts = OwnedFacts::from_response(&response);
+    let outcome = classify(requested, &facts.as_facts());
+
+    let filename = config
+        .filename
+        .clone()
+        .or_else(|| filename_from_disposition(&response))
+        .or_else(|| filename_from_url(&facts.final_url))
+        .unwrap_or_else(|| "download.bin".to_owned());
+
+    match outcome {
+        ProbeOutcome::Ranged { total, validator, .. } => Ok(Target {
+            pinned_url: facts.final_url.clone(),
+            total,
+            validator,
+            etag: facts.etag.clone(),
+            filename,
+            facts,
+        }),
+        ProbeOutcome::SingleStreamFromZero { .. } => Err(DownloadError::NoRangeSupport),
+        ProbeOutcome::SingleStreamUnknownLength | ProbeOutcome::NeedsSuffixProbe { .. } => {
+            Err(DownloadError::UnknownLength)
+        }
+        other => Err(DownloadError::Unusable(other)),
+    }
+}
+
+fn filename_from_disposition(response: &reqwest::Response) -> Option<String> {
+    let value = response.headers().get(CONTENT_DISPOSITION)?.to_str().ok()?;
+    // `filename*` may carry a path separator or traversal, so only the final
+    // component is ever taken and it is sanitised by the caller.
+    let raw = value
+        .split(';')
+        .filter_map(|part| part.trim().strip_prefix("filename="))
+        .map(|name| name.trim_matches('"'))
+        .next()?;
+    sanitise_filename(raw)
+}
+
+fn filename_from_url(url: &str) -> Option<String> {
+    let path = url.split(['?', '#']).next()?;
+    sanitise_filename(path.rsplit('/').next()?)
+}
+
+/// Strips anything that could escape the output directory or confuse Windows.
+///
+/// Server-supplied names are untrusted input: traversal, absolute paths,
+/// reserved device names and alternate-data-stream colons all have to go.
+pub fn sanitise_filename(raw: &str) -> Option<String> {
+    let base = raw.rsplit(['/', '\\']).next()?.trim();
+    if base.is_empty() || base == "." || base == ".." {
+        return None;
+    }
+    let cleaned: String = base
+        .chars()
+        .filter(|c| !matches!(c, ':' | '*' | '?' | '"' | '<' | '>' | '|' | '\0'))
+        .collect();
+    // Trailing dots and spaces are silently dropped by Windows, which turns
+    // "evil.exe " into "evil.exe".
+    let cleaned = cleaned.trim_end_matches(['.', ' ']).to_owned();
+    if cleaned.is_empty() {
+        return None;
+    }
+    const RESERVED: [&str; 22] = [
+        "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
+        "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+    ];
+    let stem = cleaned.split('.').next().unwrap_or_default().to_ascii_uppercase();
+    if RESERVED.contains(&stem.as_str()) {
+        return Some(format!("_{cleaned}"));
+    }
+    Some(cleaned)
+}
+
+struct Tracked {
+    claim: Arc<LiveClaim>,
+    issued: Instant,
+    /// The whole range this claim was reserved for, so the unfetched residue
+    /// can be returned to the pool when it retires.
+    reserved: ByteRange,
+}
+
+impl Tracked {
+    fn rate_bps(&self) -> f64 {
+        let moved = self.claim.cursor().saturating_sub(self.claim.start());
+        let secs = self.issued.elapsed().as_secs_f64();
+        if secs <= 0.001 { 0.0 } else { moved as f64 / secs }
+    }
+
+    fn snapshot(&self, now_ms: u64) -> ClaimSnapshot {
+        self.claim.snapshot(self.rate_bps(), now_ms)
+    }
+}
+
+/// Runs one download to completion, resuming from an existing journal if there
+/// is one.
+pub async fn download(config: &DownloadConfig) -> Result<DownloadReport, DownloadError> {
+    download_with_progress(config, |_| {}).await
+}
+
+/// As [`download`], reporting progress at every checkpoint.
+pub async fn download_with_progress<F: FnMut(Progress)>(
+    config: &DownloadConfig,
+    mut on_progress: F,
+) -> Result<DownloadReport, DownloadError> {
+    let started = Instant::now();
+    let target = probe(config).await?;
+
+    std::fs::create_dir_all(&config.output_dir)?;
+    let final_path = config.output_dir.join(&target.filename);
+    let part_path = with_extension(&final_path, "idmpart");
+    let journal_path = with_extension(&final_path, "idmjrn");
+
+    let data =
+        File::options().create(true).truncate(false).read(true).write(true).open(&part_path)?;
+
+    // Resume when a journal describes this very file; otherwise start fresh.
+    let (mut journal, write_mode) = match open_resumable(&journal_path, &data, &target) {
+        Some(journal) => {
+            let mode = mode_from_flags(journal.flags());
+            (journal, mode)
+        }
+        None => {
+            let prepared = prealloc::preallocate(
+                &data,
+                &part_path,
+                &PreallocOptions {
+                    total_len: target.total,
+                    allow_set_valid_data: config.allow_set_valid_data,
+                },
+            )?;
+            let meta = JournalMeta {
+                total_len: target.total,
+                generation: 1,
+                flags: prepared.mode.journal_flags(),
+                validator: target.validator,
+                part_identity: FileIdentity::of(&data)?,
+                strings: JournalStrings {
+                    request_url: config.url.clone(),
+                    pinned_url: target.pinned_url.clone(),
+                    final_name: target.filename.clone(),
+                    etag: target.etag.clone().unwrap_or_default(),
+                    last_modified: target.facts.last_modified.clone().unwrap_or_default(),
+                    content_type: String::new(),
+                },
+            };
+            (Journal::create(&journal_path, &meta)?, prepared.mode)
+        }
+    };
+
+    let resumed_bytes = journal.durable().total_bytes();
+    let mut ledger = WorkLedger::resumed(target.total, journal.durable().clone());
+
+    let bdp = 2 << 20;
+    let forced_single = ledger::force_single_connection(target.total, bdp);
+    let initial = match config.fixed_connections {
+        Some(fixed) => fixed.max(1),
+        None if forced_single => 1,
+        None => config.conn.start,
+    };
+    let (lane_count, streams) = lane_topology(initial);
+    let mut http = config.http.clone();
+    http.streams_per_lane = streams;
+
+    let host = reqwest::Url::parse(&target.pinned_url)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_owned));
+    let port = reqwest::Url::parse(&target.pinned_url)
+        .ok()
+        .and_then(|url| url.port_or_known_default())
+        .unwrap_or(443);
+
+    let pool = Arc::new(match (&host, config.pin_edges) {
+        (Some(host), true) => LanePool::pinned_to_edges(&http, host, port, lane_count)
+            .await
+            .unwrap_or(LanePool::new(&http, lane_count)?),
+        _ => LanePool::new(&http, lane_count)?,
+    });
+
+    let (writer, acks) = Writer::spawn(&part_path, WriterConfig::new(1, target.total))?;
+    let handle = writer.handle();
+    let budget = AsyncBudget::for_connections(config.conn.per_host_max);
+
+    let mut controller = ConnController::new(config.conn.clone(), 0);
+    let mut target_connections = initial;
+    let mut stats = DownloadStats::default();
+    let mut tracked: HashMap<ClaimId, Tracked> = HashMap::new();
+    let mut tasks = tokio::task::JoinSet::new();
+    let mut next_claim_id = 0u32;
+    let mut hedges_used = 0u8;
+    let mut steal_tokens = 8u32;
+    let mut last_checkpoint = Instant::now();
+    let mut last_conn_tick = Instant::now();
+    let mut fetched_at_last_tick = 0u64;
+    // Bytes fetched by claims that have already retired. Added to the live
+    // claims' progress to give a smooth, network-level throughput signal.
+    let mut retired_bytes = 0u64;
+    let mut idle_rounds = 0u32;
+
+    while !ledger.is_complete() {
+        // Top up to the target number of in-flight fetches.
+        while tracked.len() < target_connections as usize {
+            let now_ms = started.elapsed().as_millis() as u64;
+            let snapshots: Vec<ClaimSnapshot> =
+                tracked.values().map(|t| t.snapshot(now_ms)).collect();
+            let free = ledger.next_claim(target_connections, write_mode.claim_window());
+
+            let median_rate = median_rate(&snapshots);
+            let action = next_action(
+                free,
+                &snapshots,
+                median_rate,
+                ledger.remaining_bytes(),
+                target.total,
+                hedges_used,
+                steal_tokens,
+                &config.steal,
+            );
+
+            let (range, kind) = match action {
+                Action::TakeGap(range) => (range, "gap"),
+                Action::Split { donor, at, .. } => {
+                    // Free the gap we optimistically took, if any.
+                    let Some(stolen) =
+                        tracked.get(&donor).and_then(|t| t.claim.try_steal_at(at, now_ms))
+                    else {
+                        break;
+                    };
+                    stats.steals += 1;
+                    steal_tokens = steal_tokens.saturating_sub(1);
+                    ledger.reserve(stolen);
+                    (stolen, "steal")
+                }
+                Action::Hedge { range, .. } => {
+                    hedges_used += 1;
+                    stats.hedges += 1;
+                    // Deliberately not reserved: a hedge duplicates work that
+                    // is already claimed, and the writer tolerates the
+                    // overlap because both copies are byte-identical.
+                    (range, "hedge")
+                }
+                Action::Idle(_) => break,
+            };
+
+            if range.is_empty() {
+                break;
+            }
+            next_claim_id += 1;
+            let id = ClaimId(next_claim_id);
+            let claim = Arc::new(LiveClaim::new(id, range, Protocol::Http1, now_ms));
+            tracked.insert(
+                id,
+                Tracked { claim: Arc::clone(&claim), issued: Instant::now(), reserved: range },
+            );
+
+            let handle = handle.clone();
+            let budget = budget.clone();
+            let pool = Arc::clone(&pool);
+            let url = target.pinned_url.clone();
+            let etag =
+                target.etag.clone().filter(|_| target.validator == ValidatorKind::StrongETag);
+            let referrer = config.referrer.clone();
+            let cookies = config.cookies.clone();
+            let fetch_config = config.fetch.clone();
+            stats.requests += 1;
+            tracing::debug!(%id, ?range, kind, "issuing claim");
+
+            tasks.spawn(async move {
+                let lane = pool.next_lane().clone();
+                let request = SegmentRequest {
+                    url: &url,
+                    generation: 1,
+                    if_match: etag.as_deref(),
+                    referrer: referrer.as_deref(),
+                    cookies: cookies.as_deref(),
+                };
+                let outcome =
+                    fetch_claim(&lane, &request, &claim, &handle, &budget, &fetch_config).await;
+                (id, outcome)
+            });
+        }
+
+        if tracked.is_empty() {
+            // Nothing in flight and nothing to hand out: either done, or the
+            // ledger and the journal disagree.
+            checkpoint(&acks, &writer, &mut journal, &mut ledger, &data)?;
+            if ledger.is_complete() {
+                break;
+            }
+            idle_rounds += 1;
+            if idle_rounds > 100 {
+                return Err(DownloadError::Stalled { attempts: idle_rounds });
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            continue;
+        }
+        idle_rounds = 0;
+
+        tokio::select! {
+            Some(joined) = tasks.join_next() => {
+                let (id, outcome) = joined.expect("fetch task panicked");
+                let finished = tracked.remove(&id);
+                if let Some(entry) = &finished {
+                    retired_bytes += entry.claim.cursor().saturating_sub(entry.claim.start());
+                }
+                match outcome {
+                    Ok(FetchOutcome::Fetched(fetched)) => {
+                        if let Some(entry) = &finished {
+                            // Return whatever this claim did not deliver.
+                            let delivered_to = fetched.written.end().max(entry.reserved.start());
+                            if delivered_to < entry.reserved.end() {
+                                ledger.release(ByteRange::try_new(delivered_to, entry.reserved.end())?);
+                            }
+                        }
+                        if fetched.stop == FetchStop::StolenFrom {
+                            steal_tokens = steal_tokens.saturating_add(1).min(8);
+                        }
+                    }
+                    Ok(FetchOutcome::Refused { outcome, .. }) => {
+                        stats.refusals += 1;
+                        if let Some(entry) = &finished {
+                            ledger.release(entry.reserved);
+                        }
+                        match outcome {
+                            ProbeOutcome::Throttled => {
+                                stats.retries += 1;
+                                let observation = throttled_observation(target_connections);
+                                if let ConnDecision::Reduce { to, .. } =
+                                    controller.observe(started.elapsed().as_millis() as u64, &observation, 0)
+                                {
+                                    target_connections = to.max(1);
+                                }
+                                tokio::time::sleep(Duration::from_millis(500)).await;
+                            }
+                            ProbeOutcome::Restart(_) => return Err(DownloadError::RepresentationChanged),
+                            other => return Err(DownloadError::Unusable(other)),
+                        }
+                    }
+                    Err(error) => {
+                        // A dropped connection is ordinary; keep the bytes that
+                        // arrived and requeue the rest.
+                        stats.retries += 1;
+                        tracing::debug!(%error, "segment failed, requeueing");
+                        if let Some(entry) = &finished {
+                            let reached = entry.claim.cursor().max(entry.reserved.start());
+                            if reached < entry.reserved.end() {
+                                ledger.release(ByteRange::try_new(reached, entry.reserved.end())?);
+                            }
+                        }
+                    }
+                }
+            }
+            _ = tokio::time::sleep(config.conn_tick_interval.min(config.checkpoint_interval)) => {}
+        }
+
+        // The ramp runs on its own clock, measured from the writer's live
+        // issued-byte counter rather than the journal, which only advances at
+        // checkpoints and is far too coarse to steer by.
+        if config.fixed_connections.is_none()
+            && last_conn_tick.elapsed() >= config.conn_tick_interval
+        {
+            let now_ms = started.elapsed().as_millis() as u64;
+            // Claim cursors advance as the network delivers, every 1 MiB or
+            // 50 ms. The writer's issued-byte counter instead jumps in 4 MiB
+            // coalesced steps with flat stretches between, and those flat
+            // stretches read as zero throughput -- which the controller scored
+            // as weak gains and used to abandon the ramp.
+            let fetched: u64 = retired_bytes
+                + tracked
+                    .values()
+                    .map(|t| t.claim.cursor().saturating_sub(t.claim.start()))
+                    .sum::<u64>();
+            let moved = fetched.saturating_sub(fetched_at_last_tick) as f64;
+            let secs = last_conn_tick.elapsed().as_secs_f64().max(0.001);
+            let observation = Observation {
+                aggregate_bps: moved / secs,
+                mean_per_conn_bps: moved / secs / f64::from(target_connections.max(1)),
+                per_conn_spread_frac: spread_frac(&tracked, now_ms),
+                throttled: false,
+                writer_backpressure: budget.available_bytes() == 0,
+                interarrival_p95_ratio: 1.0,
+                rtt: Duration::from_millis(20),
+            };
+            let decision = controller.observe(now_ms, &observation, 0);
+            match decision {
+                ConnDecision::Add { to } => target_connections = to,
+                ConnDecision::Reduce { to, .. } => target_connections = to.max(1),
+                ConnDecision::Settle { at, .. } => target_connections = at.max(1),
+                ConnDecision::Hold => {}
+            }
+            // Opt-in trace: speculating about why a ramp is slow is a poor
+            // substitute for watching it.
+            if std::env::var_os("IDM_TRACE_RAMP").is_some() {
+                eprintln!(
+                    "ramp t={:>5}ms target={:<3} inflight={:<3} issued={:>9} agg={:>7.1}MB/s settled={:?}",
+                    now_ms,
+                    target_connections,
+                    tracked.len(),
+                    fetched,
+                    observation.aggregate_bps / 1e6,
+                    controller.settled()
+                );
+                let _ = &decision;
+            }
+            fetched_at_last_tick = fetched;
+            last_conn_tick = Instant::now();
+        }
+
+        if last_checkpoint.elapsed() >= config.checkpoint_interval {
+            checkpoint(&acks, &writer, &mut journal, &mut ledger, &data)?;
+            last_checkpoint = Instant::now();
+
+            let durable = journal.durable().total_bytes();
+            let moved = durable.saturating_sub(resumed_bytes) as f64;
+            on_progress(Progress {
+                durable,
+                total: target.total,
+                rate_bps: moved / started.elapsed().as_secs_f64().max(0.001),
+                connections: target_connections,
+                elapsed: started.elapsed(),
+                settled: controller.settled(),
+            });
+        }
+    }
+
+    // Drain anything still running before finalising.
+    while tasks.join_next().await.is_some() {}
+    checkpoint(&acks, &writer, &mut journal, &mut ledger, &data)?;
+    writer.shutdown()?;
+    journal.checkpoint_now(&data)?;
+
+    // Verify before declaring victory. `SetFileValidData` forces a full pass,
+    // because unwritten regions there hold plausible stale content.
+    let verify_mode =
+        if write_mode.requires_full_verification() { VerifyMode::Full } else { VerifyMode::Fast };
+    let report = journal.verify(&data, verify_mode)?;
+    if report.blocks_failed > 0 {
+        tracing::warn!(
+            failed = report.blocks_failed,
+            "verification trimmed bad blocks; the file is incomplete"
+        );
+    }
+    if !journal.is_complete() {
+        return Err(DownloadError::Stalled { attempts: stats.requests as u32 });
+    }
+
+    // Finalise: no holes remain, so sparseness can be dropped safely.
+    if write_mode == WriteMode::Sparse {
+        let _ = prealloc::clear_sparse(&data);
+    }
+    data.sync_all()?;
+    drop(data);
+
+    prealloc::finalize(
+        &part_path,
+        &final_path,
+        &target.pinned_url,
+        config.referrer.as_deref().unwrap_or_default(),
+    )?;
+    let _ = std::fs::remove_file(&journal_path);
+
+    Ok(DownloadReport {
+        path: final_path,
+        total: target.total,
+        elapsed: started.elapsed(),
+        connections_settled_at: target_connections,
+        settle_reason: controller.settled(),
+        write_mode,
+        lanes: pool.len(),
+        stats,
+        resumed_bytes,
+    })
+}
+
+fn median_rate(snapshots: &[ClaimSnapshot]) -> f64 {
+    // A brand-new worker is credited with the cohort's median rather than zero;
+    // at zero the gain test could never pass on a first steal.
+    let mut rates: Vec<f64> = snapshots.iter().map(|s| s.rate_bps).filter(|r| *r > 0.0).collect();
+    if rates.is_empty() {
+        return 1_000_000.0;
+    }
+    rates.sort_by(f64::total_cmp);
+    rates[rates.len() / 2]
+}
+
+fn spread_frac(tracked: &HashMap<ClaimId, Tracked>, now_ms: u64) -> f64 {
+    let rates: Vec<f64> =
+        tracked.values().map(|t| t.snapshot(now_ms).rate_bps).filter(|r| *r > 0.0).collect();
+    if rates.len() < 2 {
+        return 1.0;
+    }
+    let mean = rates.iter().sum::<f64>() / rates.len() as f64;
+    if mean <= 0.0 {
+        return 1.0;
+    }
+    let variance = rates.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / rates.len() as f64;
+    variance.sqrt() / mean
+}
+
+fn throttled_observation(connections: u32) -> Observation {
+    Observation { throttled: true, ..Observation::healthy(1.0, connections) }
+}
+
+fn mode_from_flags(flags: u32) -> WriteMode {
+    if flags & journal_flags::VALID_DATA_SET != 0 {
+        WriteMode::ValidDataSet
+    } else if flags & journal_flags::ORDERED_MODE != 0 {
+        WriteMode::OrderedWindow { window: prealloc::ORDERED_WINDOW }
+    } else {
+        WriteMode::Sparse
+    }
+}
+
+/// Opens an existing journal only if it genuinely describes this file.
+fn open_resumable(journal_path: &Path, data: &File, target: &Target) -> Option<Journal> {
+    let journal = Journal::open(journal_path).ok()?;
+    // A path is not an identity, and a size is not content.
+    journal.check_part_file(data).ok()?;
+    if journal.total_len() != target.total {
+        return None;
+    }
+    // A changed strong validator means the file on the server is not the file
+    // on disk; resuming would splice two representations together.
+    if let (Some(etag), false) = (&target.etag, journal.strings().etag.is_empty()) {
+        if journal.strings().etag != *etag {
+            return None;
+        }
+    }
+    Some(journal)
+}
+
+fn with_extension(path: &Path, extra: &str) -> PathBuf {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(".");
+    name.push(extra);
+    PathBuf::from(name)
+}
+
+/// Flush, drain, flush, commit. See the module docs for why the order matters.
+fn checkpoint(
+    acks: &std::sync::mpsc::Receiver<WriteAck>,
+    writer: &Writer,
+    journal: &mut Journal,
+    ledger: &mut WorkLedger,
+    data: &File,
+) -> Result<(), DownloadError> {
+    writer.flush_all()?;
+
+    let mut ranges = Vec::new();
+    let mut crcs = Vec::new();
+    while let Ok(ack) = acks.try_recv() {
+        ledger.mark_acked(ack.range);
+        ranges.push(ack.range);
+        crcs.extend(ack.block_crcs);
+    }
+
+    writer.flush_all()?;
+    journal.commit(data, &ranges, &crcs)?;
+    for range in ranges {
+        ledger.mark_durable(range);
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn filenames_from_urls_are_sanitised() {
+        assert_eq!(filename_from_url("https://x.invalid/a/b/file.zip"), Some("file.zip".into()));
+        assert_eq!(
+            filename_from_url("https://x.invalid/a/file.zip?token=1#frag"),
+            Some("file.zip".into())
+        );
+        assert_eq!(filename_from_url("https://x.invalid/"), None);
+    }
+
+    #[test]
+    fn traversal_and_absolute_paths_are_stripped() {
+        // Server-supplied names are untrusted: none of these may escape the
+        // output directory.
+        assert_eq!(sanitise_filename("../../Windows/System32/evil.dll"), Some("evil.dll".into()));
+        assert_eq!(sanitise_filename(r"..\..\evil.exe"), Some("evil.exe".into()));
+        assert_eq!(sanitise_filename("/etc/passwd"), Some("passwd".into()));
+        assert_eq!(sanitise_filename(".."), None);
+        assert_eq!(sanitise_filename(""), None);
+    }
+
+    #[test]
+    fn alternate_data_streams_and_wildcards_are_removed() {
+        // "a:b" would write to an alternate data stream rather than a file.
+        assert_eq!(sanitise_filename("report:hidden.txt"), Some("reporthidden.txt".into()));
+        assert_eq!(sanitise_filename("a*b?c.txt"), Some("abc.txt".into()));
+    }
+
+    #[test]
+    fn trailing_dots_and_spaces_are_trimmed() {
+        // Windows silently drops them, which turns "evil.exe " into "evil.exe".
+        assert_eq!(sanitise_filename("evil.exe "), Some("evil.exe".into()));
+        assert_eq!(sanitise_filename("evil.exe."), Some("evil.exe".into()));
+        assert_eq!(sanitise_filename("..."), None);
+    }
+
+    #[test]
+    fn reserved_device_names_are_defused() {
+        for name in ["CON", "nul", "COM1.txt", "LPT9"] {
+            let cleaned = sanitise_filename(name).expect("should produce something");
+            assert!(cleaned.starts_with('_'), "{name} became {cleaned}, still a device name");
+        }
+        // An ordinary name that merely contains one must be left alone.
+        assert_eq!(sanitise_filename("console.log"), Some("console.log".into()));
+    }
+
+    #[test]
+    fn part_and_journal_names_sit_beside_the_output() {
+        let final_path = Path::new(r"D:\downloads\file.zip");
+        assert_eq!(with_extension(final_path, "idmpart").file_name().unwrap(), "file.zip.idmpart");
+        assert_eq!(with_extension(final_path, "idmjrn").file_name().unwrap(), "file.zip.idmjrn");
+        // Both on the destination volume, so finalising is a rename rather
+        // than a cross-volume copy.
+        assert_eq!(with_extension(final_path, "idmpart").parent(), final_path.parent());
+    }
+
+    #[test]
+    fn write_modes_round_trip_through_journal_flags() {
+        assert_eq!(mode_from_flags(journal_flags::SPARSE_USED), WriteMode::Sparse);
+        assert_eq!(mode_from_flags(journal_flags::VALID_DATA_SET), WriteMode::ValidDataSet);
+        assert!(matches!(
+            mode_from_flags(journal_flags::ORDERED_MODE),
+            WriteMode::OrderedWindow { .. }
+        ));
+    }
+
+    #[test]
+    fn a_new_worker_is_credited_the_median_not_zero() {
+        // At zero the split gain test could never pass on a first steal.
+        assert!(median_rate(&[]) > 0.0);
+    }
+}

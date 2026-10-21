@@ -85,6 +85,20 @@ pub struct ConnPolicy {
     /// Chunk interarrival p95 blowing out by this multiple means queueing.
     pub queueing_p95_multiple: f64,
     pub probe_interval: Duration,
+    /// Probe this often while the ramp is still climbing freely.
+    ///
+    /// The steady-state interval is deliberately long, so a settled download
+    /// is not constantly re-measuring. Using it for the *initial* climb too is
+    /// a mistake the benchmark exposed: at +2 every 1.5s, reaching 16
+    /// connections takes about nine seconds, which is longer than many
+    /// downloads last. The file finishes having never reached the rate it
+    /// could have run at.
+    pub fast_probe_interval: Duration,
+    /// Growth fraction during that initial climb; 1.0 doubles.
+    pub fast_ramp_frac: f64,
+    /// Leave the fast climb after this many additions, or on the first weak
+    /// gain or throttle, whichever comes first.
+    pub fast_ramp_steps: u32,
     /// On a throttle, drop to this fraction of the current count.
     pub throttle_backoff_frac: f64,
     /// And do not probe upwards again for this long.
@@ -107,6 +121,9 @@ impl Default for ConnPolicy {
             low_variance_frac: 0.10,
             queueing_p95_multiple: 3.0,
             probe_interval: Duration::from_millis(1500),
+            fast_probe_interval: Duration::from_millis(250),
+            fast_ramp_frac: 1.0,
+            fast_ramp_steps: 4,
             throttle_backoff_frac: 0.7,
             throttle_quiet: Duration::from_secs(30),
             weak_gains_before_settling: 2,
@@ -120,6 +137,13 @@ impl ConnPolicy {
     pub fn probe_interval_ms(&self, rtt: Duration) -> u64 {
         let four_rtts = rtt.as_millis().saturating_mul(4) as u64;
         (self.probe_interval.as_millis() as u64).max(four_rtts)
+    }
+
+    /// The shorter interval used while still climbing. Still never under four
+    /// round trips, since measuring faster than that measures noise.
+    pub fn fast_probe_interval_ms(&self, rtt: Duration) -> u64 {
+        let four_rtts = rtt.as_millis().saturating_mul(4) as u64;
+        (self.fast_probe_interval.as_millis() as u64).max(four_rtts)
     }
 }
 
@@ -200,6 +224,11 @@ pub struct ConnController {
     ceiling: u32,
     weak_gains: u32,
     settled: Option<SettleReason>,
+    /// Additions made during the initial fast climb.
+    fast_steps: u32,
+    /// Once throttled, the fast climb is never re-entered: this host has
+    /// already shown it objects.
+    ever_throttled: bool,
     /// Aggregate throughput before the most recent addition, to measure the
     /// marginal benefit of that addition rather than absolute speed.
     baseline_bps: f64,
@@ -218,6 +247,8 @@ impl ConnController {
             ceiling,
             weak_gains: 0,
             settled: None,
+            fast_steps: 0,
+            ever_throttled: false,
             baseline_bps: 0.0,
             baseline_per_conn_bps: 0.0,
             quiet_until_ms: 0,
@@ -288,6 +319,7 @@ impl ConnController {
             self.current = reduced.min(self.ceiling);
             self.weak_gains = 0;
             self.settled = None;
+            self.ever_throttled = true;
             self.quiet_until_ms = now_ms + self.policy.throttle_quiet.as_millis() as u64;
             self.next_decision_ms = self.quiet_until_ms;
             self.baseline_bps = 0.0;
@@ -304,7 +336,15 @@ impl ConnController {
             return ConnDecision::Hold;
         }
 
-        self.next_decision_ms = now_ms + self.policy.probe_interval_ms(observation.rtt);
+        // The initial climb probes far more often than steady state: at the
+        // steady interval, reaching a useful connection count takes longer
+        // than many downloads last.
+        self.next_decision_ms = now_ms
+            + if self.in_fast_ramp() {
+                self.policy.fast_probe_interval_ms(observation.rtt)
+            } else {
+                self.policy.probe_interval_ms(observation.rtt)
+            };
 
         // Signals that mean another connection cannot possibly help.
         if observation.writer_backpressure {
@@ -360,9 +400,29 @@ impl ConnController {
         self.try_add(global_in_use)
     }
 
+    /// Whether the ramp is still climbing freely: nothing has throttled, no
+    /// gain has been weak, and the step budget is not spent.
+    fn in_fast_ramp(&self) -> bool {
+        // Tolerates a single weak window. Requiring a spotless record meant one
+        // noisy measurement disabled the fast climb for the rest of the
+        // download, dropping it back to the long steady-state interval.
+        !self.ever_throttled
+            && self.weak_gains < self.policy.weak_gains_before_settling
+            && self.fast_steps < self.policy.fast_ramp_steps
+            && self.settled.is_none()
+    }
+
     fn try_add(&mut self, global_in_use: u32) -> ConnDecision {
-        let headroom_frac = ((self.current as f64) * self.policy.max_step_frac).floor() as u32;
-        let step = self.policy.step.min(headroom_frac.max(1));
+        let fast = self.in_fast_ramp();
+        let growth = if fast { self.policy.fast_ramp_frac } else { self.policy.max_step_frac };
+        let headroom = ((self.current as f64) * growth).floor() as u32;
+        // During the fast climb the proportional step leads; afterwards the
+        // fixed +2 does, capped by the proportional headroom.
+        let step = if fast {
+            headroom.max(self.policy.step)
+        } else {
+            self.policy.step.min(headroom.max(1))
+        };
         let target = (self.current + step).min(self.ceiling).min(self.policy.per_host_max);
 
         let global_room = self.policy.global_max.saturating_sub(global_in_use);
@@ -372,6 +432,9 @@ impl ConnController {
             return self.settle(SettleReason::AtCap);
         }
         self.current = target;
+        if fast {
+            self.fast_steps += 1;
+        }
         ConnDecision::Add { to: target }
     }
 
@@ -426,11 +489,12 @@ mod tests {
         // origin, where more connections genuinely help.
         let mut rate = 10.0 * MBPS;
         let mut counts = vec![controller.connections()];
-        for _ in 0..6 {
+        for _ in 0..8 {
             let observation = Observation::healthy(rate, controller.connections());
             match step(&mut controller, &mut clock, &observation) {
                 ConnDecision::Add { to } => counts.push(to),
-                ConnDecision::Hold => {}
+                // Reaching the cap is a legitimate end to the climb.
+                ConnDecision::Hold | ConnDecision::Settle { .. } => {}
                 other => panic!("unexpected {other:?}"),
             }
             rate *= 1.8;
@@ -440,8 +504,84 @@ mod tests {
     }
 
     #[test]
-    fn it_settles_when_additions_stop_paying() {
+    fn the_initial_climb_reaches_a_useful_count_quickly() {
+        // Regression guard for what the benchmark exposed. At +2 every 1.5s
+        // the ramp needed roughly nine seconds to reach 16 connections --
+        // longer than many downloads last -- so a 128 MiB file finished at
+        // 30 MB/s when the same engine pinned to 16 connections managed 71.
         let policy = ConnPolicy::default();
+        let mut clock = 0u64;
+        let mut controller = ConnController::new(policy, clock);
+
+        let mut rate = 10.0 * MBPS;
+        let mut reached_at = None;
+        for _ in 0..12 {
+            let connections = controller.connections();
+            clock += 300;
+            match controller.observe(clock, &Observation::healthy(rate, connections), 0) {
+                ConnDecision::Add { to } => {
+                    rate *= 1.8;
+                    if to >= 16 {
+                        reached_at = Some(clock);
+                        break;
+                    }
+                }
+                ConnDecision::Settle { at, .. } => {
+                    if at >= 16 {
+                        reached_at = Some(clock);
+                    }
+                    break;
+                }
+                _ => {}
+            }
+        }
+
+        let at = reached_at.expect("the climb should have reached the cap");
+        // Deliberately tight. An earlier version of this allowed 2000ms, which
+        // the bug sailed through: a single steady-interval step still lands at
+        // 1800ms, so the test passed while the fast interval was not being
+        // applied at all. The budget must only be satisfiable by genuinely
+        // using the fast interval.
+        assert!(
+            at <= 1000,
+            "took {at}ms to reach 16 connections; the fast probe interval is not being applied"
+        );
+    }
+
+    #[test]
+    fn a_throttle_ends_the_fast_climb_for_good() {
+        // Once a host has objected, creeping back up is the only safe way.
+        let policy = ConnPolicy::default();
+        let mut clock = 0u64;
+        let mut controller = ConnController::new(policy.clone(), clock);
+        clock += 300;
+        controller.observe(clock, &Observation::healthy(10.0 * MBPS, 4), 0);
+
+        let mut throttle = Observation::healthy(10.0 * MBPS, controller.connections());
+        throttle.throttled = true;
+        controller.observe(clock, &throttle, 0);
+
+        // After the quiet period the climb resumes, but at the cautious +2
+        // rather than doubling.
+        let later = clock + policy.throttle_quiet.as_millis() as u64 + 1;
+        controller.allow_one_probe(later);
+        let before = controller.connections();
+        if let ConnDecision::Add { to } =
+            controller.observe(later, &Observation::healthy(500.0 * MBPS, before), 0)
+        {
+            assert!(
+                to - before <= policy.step,
+                "grew from {before} to {to} after a throttle; should creep, not double"
+            );
+        }
+    }
+
+    #[test]
+    fn it_settles_when_additions_stop_paying() {
+        // The fast climb is disabled here so this exercises steady state. While
+        // doubling, a flat aggregate necessarily halves the per-connection rate,
+        // which is diagnosed as PerConnCollapse rather than diminishing returns.
+        let policy = ConnPolicy { fast_ramp_steps: 0, ..ConnPolicy::default() };
         let mut clock = 0;
         let mut controller = ConnController::new(policy, clock);
 

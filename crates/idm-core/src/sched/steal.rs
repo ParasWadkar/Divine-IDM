@@ -116,8 +116,14 @@ pub struct StealPolicy {
     /// A remainder this small is drained rather than split: the bytes are
     /// already coming and are usable.
     pub drain_threshold: u64,
-    /// Hedging only applies once the whole download is this close to done.
+    /// Hedging only applies once the whole download is this close to done,
+    /// *and* within [`hedge_remaining_frac`](Self::hedge_remaining_frac) of
+    /// the file. An absolute window alone makes the entire download look like
+    /// the endgame on any file smaller than it, so hedges fire from the first
+    /// moment and duplicate enormous amounts of work.
     pub hedge_window: u64,
+    /// Hedge only once remaining is below this fraction of the whole file.
+    pub hedge_remaining_frac: f64,
     /// A hedge needs the straggler to be at least this slow in absolute terms.
     pub hedge_min_eta_secs: f64,
     /// ...and this many times worse than the median claim.
@@ -139,6 +145,7 @@ impl Default for StealPolicy {
             split_cooldown_ms: 1500,
             drain_threshold: 256 << 10,
             hedge_window: 32 << 20,
+            hedge_remaining_frac: 0.25,
             hedge_min_eta_secs: 1.5,
             hedge_eta_multiple: 2.0,
             max_hedges: 2,
@@ -198,6 +205,7 @@ pub fn next_action(
     claims: &[ClaimSnapshot],
     thief_rate_bps: f64,
     total_remaining: u64,
+    total: u64,
     hedges_used: u8,
     steal_tokens: u32,
     policy: &StealPolicy,
@@ -213,7 +221,7 @@ pub fn next_action(
         Ok(action) => action,
         Err(split_reason) => {
             // Splitting cannot help, so consider racing the straggler instead.
-            match plan_hedge(claims, total_remaining, hedges_used, policy) {
+            match plan_hedge(claims, total_remaining, total, hedges_used, policy) {
                 Ok(action) => action,
                 // Hedging is the last resort, so its refusal is the reason
                 // nothing at all happened -- except when there was never
@@ -311,14 +319,18 @@ pub fn plan_split(
 pub fn plan_hedge(
     claims: &[ClaimSnapshot],
     total_remaining: u64,
+    total: u64,
     hedges_used: u8,
     policy: &StealPolicy,
 ) -> Result<Action, IdleReason> {
     if hedges_used >= policy.max_hedges {
         return Err(IdleReason::HedgeExhausted);
     }
-    // Duplicating work costs bandwidth, so only in the endgame.
-    if total_remaining >= policy.hedge_window {
+    // Duplicating work costs bandwidth, so only in the endgame -- judged both
+    // absolutely and relative to the file, or a file smaller than the window
+    // is "endgame" from its first byte.
+    let relative_limit = (total as f64 * policy.hedge_remaining_frac) as u64;
+    if total_remaining >= policy.hedge_window || total_remaining >= relative_limit.max(1) {
         return Err(IdleReason::NotEndgame);
     }
 
@@ -395,8 +407,16 @@ mod tests {
     fn free_work_is_always_preferred_to_stealing() {
         let gap = ByteRange::new(0, 8 * MIB);
         let claims = [claim(1, 100 * MIB, 200 * MIB, 100 * MIB, 1000.0)];
-        let action =
-            next_action(Some(gap), &claims, FAST, 200 * MIB, 0, 8, &StealPolicy::default());
+        let action = next_action(
+            Some(gap),
+            &claims,
+            FAST,
+            200 * MIB,
+            800 * MIB,
+            0,
+            8,
+            &StealPolicy::default(),
+        );
         assert_eq!(action, Action::TakeGap(gap), "stole when free work existed");
     }
 
@@ -409,7 +429,7 @@ mod tests {
         let claims = [claim(1, 0, 256 * MIB, 0, donor_rate)];
 
         let Action::Split { at, taken, .. } =
-            next_action(None, &claims, FAST, 256 * MIB, 0, 8, &policy)
+            next_action(None, &claims, FAST, 256 * MIB, 1024 * MIB, 0, 8, &policy)
         else {
             panic!("expected a split");
         };
@@ -430,7 +450,8 @@ mod tests {
         // would still discard whatever is buffered.
         let policy = StealPolicy::default();
         let claims = [claim(1, 0, 256 * MIB, 0, 1000.0)];
-        let Action::Split { at, .. } = next_action(None, &claims, FAST, 256 * MIB, 0, 8, &policy)
+        let Action::Split { at, .. } =
+            next_action(None, &claims, FAST, 256 * MIB, 1024 * MIB, 0, 8, &policy)
         else {
             panic!("expected a split");
         };
@@ -445,7 +466,7 @@ mod tests {
             claim(2, 400 * MIB, 440 * MIB, 400 * MIB, 1000.0), // small and crawling
         ];
         let Action::Split { donor, .. } =
-            next_action(None, &claims, FAST, 440 * MIB, 0, 8, &StealPolicy::default())
+            next_action(None, &claims, FAST, 440 * MIB, 1760 * MIB, 0, 8, &StealPolicy::default())
         else {
             panic!("expected a split");
         };
@@ -459,7 +480,7 @@ mod tests {
             claim(2, 100 * MIB, 200 * MIB, 100 * MIB, 0.0), // stalled
         ];
         let Action::Split { donor, .. } =
-            next_action(None, &claims, FAST, 200 * MIB, 0, 8, &StealPolicy::default())
+            next_action(None, &claims, FAST, 200 * MIB, 800 * MIB, 0, 8, &StealPolicy::default())
         else {
             panic!("expected a split");
         };
@@ -568,7 +589,7 @@ mod tests {
         // Nothing left to split: one claim, 6 MiB remaining at 2 MB/s, which is
         // three seconds of nobody else doing anything.
         let claims = [claim(1, 0, 100 * MIB, 94 * MIB, 2.0 * 1_000_000.0)];
-        let action = next_action(None, &claims, FAST, 6 * MIB, 0, 8, &policy);
+        let action = next_action(None, &claims, FAST, 6 * MIB, 400 * MIB, 0, 8, &policy);
 
         let Action::Hedge { donor, range } = action else {
             panic!("expected a hedge, got {action:?}");
@@ -586,9 +607,27 @@ mod tests {
         let policy = StealPolicy::default();
         let only = [claim(1, 0, 100 * MIB, 94 * MIB, 2.0 * 1_000_000.0)];
         assert!(
-            plan_hedge(&only, 6 * MIB, 0, &policy).is_ok(),
+            plan_hedge(&only, 6 * MIB, 400 * MIB, 0, &policy).is_ok(),
             "a single slow claim must be hedgeable"
         );
+    }
+
+    #[test]
+    fn a_file_smaller_than_the_window_is_not_endgame_from_the_start() {
+        // The regression the benchmark caught: with only an absolute window,
+        // every file under 32 MiB looked like the endgame from its first byte,
+        // so hedges fired immediately and served three times the file.
+        let policy = StealPolicy::default();
+        let total = 16 * MIB;
+        let claims = [claim(1, 0, total, MIB, 2.0 * 1_000_000.0)];
+        assert_eq!(
+            plan_hedge(&claims, 15 * MIB, total, 0, &policy).unwrap_err(),
+            IdleReason::NotEndgame,
+            "15 of 16 MiB outstanding is the beginning, not the endgame"
+        );
+        // The last quarter of the same small file does qualify.
+        let late = [claim(1, 0, total, 13 * MIB, 2.0 * 1_000_000.0)];
+        assert!(plan_hedge(&late, 3 * MIB, total, 0, &policy).is_ok());
     }
 
     #[test]
@@ -597,7 +636,10 @@ mod tests {
         // Same slow claim, but plenty of the file still outstanding: hedging
         // here would just duplicate work that parallelism is already covering.
         let claims = [claim(1, 0, 400 * MIB, 396 * MIB, 2.0 * 1_000_000.0)];
-        assert_eq!(plan_hedge(&claims, 300 * MIB, 0, &policy).unwrap_err(), IdleReason::NotEndgame);
+        assert_eq!(
+            plan_hedge(&claims, 300 * MIB, 1200 * MIB, 0, &policy).unwrap_err(),
+            IdleReason::NotEndgame
+        );
     }
 
     #[test]
@@ -611,7 +653,10 @@ mod tests {
             claim(2, 10 * MIB, 20 * MIB, 18 * MIB, rate),
             claim(3, 20 * MIB, 30 * MIB, 28 * MIB, rate),
         ];
-        assert_eq!(plan_hedge(&claims, 6 * MIB, 0, &policy).unwrap_err(), IdleReason::NoStraggler);
+        assert_eq!(
+            plan_hedge(&claims, 6 * MIB, 400 * MIB, 0, &policy).unwrap_err(),
+            IdleReason::NoStraggler
+        );
     }
 
     #[test]
@@ -623,7 +668,9 @@ mod tests {
             claim(2, 10 * MIB, 20 * MIB, 19 * MIB, 20.0 * 1_000_000.0),
             claim(3, 20 * MIB, 30 * MIB, 22 * MIB, 500_000.0),
         ];
-        let Action::Hedge { donor, .. } = plan_hedge(&claims, 10 * MIB, 0, &policy).unwrap() else {
+        let Action::Hedge { donor, .. } =
+            plan_hedge(&claims, 10 * MIB, 400 * MIB, 0, &policy).unwrap()
+        else {
             panic!("expected a hedge");
         };
         assert_eq!(donor, ClaimId(3));
@@ -634,7 +681,7 @@ mod tests {
         let policy = StealPolicy::default();
         let claims = [claim(1, 0, 100 * MIB, 94 * MIB, 2.0 * 1_000_000.0)];
         assert_eq!(
-            plan_hedge(&claims, 6 * MIB, policy.max_hedges, &policy).unwrap_err(),
+            plan_hedge(&claims, 6 * MIB, 400 * MIB, policy.max_hedges, &policy).unwrap_err(),
             IdleReason::HedgeExhausted
         );
     }
@@ -642,7 +689,7 @@ mod tests {
     #[test]
     fn nothing_in_flight_is_reported_as_such() {
         assert_eq!(
-            next_action(None, &[], FAST, 0, 0, 8, &StealPolicy::default()),
+            next_action(None, &[], FAST, 0, 0, 0, 8, &StealPolicy::default()),
             Action::Idle(IdleReason::NothingInFlight)
         );
     }
@@ -653,7 +700,7 @@ mod tests {
         let done = claim(1, 0, 50 * MIB, 50 * MIB, FAST); // cursor at the end
         let live = claim(2, 50 * MIB, 300 * MIB, 50 * MIB, 1000.0);
         let Action::Split { donor, .. } =
-            next_action(None, &[done, live], FAST, 250 * MIB, 0, 8, &policy)
+            next_action(None, &[done, live], FAST, 250 * MIB, 1000 * MIB, 0, 8, &policy)
         else {
             panic!("expected a split");
         };
@@ -668,7 +715,8 @@ mod tests {
         let original = ByteRange::new(0, 512 * MIB);
         let mut claims = vec![claim(1, original.start(), original.end(), 0, 1000.0)];
         for next_id in 2u32..8 {
-            let action = next_action(None, &claims, FAST, original.len(), 0, 8, &policy);
+            let action =
+                next_action(None, &claims, FAST, original.len(), original.len() * 4, 0, 8, &policy);
             let Action::Split { donor, at, taken } = action else { break };
 
             let donor_index =

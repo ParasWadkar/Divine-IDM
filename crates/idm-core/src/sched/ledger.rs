@@ -29,6 +29,16 @@ pub const MIN_NEW_CLAIM: u64 = 2 << 20;
 pub const MIN_CLAIM: u64 = 8 << 20;
 pub const MAX_CLAIM: u64 = 64 << 20;
 
+/// Absolute smallest claim, below which a request costs more than it moves.
+///
+/// [`MIN_CLAIM`] is the *preferred* floor, but it cannot be the hard one: on a
+/// 16 MiB file an 8 MiB floor yields two claims however many connections are
+/// open, so the file downloads at twice one connection's rate while fourteen
+/// sit idle. Worse, the connection controller then sees aggregate throughput
+/// refusing to grow as it adds connections and misreads a
+/// per-connection-shaped origin as a per-IP-shaped one.
+pub const HARD_MIN_CLAIM: u64 = 256 << 10;
+
 /// Files below this never get more than one connection, whatever the
 /// connection count says. Handshakes and slow-start dominate here, so
 /// splitting a 400 KiB file sixteen ways is sixteen handshakes to move 25 KiB
@@ -46,7 +56,9 @@ const CLAIMS_PER_CONNECTION: u64 = 4;
 pub fn claim_size(remaining: u64, connections: u32) -> u64 {
     let connections = u64::from(connections.max(1));
     let target = remaining / (CLAIMS_PER_CONNECTION * connections);
-    target.clamp(MIN_CLAIM, MAX_CLAIM).min(remaining.max(1))
+    // Shrink the floor on small files so every connection still gets work.
+    let floor = MIN_CLAIM.min(remaining / connections).max(HARD_MIN_CLAIM);
+    target.clamp(floor, MAX_CLAIM).min(remaining.max(1))
 }
 
 /// Whether a download should use a single connection regardless of tuning.
@@ -215,7 +227,9 @@ mod tests {
         // Near the end it bottoms out at the floor rather than issuing
         // pointlessly tiny requests.
         assert_eq!(claim_size(64 * MIB, 8), MIN_CLAIM);
-        assert_eq!(claim_size(MIB, 16), MIN_CLAIM.min(MIB));
+        // A small file must still be divisible: the preferred 8 MiB floor
+        // gives way to the hard floor rather than collapsing to one claim.
+        assert_eq!(claim_size(MIB, 16), HARD_MIN_CLAIM);
     }
 
     #[test]
@@ -228,6 +242,29 @@ mod tests {
         assert_eq!(claim_size(remaining, 4), 32 * MIB);
         assert_eq!(claim_size(remaining, 16), 8 * MIB);
         assert!(claim_size(remaining, 16) < claim_size(remaining, 4));
+    }
+
+    #[test]
+    fn a_small_file_is_still_divided_across_its_connections() {
+        // The regression: an 8 MiB preferred floor yielded two claims on a
+        // 16 MiB file however many connections were open, so most sat idle.
+        let total = 16 * MIB;
+        for connections in [4u32, 8, 16] {
+            let size = claim_size(total, connections);
+            let claims = total / size;
+            assert!(
+                claims >= u64::from(connections).min(total / HARD_MIN_CLAIM),
+                "{connections} connections got only {claims} claims of {size} bytes"
+            );
+        }
+    }
+
+    #[test]
+    fn claims_never_shrink_below_the_hard_floor() {
+        // Below this a request costs more than it moves.
+        for connections in [1u32, 8, 64, 1024] {
+            assert!(claim_size(4 * MIB, connections) >= HARD_MIN_CLAIM);
+        }
     }
 
     #[test]
@@ -349,9 +386,17 @@ mod tests {
         let durable: RangeSet = [ByteRange::new(0, 8 * MIB)].into_iter().collect();
         let mut ledger = WorkLedger::resumed(total, durable);
 
-        let claim = ledger.next_claim(8, None).expect("the tail must still be claimable");
-        assert_eq!(claim, ByteRange::new(8 * MIB, 9 * MIB));
-        ledger.mark_durable(claim);
+        // The tail is claimable -- now in several pieces, since the floor
+        // adapts so the open connections all get work -- and together those
+        // pieces must cover exactly the remaining megabyte.
+        let mut claimed = Vec::new();
+        while let Some(claim) = ledger.next_claim(8, None) {
+            claimed.push(claim);
+            ledger.mark_durable(claim);
+        }
+        assert!(!claimed.is_empty(), "the tail must still be claimable");
+        let tiled: RangeSet = claimed.iter().copied().collect();
+        assert_eq!(tiled.iter().next(), Some(ByteRange::new(8 * MIB, 9 * MIB)));
         assert!(ledger.is_complete());
     }
 
