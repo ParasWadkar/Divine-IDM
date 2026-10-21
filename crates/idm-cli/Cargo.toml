@@ -13,10 +13,15 @@ path = "src/main.rs"
 
 [dependencies]
 idm-core = { path = "../idm-core" }
+idm-ipc = { path = "../idm-ipc" }
 idm-net = { path = "../idm-net" }
 clap.workspace = true
+serde_json.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "time"] }
 tracing.workspace = true
 
 [lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
+
+[dev-dependencies]
+tempfile.workspace = true

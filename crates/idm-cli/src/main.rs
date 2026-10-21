@@ -9,14 +9,21 @@ use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
 use std::time::Duration;
 
+mod serve;
+
 use clap::Parser;
 use idm_net::download::{DownloadConfig, DownloadReport, Progress, download_with_progress};
 
 #[derive(Parser, Debug)]
 #[command(name = "idm", about = "Divine IDM — a parallel, resumable downloader", version)]
 struct Args {
-    /// URL to download.
-    url: String,
+    /// URL to download. Omitted when running with --serve.
+    url: Option<String>,
+
+    /// Run as the local endpoint the browser extension talks to, instead of
+    /// downloading one URL and exiting.
+    #[arg(long)]
+    serve: bool,
 
     /// Directory to write into.
     #[arg(short = 'o', long, default_value = ".")]
@@ -151,7 +158,22 @@ async fn main() -> std::process::ExitCode {
     let args = Args::parse();
     tracing_subscriber_init();
 
-    let mut config = DownloadConfig::new(&args.url, &args.out);
+    if args.serve {
+        return match serve::run(args.out.clone(), args.max_connections.max(1)).await {
+            Ok(()) => std::process::ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("error: {error}");
+                std::process::ExitCode::FAILURE
+            }
+        };
+    }
+
+    let Some(url) = args.url.clone() else {
+        eprintln!("error: a URL is required unless --serve is given");
+        return std::process::ExitCode::FAILURE;
+    };
+
+    let mut config = DownloadConfig::new(&url, &args.out);
     config.filename = args.name.clone();
     config.fixed_connections = args.connections;
     config.conn.per_host_max = args.max_connections.max(1);

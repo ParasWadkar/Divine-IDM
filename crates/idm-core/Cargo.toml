@@ -12,6 +12,7 @@ thiserror.workspace = true
 tracing.workspace = true
 crc32c.workspace = true
 bytes.workspace = true
+tokio = { workspace = true, features = ["time", "rt"] }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", features = [
@@ -21,6 +22,8 @@ windows = { version = "0.62", features = [
     "Win32_System_IO",
     "Win32_System_Ioctl",
     "Win32_System_SystemServices",
+    "Win32_System_Power",
+    "Win32_System_Shutdown",
     "Win32_System_Threading",
     "Win32_System_WindowsProgramming",
 ] }
@@ -28,6 +31,8 @@ windows = { version = "0.62", features = [
 [dev-dependencies]
 proptest.workspace = true
 tempfile.workspace = true
+# "test-util" gives paused time, so countdown tests run instantly.
+tokio = { workspace = true, features = ["macros", "rt", "time", "test-util"] }
 
 [lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

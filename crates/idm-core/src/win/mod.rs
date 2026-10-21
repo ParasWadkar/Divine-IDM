@@ -4,6 +4,7 @@
 //! tests, rather than scattered through the writer and the journal.
 
 mod identity;
+pub mod power;
 pub mod prealloc;
 pub mod privilege;
 pub mod volume;
