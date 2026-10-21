@@ -1,0 +1,13 @@
+# Normalise line endings to LF in the repository and in the working tree.
+# Without this, Git converts to CRLF on checkout here and every file shows up
+# as modified on another machine. Pinned at the first commit so the history
+# never needs a line-ending rewrite later.
+* text=auto eol=lf
+
+# Binary-ish assets that must never be touched.
+*.png binary
+*.jpg binary
+*.ico binary
+*.exe binary
+*.dll binary
+*.pdb binary

@@ -1,0 +1,13 @@
+/target
+**/target
+/sidecars/*
+!/sidecars/.gitkeep
+!/sidecars/manifest.json
+/app/ui/node_modules
+/app/ui/dist
+/extension/**/node_modules
+/extension/**/dist
+*.idmpart
+*.idmjrn
+.DS_Store
+Thumbs.db

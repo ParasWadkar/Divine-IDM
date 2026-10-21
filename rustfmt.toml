@@ -1,0 +1,8 @@
+edition = "2024"
+max_width = 100
+# Keep short struct literals, calls and arrays on one line rather than
+# exploding `Self { start, end }` across four. Byte-range code reads far better
+# compact, and max_width still caps it.
+use_small_heuristics = "Max"
+use_field_init_shorthand = true
+use_try_shorthand = true
