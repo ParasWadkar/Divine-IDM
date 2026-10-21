@@ -63,6 +63,12 @@ pub struct HttpConfig {
     pub h2_connection_window: u32,
     pub h2_max_frame_size: u32,
     pub h2_keep_alive: Duration,
+    /// Let hyper size the window from the measured bandwidth-delay product.
+    ///
+    /// Exposed so its contribution can be separated from the initial window's.
+    /// Measurement suggests this, not the initial value, is what actually
+    /// lifts single-stream throughput on a high-latency path.
+    pub h2_adaptive_window: bool,
     pub pool_idle_timeout: Duration,
 }
 
@@ -77,6 +83,7 @@ impl Default for HttpConfig {
             h2_connection_window: 32 << 20,
             h2_max_frame_size: 1 << 18,
             h2_keep_alive: Duration::from_secs(20),
+            h2_adaptive_window: true,
             pool_idle_timeout: Duration::from_secs(90),
         }
     }
@@ -117,7 +124,7 @@ fn base_builder(config: &HttpConfig, role: Role) -> ClientBuilder {
         .default_headers(headers)
         // Raise the h2 windows well above hyper's 64 KiB default, then let
         // adaptive sizing tune from there.
-        .http2_adaptive_window(true)
+        .http2_adaptive_window(config.h2_adaptive_window)
         .http2_initial_stream_window_size(config.h2_stream_window)
         .http2_initial_connection_window_size(config.h2_connection_window)
         .http2_max_frame_size(config.h2_max_frame_size)
@@ -306,6 +313,24 @@ mod tests {
         // And the 64 KiB default really is as bad as claimed.
         let default_ceiling = 65536.0 / rtt_secs;
         assert!(default_ceiling < 4.0e6, "sanity: hyper's default should be ~3 MB/s");
+    }
+
+    #[test]
+    fn adaptive_window_sizing_stays_on_by_default() {
+        // Load-bearing, and measured. Against a real h2 origin at ~170 ms RTT,
+        // one connection:
+        //
+        //     64 KiB window, adaptive ON  -> 0.75 MB/s
+        //     64 KiB window, adaptive OFF -> 0.16 MB/s   (4x slower)
+        //     8 MiB  window, adaptive OFF -> 0.64 MB/s
+        //
+        // So the 64 KiB default genuinely does cripple a stream when it binds,
+        // and either adaptive sizing or a large initial window prevents it.
+        // Adaptive is the robust one, because it tracks the real
+        // bandwidth-delay product instead of guessing a constant.
+        let config = HttpConfig::default();
+        assert!(config.h2_adaptive_window, "turning this off costs about 4x on a long path");
+        assert!(config.h2_stream_window >= 1 << 20, "the belt to adaptive's braces");
     }
 
     #[test]

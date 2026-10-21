@@ -47,6 +47,10 @@ struct Args {
     #[arg(long)]
     h2_window: Option<u32>,
 
+    /// Disable HTTP/2 adaptive window sizing.
+    #[arg(long)]
+    no_h2_adaptive: bool,
+
     /// Use SetFileValidData to skip NTFS zero-filling.
     ///
     /// Faster on volumes without sparse support, but it exposes previously
@@ -152,6 +156,7 @@ async fn main() -> std::process::ExitCode {
     config.fixed_connections = args.connections;
     config.conn.per_host_max = args.max_connections.max(1);
     config.allow_set_valid_data = args.aggressive_prealloc;
+    config.http.h2_adaptive_window = !args.no_h2_adaptive;
     if let Some(window) = args.h2_window {
         config.http.h2_stream_window = window;
         config.http.h2_connection_window = window.saturating_mul(4).max(window);
