@@ -1,0 +1,26 @@
+[package]
+name = "idm-net"
+description = "Transport adapters: HTTP ranged fetching wired to the core scheduler."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+idm-core = { path = "../idm-core" }
+bytes.workspace = true
+httpdate.workspace = true
+reqwest.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time"] }
+tokio-stream.workspace = true
+tracing.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["full"] }
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"

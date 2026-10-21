@@ -7,11 +7,13 @@
 
 pub mod conn;
 pub mod ledger;
+pub mod live;
 pub mod probe;
 pub mod steal;
 
 pub use conn::{ConnController, ConnDecision, ConnPolicy, HostProfile, Observation, SettleReason};
 pub use ledger::{WorkLedger, claim_size, force_single_connection};
+pub use live::LiveClaim;
 pub use probe::{ProbeOutcome, ResponseFacts, RestartReason, classify};
 pub use steal::{Action, ClaimSnapshot, IdleReason, Protocol, StealPolicy, next_action};
 

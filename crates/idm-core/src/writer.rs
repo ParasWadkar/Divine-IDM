@@ -48,7 +48,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
+use std::sync::mpsc::{Receiver, Sender, SyncSender, channel, sync_channel};
 use std::thread::JoinHandle;
 
 use bytes::Bytes;
@@ -144,9 +144,6 @@ pub struct WriterConfig {
     pub io_batch: usize,
     pub region_size: u64,
     pub high_water: usize,
-    /// Bounded queue depth per shard, in jobs. Memory is bounded in *bytes* by
-    /// the permit budget; this just stops the channel growing without limit.
-    pub queue_depth: usize,
     /// How long to hold a short run waiting for neighbours. See
     /// [`DEFAULT_LINGER`].
     pub linger: std::time::Duration,
@@ -161,7 +158,6 @@ impl WriterConfig {
             io_batch: DEFAULT_IO_BATCH,
             region_size: DEFAULT_REGION_SIZE,
             high_water: DEFAULT_HIGH_WATER,
-            queue_depth: 64,
             linger: DEFAULT_LINGER,
         }
     }
@@ -452,8 +448,47 @@ impl Shard {
 }
 
 struct ShardHandle {
-    tx: SyncSender<ShardMsg>,
+    tx: Sender<ShardMsg>,
     thread: Option<JoinHandle<()>>,
+}
+
+/// Which shard owns an offset. Region-based so each shard writes a
+/// near-sequential stream and no two shards touch the same 4 KiB block.
+fn shard_index(offset: u64, region_size: u64, shards: usize) -> usize {
+    ((offset / region_size.max(1)) % shards as u64) as usize
+}
+
+/// A cloneable way to queue writes.
+///
+/// `std::sync::mpsc::Sender` is `Send` but not `Sync`, so a shared `&Writer`
+/// cannot be used to queue from several concurrent fetch tasks. Each task takes
+/// its own clone of this instead, which costs nothing and keeps the writer's
+/// channels lock-free.
+#[derive(Clone)]
+pub struct WriterHandle {
+    shards: Vec<Sender<ShardMsg>>,
+    region_size: u64,
+}
+
+impl WriterHandle {
+    /// Queues a job. Never blocks; memory is bounded by the caller's budget
+    /// permit, not by a queue depth.
+    pub fn write(&self, job: WriteJob) -> io::Result<()> {
+        let index = shard_index(job.offset, self.region_size, self.shards.len());
+        self.shards[index]
+            .send(ShardMsg::Write(job))
+            .map_err(|_| io::Error::other("writer shard has stopped"))
+    }
+
+    pub fn shard_count(&self) -> usize {
+        self.shards.len()
+    }
+}
+
+impl std::fmt::Debug for WriterHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WriterHandle").field("shards", &self.shards.len()).finish()
+    }
 }
 
 /// Fans write jobs out to region-owning shards and collects their acks.
@@ -480,7 +515,12 @@ impl Writer {
 
         for index in 0..config.shards {
             let file = File::options().read(true).write(true).open(path)?;
-            let (tx, rx) = sync_channel(config.queue_depth);
+            // Unbounded in *messages*, because memory is already bounded in
+            // *bytes* by the permit budget -- which is the constraint that
+            // actually matters. A bounded queue here would instead make
+            // `write` block, and an async fetcher blocking on it parks a
+            // runtime worker and stalls every other download sharing it.
+            let (tx, rx) = channel();
             let shard = Shard {
                 file,
                 pending: BTreeMap::new(),
@@ -507,13 +547,22 @@ impl Writer {
         Ok((Self { shards, config, path: path.to_path_buf(), issued_bytes, dropped_stale }, ack_rx))
     }
 
-    /// Which shard owns an offset. Region-based so each shard writes a
-    /// near-sequential stream.
-    fn shard_for(&self, offset: u64) -> usize {
-        ((offset / self.config.region_size) % self.shards.len() as u64) as usize
+    /// A cloneable handle for queueing writes from concurrent tasks.
+    pub fn handle(&self) -> WriterHandle {
+        WriterHandle {
+            shards: self.shards.iter().map(|shard| shard.tx.clone()).collect(),
+            region_size: self.config.region_size,
+        }
     }
 
-    /// Queues a job, blocking while the shard's queue is full.
+    fn shard_for(&self, offset: u64) -> usize {
+        shard_index(offset, self.config.region_size, self.shards.len())
+    }
+
+    /// Queues a job. Never blocks; see the channel note in `spawn`.
+    ///
+    /// Bounded memory depends on the caller holding a budget permit for the
+    /// bytes in the job. Without one, nothing caps how much can be queued.
     pub fn write(&self, job: WriteJob) -> io::Result<()> {
         let shard = self.shard_for(job.offset);
         self.shards[shard]
