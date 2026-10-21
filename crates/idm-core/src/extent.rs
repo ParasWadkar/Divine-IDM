@@ -68,6 +68,13 @@ impl ByteRange {
         Ok(Self { start, end })
     }
 
+    /// Const constructor for fixed ranges, e.g. a probe's window. An
+    /// inverted range fails at compile time rather than at run time.
+    pub const fn new_const(start: u64, end: u64) -> Self {
+        assert!(end >= start, "range end precedes start");
+        Self { start, end }
+    }
+
     pub const fn empty_at(offset: u64) -> Self {
         Self { start: offset, end: offset }
     }
