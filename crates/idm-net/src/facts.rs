@@ -45,6 +45,10 @@ pub struct OwnedFacts {
     pub retry_after: Option<Duration>,
     /// The URL actually served, after any redirects the resolver followed.
     pub final_url: String,
+    /// Negotiated protocol, e.g. "HTTP/1.1" or "HTTP/2.0". Worth surfacing:
+    /// the HTTP/2 flow-control window only matters when h2 was actually
+    /// negotiated, so a measurement claiming to test it must prove it did.
+    pub http_version: String,
 }
 
 fn header_string(headers: &HeaderMap, name: reqwest::header::HeaderName) -> Option<String> {
@@ -113,6 +117,7 @@ impl OwnedFacts {
             last_modified_age_secs,
             retry_after,
             final_url: response.url().as_str().to_owned(),
+            http_version: format!("{:?}", response.version()),
         }
     }
 

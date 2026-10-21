@@ -134,6 +134,7 @@ impl Progress {
 #[derive(Debug, Clone)]
 pub struct DownloadReport {
     pub path: PathBuf,
+    pub http_version: String,
     pub total: u64,
     pub elapsed: Duration,
     pub connections_settled_at: u32,
@@ -183,6 +184,7 @@ pub enum DownloadError {
 #[derive(Debug, Clone)]
 pub struct Target {
     pub pinned_url: String,
+    pub http_version: String,
     pub total: u64,
     pub validator: ValidatorKind,
     pub etag: Option<String>,
@@ -221,6 +223,7 @@ pub async fn probe(config: &DownloadConfig) -> Result<Target, DownloadError> {
     match outcome {
         ProbeOutcome::Ranged { total, validator, .. } => Ok(Target {
             pinned_url: facts.final_url.clone(),
+            http_version: facts.http_version.clone(),
             total,
             validator,
             etag: facts.etag.clone(),
@@ -671,6 +674,7 @@ pub async fn download_with_progress<F: FnMut(Progress)>(
 
     Ok(DownloadReport {
         path: final_path,
+        http_version: target.http_version.clone(),
         total: target.total,
         elapsed: started.elapsed(),
         connections_settled_at: target_connections,

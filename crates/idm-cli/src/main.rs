@@ -39,6 +39,14 @@ struct Args {
     #[arg(long, default_value_t = 16)]
     max_connections: u32,
 
+    /// Override the HTTP/2 initial stream window, in bytes.
+    ///
+    /// hyper defaults to 64 KiB, which caps one stream at window/RTT --
+    /// about 3 MB/s at a 20 ms round trip. Exposed so the effect can be
+    /// measured rather than asserted.
+    #[arg(long)]
+    h2_window: Option<u32>,
+
     /// Use SetFileValidData to skip NTFS zero-filling.
     ///
     /// Faster on volumes without sparse support, but it exposes previously
@@ -114,7 +122,8 @@ fn print_json(report: &DownloadReport) {
             "{{\"path\":\"{}\",\"total_bytes\":{},\"elapsed_secs\":{:.4},",
             "\"bytes_per_sec\":{:.1},\"connections\":{},\"lanes\":{},",
             "\"requests\":{},\"steals\":{},\"hedges\":{},\"retries\":{},",
-            "\"resumed_bytes\":{},\"write_mode\":\"{:?}\",\"settled\":\"{:?}\"}}"
+            "\"resumed_bytes\":{},\"write_mode\":\"{:?}\",\"settled\":\"{:?}\",",
+            "\"http_version\":\"{}\"}}"
         ),
         report.path.display().to_string().replace('\\', "\\\\"),
         report.total,
@@ -128,7 +137,8 @@ fn print_json(report: &DownloadReport) {
         report.stats.retries,
         report.resumed_bytes,
         report.write_mode,
-        report.settle_reason
+        report.settle_reason,
+        report.http_version
     );
 }
 
@@ -142,6 +152,10 @@ async fn main() -> std::process::ExitCode {
     config.fixed_connections = args.connections;
     config.conn.per_host_max = args.max_connections.max(1);
     config.allow_set_valid_data = args.aggressive_prealloc;
+    if let Some(window) = args.h2_window {
+        config.http.h2_stream_window = window;
+        config.http.h2_connection_window = window.saturating_mul(4).max(window);
+    }
     config.pin_edges = !args.no_edge_pinning;
     config.referrer = args.referrer.clone();
     config.cookies = args.cookies.clone();
