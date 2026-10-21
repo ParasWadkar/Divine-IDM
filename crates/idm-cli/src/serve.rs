@@ -17,6 +17,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use crate::pairing::{PairingOutcome, PairingStore};
 use idm_core::win::power::{ActionOutcome, ArmedAction, Canceller, PostAction, SystemPower};
 use idm_ipc::protocol::{
     DownloadRequest, JobId, JobState, JobStatus, PostActionSetting, Request, Response, Settings,
@@ -44,6 +45,7 @@ struct Inner {
     jobs: Mutex<HashMap<JobId, JobRecord>>,
     settings: Mutex<Settings>,
     settings_file: PathBuf,
+    pairings: Mutex<PairingStore>,
     /// Cancels an armed post-download action, if one is counting down.
     armed: Mutex<Option<Canceller>>,
 }
@@ -70,6 +72,9 @@ impl Engine {
                 next_id: AtomicU64::new(1),
                 jobs: Mutex::new(HashMap::new()),
                 settings: Mutex::new(load_settings(&settings_file)),
+                pairings: Mutex::new(PairingStore::load(
+                    settings_file.with_file_name("pairings.json"),
+                )),
                 settings_file,
                 armed: Mutex::new(None),
             }),
@@ -115,10 +120,22 @@ impl Engine {
         // The kill switch, enforced here rather than in the extension. An
         // extension-only switch is cosmetic: anything already holding the
         // token could still queue downloads.
-        if client.is_browser() && !settings.browser_integration {
-            return Response::Rejected {
-                reason: "browser integration is switched off in Divine IDM".into(),
+        if client.is_browser() {
+            if !settings.browser_integration {
+                return Response::Rejected {
+                    reason: "browser integration is switched off in Divine IDM".into(),
+                };
+            }
+            // Approved by a human, in the app, before anything is queued.
+            let paired = match &client.client_id {
+                Some(id) => self.inner.pairings.lock().await.is_paired(id),
+                None => false,
             };
+            if !paired {
+                return Response::Rejected {
+                    reason: "this extension is not paired; approve it in Divine IDM".into(),
+                };
+            }
         }
 
         let filename = match self.vet(&request, settings.min_takeover_bytes) {
@@ -248,6 +265,79 @@ async fn finish(
 }
 
 impl Engine {
+    /// Records a pairing request. Never approves it.
+    async fn request_pairing(&self, client: &ClientInfo, label: String) -> Response {
+        let Some(client_id) = client.client_id.clone() else {
+            return Response::Rejected {
+                reason: "this client did not identify itself, so it cannot be paired".into(),
+            };
+        };
+        match self.inner.pairings.lock().await.request(&client_id, &label) {
+            PairingOutcome::AlreadyPaired => Response::PairingApproved,
+            PairingOutcome::Pending { request_id } => {
+                // Deliberately only a notice: approval has to come from the
+                // app, which is a different client on a different connection.
+                eprintln!(
+                    "Pairing requested by {label:?}. Approve with:  idm --approve {request_id}"
+                );
+                Response::PairingPending { request_id }
+            }
+        }
+    }
+
+    /// Managing pairings is refused for browser clients.
+    ///
+    /// Otherwise an extension could approve itself, or enumerate what else is
+    /// connected, which is exactly what pairing exists to prevent.
+    fn refuse_browser(client: &ClientInfo) -> Option<Response> {
+        client.is_browser().then(|| Response::Rejected {
+            reason: "the browser integration cannot manage pairings".into(),
+        })
+    }
+
+    async fn list_pairings(&self, client: &ClientInfo) -> Response {
+        if let Some(refusal) = Self::refuse_browser(client) {
+            return refusal;
+        }
+        let mut store = self.inner.pairings.lock().await;
+        Response::Pairings { paired: store.paired(), pending: store.pending() }
+    }
+
+    async fn approve_pairing(&self, client: &ClientInfo, request_id: String) -> Response {
+        if let Some(refusal) = Self::refuse_browser(client) {
+            return refusal;
+        }
+        match self.inner.pairings.lock().await.approve(&request_id) {
+            Some(paired) => {
+                eprintln!("Paired {:?}.", paired.label);
+                Response::PairingApproved
+            }
+            None => Response::Rejected { reason: "no such pairing request".into() },
+        }
+    }
+
+    async fn deny_pairing(&self, client: &ClientInfo, request_id: String) -> Response {
+        if let Some(refusal) = Self::refuse_browser(client) {
+            return refusal;
+        }
+        if self.inner.pairings.lock().await.deny(&request_id) {
+            Response::Pong
+        } else {
+            Response::Rejected { reason: "no such pairing request".into() }
+        }
+    }
+
+    async fn revoke_pairing(&self, client: &ClientInfo, client_id: String) -> Response {
+        if let Some(refusal) = Self::refuse_browser(client) {
+            return refusal;
+        }
+        if self.inner.pairings.lock().await.revoke(&client_id) {
+            Response::Pong
+        } else {
+            Response::Rejected { reason: "that client was not paired".into() }
+        }
+    }
+
     async fn get_settings(&self) -> Response {
         Response::Settings(self.inner.settings.lock().await.clone())
     }
@@ -382,6 +472,13 @@ impl Handler for Engine {
             Request::Enqueue(req) => self.enqueue(client, req).await,
             Request::Status { id } => self.status(id).await,
             Request::Cancel { id } => self.cancel(id).await,
+            Request::RequestPairing { label } => self.request_pairing(client, label).await,
+            Request::ListPairings => self.list_pairings(client).await,
+            Request::ApprovePairing { request_id } => {
+                self.approve_pairing(client, request_id).await
+            }
+            Request::DenyPairing { request_id } => self.deny_pairing(client, request_id).await,
+            Request::RevokePairing { client_id } => self.revoke_pairing(client, client_id).await,
             Request::GetSettings => self.get_settings().await,
             Request::SetSettings(settings) => self.set_settings(client, settings).await,
             Request::CancelPostAction => self.cancel_post_action().await,
@@ -422,11 +519,21 @@ mod tests {
     }
 
     fn browser() -> ClientInfo {
-        ClientInfo { name: idm_ipc::BROWSER_CLIENT.to_owned() }
+        ClientInfo { name: idm_ipc::BROWSER_CLIENT.to_owned(), client_id: Some("ext-1".to_owned()) }
     }
 
     fn desktop() -> ClientInfo {
-        ClientInfo { name: "desktop".to_owned() }
+        ClientInfo { name: "desktop".to_owned(), client_id: None }
+    }
+
+    /// Walks a browser client through the approval flow.
+    async fn pair(engine: &Engine, client: &ClientInfo) {
+        let Response::PairingPending { request_id } =
+            engine.request_pairing(client, "Test browser".into()).await
+        else {
+            panic!("a new client should land as pending");
+        };
+        engine.approve_pairing(&desktop(), request_id).await;
     }
 
     fn request(url: &str) -> DownloadRequest {
@@ -496,11 +603,85 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_unpaired_browser_is_refused() {
+        // The point of pairing: an extension that nobody approved gets
+        // nothing, even though it holds a valid token.
+        let (_dir, engine) = engine();
+        match engine.enqueue(&browser(), request("https://example.invalid/a.bin")).await {
+            Response::Rejected { reason } => assert!(reason.contains("not paired"), "{reason}"),
+            other => panic!("an unpaired browser should be refused, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_pairing_request_is_never_self_approving() {
+        let (_dir, engine) = engine();
+        let client = browser();
+        let reply = engine.request_pairing(&client, "Evil".into()).await;
+        assert!(matches!(reply, Response::PairingPending { .. }), "{reply:?}");
+
+        // Asking did not grant anything.
+        match engine.enqueue(&client, request("https://example.invalid/a.bin")).await {
+            Response::Rejected { .. } => {}
+            other => panic!("still unpaired, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_browser_cannot_approve_or_enumerate_pairings() {
+        let (_dir, engine) = engine();
+        let client = browser();
+        let Response::PairingPending { request_id } =
+            engine.request_pairing(&client, "Chrome".into()).await
+        else {
+            panic!("expected pending")
+        };
+
+        // Approving itself would defeat the whole mechanism.
+        let self_approval = engine.approve_pairing(&client, request_id.clone()).await;
+        assert!(matches!(self_approval, Response::Rejected { .. }), "{self_approval:?}");
+        // And it must not get to see what else is connected.
+        assert!(matches!(engine.list_pairings(&client).await, Response::Rejected { .. }));
+
+        // The app can.
+        assert!(matches!(
+            engine.approve_pairing(&desktop(), request_id).await,
+            Response::PairingApproved
+        ));
+    }
+
+    #[tokio::test]
+    async fn revoking_stops_an_extension_immediately() {
+        let (_dir, engine) = engine();
+        let client = browser();
+        pair(&engine, &client).await;
+        assert!(matches!(
+            engine.enqueue(&client, request("https://example.invalid/a.bin")).await,
+            Response::Accepted { .. }
+        ));
+
+        engine.revoke_pairing(&desktop(), "ext-1".into()).await;
+        match engine.enqueue(&client, request("https://example.invalid/a.bin")).await {
+            Response::Rejected { reason } => assert!(reason.contains("not paired"), "{reason}"),
+            other => panic!("a revoked client should be refused, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_client_that_will_not_identify_itself_cannot_pair() {
+        let (_dir, engine) = engine();
+        let anonymous = ClientInfo { name: idm_ipc::BROWSER_CLIENT.to_owned(), client_id: None };
+        let reply = engine.request_pairing(&anonymous, "Mystery".into()).await;
+        assert!(matches!(reply, Response::Rejected { .. }), "{reply:?}");
+    }
+
+    #[tokio::test]
     async fn the_kill_switch_blocks_the_browser_but_not_the_app() {
         let (_dir, engine) = engine();
         let req = request("https://example.invalid/big.bin");
+        pair(&engine, &browser()).await;
 
-        // On by default, so the browser works out of the box.
+        // On by default, so a paired browser works.
         let accepted = engine.enqueue(&browser(), req.clone()).await;
         assert!(matches!(accepted, Response::Accepted { .. }), "{accepted:?}");
 

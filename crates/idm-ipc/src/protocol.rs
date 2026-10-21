@@ -108,6 +108,25 @@ impl DownloadRequest {
     }
 }
 
+/// A browser extension the user has approved.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PairedClient {
+    /// Random per-installation id the extension generates once and keeps.
+    pub client_id: String,
+    /// Something the user will recognise, e.g. "Chrome on this PC".
+    pub label: String,
+    pub paired_at_unix: u64,
+}
+
+/// A pairing request waiting on the user.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingPairing {
+    pub request_id: String,
+    pub client_id: String,
+    pub label: String,
+    pub requested_at_unix: u64,
+}
+
 /// What to do once the queue drains.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -155,9 +174,16 @@ impl Default for Settings {
 pub enum Request {
     /// First message on every connection. The token proves the client could
     /// read a file only this user can read.
+    ///
+    /// `client_id` is a stable per-installation identifier used for pairing.
+    /// It is not a credential: it says *which* extension is asking, so the
+    /// user can approve or revoke it. The engine never treats it as proof of
+    /// anything by itself.
     Hello {
         token: String,
         client: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        client_id: Option<String>,
     },
     Enqueue(DownloadRequest),
     /// All jobs, or one.
@@ -167,6 +193,24 @@ pub enum Request {
     },
     Cancel {
         id: JobId,
+    },
+    /// Asks the user to approve this client. Never self-approving: the reply
+    /// is only ever "pending" until a human says otherwise in the app.
+    RequestPairing {
+        label: String,
+    },
+    /// Listing, approving, denying and revoking are all refused for browser
+    /// clients, so a browser can neither pair itself nor see what else is
+    /// paired.
+    ListPairings,
+    ApprovePairing {
+        request_id: String,
+    },
+    DenyPairing {
+        request_id: String,
+    },
+    RevokePairing {
+        client_id: String,
     },
     GetSettings,
     SetSettings(Settings),
@@ -216,6 +260,15 @@ pub enum Response {
     },
     Status {
         jobs: Vec<JobStatus>,
+    },
+    /// Recorded; a human must now approve it in the app.
+    PairingPending {
+        request_id: String,
+    },
+    PairingApproved,
+    Pairings {
+        paired: Vec<PairedClient>,
+        pending: Vec<PendingPairing>,
     },
     Settings(Settings),
     Pong,

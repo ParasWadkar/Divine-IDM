@@ -57,7 +57,7 @@ async fn a_client_connects_and_is_served_over_a_real_pipe() {
     // Give the listener a moment to create its first pipe instance.
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
-    let mut client = IpcClient::connect_at(&endpoint_file, "test").await.expect("connect");
+    let mut client = IpcClient::connect_at(&endpoint_file, "test", None).await.expect("connect");
     assert!(matches!(client.request(Request::Ping).await.unwrap(), Response::Pong));
 
     let accepted = client
@@ -83,7 +83,7 @@ async fn a_client_with_the_wrong_token_is_refused() {
     let tampered_file = endpoint_file.with_file_name("tampered.json");
     tampered.write(&tampered_file).unwrap();
 
-    let outcome = IpcClient::connect_at(&tampered_file, "impostor").await;
+    let outcome = IpcClient::connect_at(&tampered_file, "impostor", None).await;
     assert!(outcome.is_err(), "a wrong token should not connect");
     assert_eq!(
         handler.enqueued.load(Ordering::SeqCst),
@@ -99,8 +99,8 @@ async fn several_clients_are_served_concurrently() {
     let (_dir, endpoint_file, handler) = start();
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
-    let mut first = IpcClient::connect_at(&endpoint_file, "a").await.expect("first");
-    let mut second = IpcClient::connect_at(&endpoint_file, "b").await.expect("second");
+    let mut first = IpcClient::connect_at(&endpoint_file, "a", None).await.expect("first");
+    let mut second = IpcClient::connect_at(&endpoint_file, "b", None).await.expect("second");
 
     assert!(matches!(first.request(Request::Ping).await.unwrap(), Response::Pong));
     assert!(matches!(second.request(Request::Ping).await.unwrap(), Response::Pong));
@@ -121,7 +121,7 @@ async fn several_clients_are_served_concurrently() {
 async fn connecting_without_an_endpoint_file_fails_cleanly() {
     let dir = tempfile::tempdir().unwrap();
     let missing = dir.path().join("nothing.json");
-    let outcome = IpcClient::connect_at(&missing, "test").await;
+    let outcome = IpcClient::connect_at(&missing, "test", None).await;
     assert!(outcome.is_err(), "should report no endpoint rather than hang");
 }
 
@@ -129,7 +129,7 @@ async fn connecting_without_an_endpoint_file_fails_cleanly() {
 async fn a_hostile_url_is_refused_over_the_wire() {
     let (_dir, endpoint_file, handler) = start();
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    let mut client = IpcClient::connect_at(&endpoint_file, "test").await.expect("connect");
+    let mut client = IpcClient::connect_at(&endpoint_file, "test", None).await.expect("connect");
 
     for hostile in [
         "file:///C:/Windows/System32/config/SAM",

@@ -11,7 +11,8 @@ pub mod server;
 
 pub use client::IpcClient;
 pub use protocol::{
-    DownloadRequest, JobId, JobState, JobStatus, PostActionSetting, Request, Response, Settings,
+    DownloadRequest, JobId, JobState, JobStatus, PairedClient, PendingPairing, PostActionSetting,
+    Request, Response, Settings,
 };
 pub use security::{Endpoint, SessionToken, endpoint_path, random_pipe_name};
 pub use server::{BROWSER_CLIENT, ClientInfo, Handler, IpcServer};

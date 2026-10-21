@@ -9,6 +9,7 @@ use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
 use std::time::Duration;
 
+mod pairing;
 mod serve;
 
 use clap::Parser;

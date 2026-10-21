@@ -38,12 +38,22 @@ pub struct IpcClient {
 impl IpcClient {
     /// Connects using the endpoint the engine published.
     pub async fn connect(client_name: &str) -> Result<Self, ClientError> {
-        Self::connect_at(&endpoint_path(), client_name).await
+        Self::connect_at(&endpoint_path(), client_name, None).await
     }
 
-    pub async fn connect_at(endpoint_file: &Path, client_name: &str) -> Result<Self, ClientError> {
+    /// Connects announcing a stable per-installation id, so the engine can
+    /// tell which extension is asking and the user can approve or revoke it.
+    pub async fn connect_as(client_name: &str, client_id: &str) -> Result<Self, ClientError> {
+        Self::connect_at(&endpoint_path(), client_name, Some(client_id)).await
+    }
+
+    pub async fn connect_at(
+        endpoint_file: &Path,
+        client_name: &str,
+        client_id: Option<&str>,
+    ) -> Result<Self, ClientError> {
         let endpoint = Endpoint::read(endpoint_file)?;
-        platform::connect(&endpoint, client_name).await
+        platform::connect(&endpoint, client_name, client_id).await
     }
 
     /// Sends one request and waits for its reply.
@@ -64,6 +74,7 @@ mod platform {
     pub(super) async fn connect(
         endpoint: &Endpoint,
         client_name: &str,
+        client_id: Option<&str>,
     ) -> Result<IpcClient, ClientError> {
         let deadline = std::time::Instant::now() + BUSY_RETRY_FOR;
         let pipe = loop {
@@ -82,8 +93,11 @@ mod platform {
         };
 
         let mut client = IpcClient { pipe };
-        let hello =
-            Request::Hello { token: endpoint.token.clone(), client: client_name.to_owned() };
+        let hello = Request::Hello {
+            token: endpoint.token.clone(),
+            client: client_name.to_owned(),
+            client_id: client_id.map(str::to_owned),
+        };
         write_frame(&mut client.pipe, &hello, MAX_FRAME_BYTES).await?;
         match read_frame::<_, Response>(&mut client.pipe, MAX_FRAME_BYTES).await? {
             Response::Welcome { .. } => Ok(client),
@@ -105,7 +119,11 @@ mod platform {
 mod platform {
     use super::{ClientError, Endpoint, IpcClient, Request, Response};
 
-    pub(super) async fn connect(_: &Endpoint, _: &str) -> Result<IpcClient, ClientError> {
+    pub(super) async fn connect(
+        _: &Endpoint,
+        _: &str,
+        _: Option<&str>,
+    ) -> Result<IpcClient, ClientError> {
         Err(ClientError::Unsupported)
     }
 

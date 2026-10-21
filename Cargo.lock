@@ -671,6 +671,7 @@ dependencies = [
  "idm-core",
  "idm-ipc",
  "idm-net",
+ "serde",
  "serde_json",
  "tempfile",
  "tokio",

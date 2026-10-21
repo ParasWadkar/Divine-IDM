@@ -31,6 +31,8 @@ pub enum ServerError {
 #[derive(Debug, Clone)]
 pub struct ClientInfo {
     pub name: String,
+    /// Stable per-installation id, when the client supplied one.
+    pub client_id: Option<String>,
 }
 
 /// The name the browser native messaging host announces itself with.
@@ -112,14 +114,14 @@ where
     let first: Request = read_frame(stream, MAX_FRAME_BYTES).await?;
     let info;
     match first {
-        Request::Hello { token: presented, client } => {
+        Request::Hello { token: presented, client, client_id } => {
             if !token.matches(&presented) {
                 tracing::warn!(%client, "rejected a client presenting the wrong token");
                 let refusal = Response::Error { message: "authentication failed".into() };
                 write_frame(stream, &refusal, MAX_FRAME_BYTES).await?;
                 return Ok(());
             }
-            info = ClientInfo { name: client };
+            info = ClientInfo { name: client, client_id };
             let welcome = Response::Welcome { version: env!("CARGO_PKG_VERSION").to_owned() };
             write_frame(stream, &welcome, MAX_FRAME_BYTES).await?;
         }
@@ -268,7 +270,11 @@ mod tests {
             &token,
             Arc::clone(&handler),
             vec![
-                Request::Hello { token: token.as_str().into(), client: "test".into() },
+                Request::Hello {
+                    token: token.as_str().into(),
+                    client: "test".into(),
+                    client_id: None,
+                },
                 Request::Ping,
             ],
         )
@@ -287,7 +293,11 @@ mod tests {
             &token,
             Arc::clone(&handler),
             vec![
-                Request::Hello { token: "0".repeat(64), client: "impostor".into() },
+                Request::Hello {
+                    token: "0".repeat(64),
+                    client: "impostor".into(),
+                    client_id: None,
+                },
                 Request::Ping,
             ],
         )
@@ -320,8 +330,16 @@ mod tests {
             &token,
             Arc::clone(&handler),
             vec![
-                Request::Hello { token: token.as_str().into(), client: "test".into() },
-                Request::Hello { token: token.as_str().into(), client: "test".into() },
+                Request::Hello {
+                    token: token.as_str().into(),
+                    client: "test".into(),
+                    client_id: None,
+                },
+                Request::Hello {
+                    token: token.as_str().into(),
+                    client: "test".into(),
+                    client_id: None,
+                },
             ],
         )
         .await;
@@ -338,7 +356,11 @@ mod tests {
             &token,
             Arc::clone(&handler),
             vec![
-                Request::Hello { token: token.as_str().into(), client: "test".into() },
+                Request::Hello {
+                    token: token.as_str().into(),
+                    client: "test".into(),
+                    client_id: None,
+                },
                 Request::Enqueue(DownloadRequest {
                     url: "file:///C:/Windows/System32/config/SAM".into(),
                     ..Default::default()

@@ -94,6 +94,15 @@ pub fn endpoint_path() -> PathBuf {
     base.join("DivineIDM").join("endpoint.json")
 }
 
+/// A short random identifier, for things that must be unguessable but are
+/// not secrets, such as a pairing request id.
+pub fn random_id() -> String {
+    use rand::RngCore;
+    let mut bytes = [0u8; 12];
+    rand::rng().fill_bytes(&mut bytes);
+    hex(&bytes)
+}
+
 /// An unguessable pipe name, so the endpoint cannot simply be found by name.
 pub fn random_pipe_name() -> String {
     use rand::RngCore;
