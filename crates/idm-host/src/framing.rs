@@ -40,10 +40,8 @@ pub enum FrameError {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum FromExtension {
-    /// Sent once per connection, before anything else.
+    /// Greets the engine, which doubles as a pairing request.
     Hello {
-        /// Random per-installation id the extension generates and keeps.
-        client_id: String,
         /// Shown to the user in the pairing prompt.
         label: String,
     },
@@ -107,8 +105,25 @@ pub enum ToExtension {
     },
 }
 
+/// A message plus the identity of the extension that sent it.
+///
+/// The id rides on *every* message rather than being established once by a
+/// greeting, because `chrome.runtime.sendNativeMessage` starts a new host
+/// process per message and closes it after the reply. A host that remembered
+/// the id between messages would pass a test using one long-lived process and
+/// then fail against a real browser, where the process that was greeted is
+/// already gone by the time a download arrives.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Envelope {
+    /// Absent only from clients that do not pair, which the engine refuses.
+    #[serde(default)]
+    pub client_id: Option<String>,
+    #[serde(flatten)]
+    pub message: FromExtension,
+}
+
 /// Reads one native messaging frame from `reader`.
-pub async fn read_message<R>(reader: &mut R) -> Result<FromExtension, FrameError>
+pub async fn read_message<R>(reader: &mut R) -> Result<Envelope, FrameError>
 where
     R: tokio::io::AsyncRead + Unpin,
 {
@@ -174,7 +189,7 @@ mod tests {
             r#"{"type":"download","url":"https://example.invalid/a.bin","size_hint":1048576}"#,
         );
         let mut cursor = std::io::Cursor::new(raw);
-        match read_message(&mut cursor).await.unwrap() {
+        match read_message(&mut cursor).await.unwrap().message {
             FromExtension::Download { url, size_hint, .. } => {
                 assert_eq!(url, "https://example.invalid/a.bin");
                 assert_eq!(size_hint, Some(1 << 20));
@@ -187,7 +202,27 @@ mod tests {
     async fn optional_fields_may_be_omitted() {
         let raw = framed(r#"{"type":"download","url":"https://example.invalid/a.bin"}"#);
         let mut cursor = std::io::Cursor::new(raw);
-        assert!(matches!(read_message(&mut cursor).await.unwrap(), FromExtension::Download { .. }));
+        assert!(matches!(
+            read_message(&mut cursor).await.unwrap().message,
+            FromExtension::Download { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn every_message_carries_the_client_id() {
+        // The regression this guards cost a working end-to-end chain: Chrome
+        // starts a fresh host process per message, so an id supplied only in
+        // a greeting is gone by the time a download arrives.
+        for body in [
+            r#"{"type":"download","client_id":"abc","url":"https://x.invalid/a"}"#,
+            r#"{"type":"hello","client_id":"abc","label":"Chrome"}"#,
+            r#"{"type":"get_state","client_id":"abc"}"#,
+            r#"{"type":"ping","client_id":"abc"}"#,
+        ] {
+            let mut cursor = std::io::Cursor::new(framed(body));
+            let envelope = read_message(&mut cursor).await.expect(body);
+            assert_eq!(envelope.client_id.as_deref(), Some("abc"), "{body}");
+        }
     }
 
     #[tokio::test]
@@ -255,7 +290,7 @@ mod tests {
         // Structural, matching the IPC protocol behind it: if a page cannot
         // express a path, it cannot choose where bytes land.
         let shape = r#"{"type":"download","url":"https://x.invalid/a","dir":"C:\\Windows"}"#;
-        let parsed: Result<FromExtension, _> = serde_json::from_str(shape);
+        let parsed: Result<Envelope, _> = serde_json::from_str(shape);
         // The unknown field is ignored rather than honoured; what matters is
         // that no variant has anywhere to put it.
         assert!(parsed.is_ok());

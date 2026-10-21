@@ -19,7 +19,7 @@
 
 mod framing;
 
-use framing::{FromExtension, ToExtension, read_message, write_message};
+use framing::{Envelope, FromExtension, ToExtension, read_message, write_message};
 use idm_ipc::protocol::{DownloadRequest, Request, Response};
 use idm_ipc::{BROWSER_CLIENT, IpcClient};
 
@@ -65,13 +65,17 @@ impl Bridge {
         }
     }
 
-    async fn handle(&mut self, message: FromExtension) -> ToExtension {
-        match message {
-            FromExtension::Hello { client_id, label } => {
-                // Remembering the id is all this does; the engine decides
-                // whether it means anything.
-                self.client_id = Some(client_id);
-                self.engine = None; // reconnect announcing the new id
+    async fn handle(&mut self, envelope: Envelope) -> ToExtension {
+        // The id is taken from every message, never remembered from a previous
+        // one: the process that was greeted has already exited by the time a
+        // download arrives, so per-process memory of it is always empty.
+        if envelope.client_id != self.client_id {
+            self.client_id = envelope.client_id.clone();
+            self.engine = None; // reconnect announcing this id
+        }
+
+        match envelope.message {
+            FromExtension::Hello { label } => {
                 match self.ask(Request::RequestPairing { label }).await {
                     Ok(Response::PairingApproved) => {
                         ToExtension::Ready { version: env!("CARGO_PKG_VERSION").to_owned() }

@@ -111,10 +111,14 @@ async function paintIcon(state) {
  * worker can be stopped at any moment, which would drop a port mid-use. A
  * fresh process per message is a few milliseconds and cannot be left dangling.
  */
-function sendToHost(message) {
+async function sendToHost(message) {
+  // The id travels on every message. A fresh host process handles each one and
+  // exits after replying, so an id sent only with a greeting is already gone by
+  // the time anything else arrives.
+  const withId = { ...message, client_id: await clientId() };
   return new Promise((resolve) => {
     try {
-      api.runtime.sendNativeMessage(HOST, message, (reply) => {
+      api.runtime.sendNativeMessage(HOST, withId, (reply) => {
         const error = api.runtime.lastError;
         if (error) {
           resolve({ type: "unavailable", reason: error.message ?? String(error) });
@@ -130,9 +134,8 @@ function sendToHost(message) {
 
 /** Says hello, which doubles as the pairing request. */
 async function greet() {
-  const id = await clientId();
   const label = `${browserLabel()} on this PC`;
-  const reply = await sendToHost({ type: "hello", client_id: id, label });
+  const reply = await sendToHost({ type: "hello", label });
 
   switch (reply.type) {
     case "ready":
