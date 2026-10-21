@@ -5,6 +5,7 @@
 !/sidecars/manifest.json
 /app/ui/node_modules
 /app/ui/dist
+/extension/dist
 /extension/**/node_modules
 /extension/**/dist
 *.idmpart

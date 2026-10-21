@@ -1,0 +1,23 @@
+[package]
+name = "idm-host"
+description = "Native messaging bridge between browser extensions and the Divine IDM engine."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "idm-host"
+path = "src/main.rs"
+
+[dependencies]
+idm-ipc = { path = "../idm-ipc" }
+serde = { workspace = true }
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt", "macros", "io-std", "io-util", "time"] }
+tracing.workspace = true
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"

@@ -9,6 +9,7 @@ use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
 use std::time::Duration;
 
+mod install;
 mod pairing;
 mod serve;
 
@@ -25,6 +26,47 @@ struct Args {
     /// downloading one URL and exiting.
     #[arg(long)]
     serve: bool,
+
+    /// Register the native messaging host with every browser found.
+    #[arg(long)]
+    install_host: bool,
+
+    /// Remove the native messaging host registration from every browser.
+    #[arg(long)]
+    uninstall_host: bool,
+
+    /// Chromium extension id permitted to launch the host. Repeatable.
+    ///
+    /// Required for Chromium browsers: the id is what the browser checks
+    /// before it will start the host at all, so an empty list would mean any
+    /// extension could.
+    #[arg(long = "extension-id")]
+    extension_ids: Vec<String>,
+
+    /// Gecko extension id permitted to launch the host. Repeatable.
+    #[arg(long = "gecko-id")]
+    gecko_ids: Vec<String>,
+
+    /// Register with every known browser, not only the installed ones, so a
+    /// browser installed later still finds the host.
+    #[arg(long)]
+    all_browsers: bool,
+
+    /// Show pairing requests and paired extensions.
+    #[arg(long)]
+    pairings: bool,
+
+    /// Approve a pending pairing request by its id.
+    #[arg(long)]
+    approve: Option<String>,
+
+    /// Deny a pending pairing request by its id.
+    #[arg(long)]
+    deny: Option<String>,
+
+    /// Revoke a paired extension by its client id.
+    #[arg(long)]
+    revoke: Option<String>,
 
     /// Directory to write into.
     #[arg(short = 'o', long, default_value = ".")]
@@ -159,6 +201,23 @@ async fn main() -> std::process::ExitCode {
     let args = Args::parse();
     tracing_subscriber_init();
 
+    if args.install_host {
+        return run_install(&args);
+    }
+    if args.uninstall_host {
+        let report = install::uninstall();
+        for entry in &report.registered {
+            eprintln!("  removed from {}", entry.label);
+        }
+        if report.registered.is_empty() {
+            eprintln!("nothing was registered");
+        }
+        return std::process::ExitCode::SUCCESS;
+    }
+    if args.pairings || args.approve.is_some() || args.deny.is_some() || args.revoke.is_some() {
+        return run_pairing_command(&args).await;
+    }
+
     if args.serve {
         return match serve::run(args.out.clone(), args.max_connections.max(1)).await {
             Ok(()) => std::process::ExitCode::SUCCESS,
@@ -239,6 +298,127 @@ async fn main() -> std::process::ExitCode {
             eprintln!("error: {error}");
             // The partial file and journal are deliberately left in place so a
             // later run can resume rather than start over.
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+/// Registers the native messaging host with whatever browsers are installed.
+fn run_install(args: &Args) -> std::process::ExitCode {
+    // The host sits beside this binary, which is how it is shipped.
+    let host_path = match std::env::current_exe() {
+        Ok(exe) => exe.with_file_name("idm-host.exe"),
+        Err(error) => {
+            eprintln!("error: cannot locate this executable: {error}");
+            return std::process::ExitCode::FAILURE;
+        }
+    };
+
+    let defaults = install::AllowedCallers::default();
+    let callers = install::AllowedCallers {
+        chromium_ids: args.extension_ids.clone(),
+        gecko_ids: if args.gecko_ids.is_empty() {
+            defaults.gecko_ids
+        } else {
+            args.gecko_ids.clone()
+        },
+    };
+    if callers.chromium_ids.is_empty() {
+        eprintln!(
+            "error: at least one --extension-id is required for Chromium browsers.\n\
+             Load the extension unpacked, copy its ID from the browser's\n\
+             extensions page, and pass it here."
+        );
+        return std::process::ExitCode::FAILURE;
+    }
+
+    match install::install(&host_path, &callers, args.all_browsers, &[]) {
+        Ok(report) => {
+            for entry in &report.registered {
+                let note = if entry.detected { "installed" } else { "pre-registered" };
+                eprintln!("  registered with {} ({note})", entry.label);
+            }
+            if !report.skipped.is_empty() && !args.all_browsers {
+                eprintln!(
+                    "  skipped {} browser(s) that are not installed; use --all-browsers to register anyway",
+                    report.skipped.len()
+                );
+            }
+            for (label, error) in &report.failures {
+                eprintln!("  FAILED for {label}: {error}");
+            }
+            eprintln!("host: {}", host_path.display());
+            std::process::ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("error: {error}");
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+/// Pairing management, which talks to a running engine.
+async fn run_pairing_command(args: &Args) -> std::process::ExitCode {
+    use idm_ipc::{IpcClient, Request, Response};
+
+    // Connecting as "cli" rather than the browser name matters: the engine
+    // refuses pairing management from browser clients.
+    let mut client = match IpcClient::connect("cli").await {
+        Ok(client) => client,
+        Err(error) => {
+            eprintln!("error: no running engine ({error}). Start one with: idm --serve");
+            return std::process::ExitCode::FAILURE;
+        }
+    };
+
+    let request = if let Some(id) = &args.approve {
+        Request::ApprovePairing { request_id: id.clone() }
+    } else if let Some(id) = &args.deny {
+        Request::DenyPairing { request_id: id.clone() }
+    } else if let Some(id) = &args.revoke {
+        Request::RevokePairing { client_id: id.clone() }
+    } else {
+        Request::ListPairings
+    };
+
+    match client.request(request).await {
+        Ok(Response::Pairings { paired, pending }) => {
+            if pending.is_empty() {
+                eprintln!("no pending requests");
+            } else {
+                eprintln!("pending:");
+                for entry in pending {
+                    eprintln!("  {}  {}", entry.request_id, entry.label);
+                }
+            }
+            if paired.is_empty() {
+                eprintln!("no paired extensions");
+            } else {
+                eprintln!("paired:");
+                for entry in paired {
+                    eprintln!("  {}  {}", entry.client_id, entry.label);
+                }
+            }
+            std::process::ExitCode::SUCCESS
+        }
+        Ok(Response::PairingApproved) => {
+            eprintln!("approved");
+            std::process::ExitCode::SUCCESS
+        }
+        Ok(Response::Pong) => {
+            eprintln!("done");
+            std::process::ExitCode::SUCCESS
+        }
+        Ok(Response::Rejected { reason }) => {
+            eprintln!("refused: {reason}");
+            std::process::ExitCode::FAILURE
+        }
+        Ok(other) => {
+            eprintln!("unexpected reply: {other:?}");
+            std::process::ExitCode::FAILURE
+        }
+        Err(error) => {
+            eprintln!("error: {error}");
             std::process::ExitCode::FAILURE
         }
     }

@@ -674,8 +674,10 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "thiserror",
  "tokio",
  "tracing",
+ "windows",
 ]
 
 [[package]]
@@ -690,6 +692,18 @@ dependencies = [
  "tokio",
  "tracing",
  "windows",
+]
+
+[[package]]
+name = "idm-host"
+version = "0.1.0"
+dependencies = [
+ "idm-ipc",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

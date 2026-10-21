@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Divine IDM</title>
+    <style>
+      :root { color-scheme: light dark; }
+      body {
+        font: 13px/1.45 system-ui, sans-serif;
+        margin: 0; padding: 14px; width: 280px;
+        background: Canvas; color: CanvasText;
+      }
+      h1 { font-size: 14px; margin: 0 0 10px; }
+      .status { padding: 8px 10px; border-radius: 6px; margin-bottom: 12px; }
+      .ok   { background: #e7f5ec; color: #14532d; }
+      .warn { background: #fef3c7; color: #78350f; }
+      .bad  { background: #fee2e2; color: #7f1d1d; }
+      @media (prefers-color-scheme: dark) {
+        .ok { background: #14321f; color: #bbf7d0; }
+        .warn { background: #3a2c08; color: #fde68a; }
+        .bad { background: #3b1111; color: #fecaca; }
+      }
+      label { display: flex; align-items: center; gap: 8px; margin: 9px 0; }
+      input[type="number"] { width: 72px; }
+      button { margin-top: 10px; width: 100%; padding: 6px; }
+      .hint { opacity: .75; font-size: 11px; margin-top: 4px; }
+    </style>
+  </head>
+  <body>
+    <h1>Divine IDM</h1>
+    <div id="status" class="status warn">Checking…</div>
+
+    <label><input type="checkbox" id="enabled" /> Take over downloads</label>
+    <label>
+      Only above
+      <input type="number" id="minSize" min="0" step="1" /> MB
+    </label>
+    <label>
+      <input type="checkbox" id="forwardCookies" />
+      Send cookies for logged-in downloads
+    </label>
+    <div class="hint">
+      Asks for cookie access only when you turn this on.
+    </div>
+
+    <button id="pair" hidden>Request pairing</button>
+    <script src="popup.js"></script>
+  </body>
+</html>
