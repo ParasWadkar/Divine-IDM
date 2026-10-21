@@ -68,6 +68,16 @@ struct Args {
     #[arg(long)]
     revoke: Option<String>,
 
+    /// Turn browser integration on or off, or show it with no value.
+    ///
+    /// Off makes the engine refuse anything a browser hands it, so downloads
+    /// stay in the browser. It is enforced here rather than in the extension,
+    /// so it holds even if an extension is compromised or out of date -- and
+    /// it saves hunting through each browser's own settings to disable them
+    /// one at a time.
+    #[arg(long, value_name = "on|off", num_args = 0..=1)]
+    integration: Option<Option<IntegrationArg>>,
+
     /// Directory to write into.
     #[arg(short = 'o', long, default_value = ".")]
     out: PathBuf,
@@ -214,6 +224,9 @@ async fn main() -> std::process::ExitCode {
         }
         return std::process::ExitCode::SUCCESS;
     }
+    if let Some(choice) = args.integration {
+        return run_integration_command(choice).await;
+    }
     if args.pairings || args.approve.is_some() || args.deny.is_some() || args.revoke.is_some() {
         return run_pairing_command(&args).await;
     }
@@ -358,6 +371,83 @@ fn run_install(args: &Args) -> std::process::ExitCode {
 }
 
 /// Pairing management, which talks to a running engine.
+/// What `--integration` was asked to do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum IntegrationArg {
+    On,
+    Off,
+}
+
+/// Reads or flips the browser integration switch on a running engine.
+async fn run_integration_command(choice: Option<IntegrationArg>) -> std::process::ExitCode {
+    use idm_ipc::{IpcClient, Request, Response};
+
+    let mut client = match IpcClient::connect("cli").await {
+        Ok(client) => client,
+        Err(error) => {
+            eprintln!("error: no running engine ({error}). Start one with: idm --serve");
+            return std::process::ExitCode::FAILURE;
+        }
+    };
+
+    // Read first even when setting: the engine owns the rest of the settings
+    // and this must not reset them to whatever defaults the CLI holds.
+    let mut settings = match client.request(Request::GetSettings).await {
+        Ok(Response::Settings(settings)) => settings,
+        Ok(other) => {
+            eprintln!("unexpected reply: {other:?}");
+            return std::process::ExitCode::FAILURE;
+        }
+        Err(error) => {
+            eprintln!("error: {error}");
+            return std::process::ExitCode::FAILURE;
+        }
+    };
+
+    let wanted = match choice {
+        Some(IntegrationArg::On) => true,
+        Some(IntegrationArg::Off) => false,
+        // `--integration` with no value: report, change nothing.
+        None => {
+            eprintln!("browser integration is {}", on_off(settings.browser_integration));
+            return std::process::ExitCode::SUCCESS;
+        }
+    };
+
+    if settings.browser_integration == wanted {
+        eprintln!("browser integration is already {}", on_off(wanted));
+        return std::process::ExitCode::SUCCESS;
+    }
+
+    settings.browser_integration = wanted;
+    match client.request(Request::SetSettings(settings)).await {
+        Ok(Response::Settings(applied)) => {
+            eprintln!("browser integration is now {}", on_off(applied.browser_integration));
+            std::process::ExitCode::SUCCESS
+        }
+        Ok(Response::Pong) => {
+            eprintln!("browser integration is now {}", on_off(wanted));
+            std::process::ExitCode::SUCCESS
+        }
+        Ok(Response::Rejected { reason }) => {
+            eprintln!("refused: {reason}");
+            std::process::ExitCode::FAILURE
+        }
+        Ok(other) => {
+            eprintln!("unexpected reply: {other:?}");
+            std::process::ExitCode::FAILURE
+        }
+        Err(error) => {
+            eprintln!("error: {error}");
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+fn on_off(value: bool) -> &'static str {
+    if value { "on" } else { "off" }
+}
+
 async fn run_pairing_command(args: &Args) -> std::process::ExitCode {
     use idm_ipc::{IpcClient, Request, Response};
 
