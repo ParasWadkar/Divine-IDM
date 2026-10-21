@@ -90,7 +90,9 @@ pub struct Fetched {
 
 #[derive(Debug)]
 pub enum FetchOutcome {
-    Fetched(Fetched),
+    // Boxed to keep the variants a similar size: `Fetched` carries the whole
+    // OwnedFacts, which would otherwise make every `Refused` pay for it too.
+    Fetched(Box<Fetched>),
     /// The probe table said not to proceed with this response. The caller acts
     /// on the outcome: back off, re-resolve, restart, or fall back to a single
     /// stream.
@@ -134,11 +136,11 @@ pub async fn fetch_claim(
     if wanted.is_empty() {
         // Already satisfied, usually because a steal landed between the
         // coordinator choosing this claim and the fetcher starting.
-        return Ok(FetchOutcome::Fetched(Fetched {
+        return Ok(FetchOutcome::Fetched(Box::new(Fetched {
             written: ByteRange::empty_at(wanted.start()),
             stop: FetchStop::Complete,
             facts: OwnedFacts::default(),
-        }));
+        })));
     }
 
     let mut builder = lane.client().get(request.url).header(RANGE, wanted.to_range_header()?);
@@ -211,11 +213,11 @@ pub async fn fetch_claim(
         FetchStop::ServerEnded
     };
 
-    Ok(FetchOutcome::Fetched(Fetched {
+    Ok(FetchOutcome::Fetched(Box::new(Fetched {
         written: ByteRange::try_new(delivered.start(), offset)?,
         stop,
         facts,
-    }))
+    })))
 }
 
 /// Hands the accumulated bytes to the writer, taking a budget permit first.
