@@ -9,9 +9,19 @@
 //   node build.mjs          # build both
 //   node build.mjs --check  # validate without writing
 
-import { cpSync, mkdirSync, readFileSync, readdirSync, rmSync, existsSync } from "node:fs";
+import {
+  cpSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  existsSync,
+  writeFileSync,
+} from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+
+import { loadOrCreate } from "./keygen.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const TARGETS = ["chromium", "firefox"];
@@ -56,6 +66,9 @@ function validate(target, manifest) {
   return problems;
 }
 
+const chromiumKey = CHECK_ONLY ? null : loadOrCreate();
+let builtId = null;
+
 let failed = false;
 for (const target of TARGETS) {
   const manifestPath = join(HERE, target, "manifest.json");
@@ -93,7 +106,15 @@ for (const target of TARGETS) {
   for (const file of readdirSync(join(HERE, "shared"))) {
     cpSync(join(HERE, "shared", file), join(out, file));
   }
-  cpSync(manifestPath, join(out, "manifest.json"));
+  if (target === "chromium") {
+    // Pinning the public key fixes the extension ID. Without it Chromium
+    // derives the ID from the folder path, so the native messaging manifest
+    // -- which names the ID in allowed_origins -- would stop matching the
+    // moment the folder moved, and would differ on every machine.
+    manifest.key = chromiumKey.key;
+    builtId = chromiumKey.id;
+  }
+  writeFileSync(join(out, "manifest.json"), JSON.stringify(manifest, null, 2) + "\n");
   console.log(`${target}: built -> ${out}`);
 }
 
@@ -105,6 +126,8 @@ if (!CHECK_ONLY) {
   console.log("                   -> extension/dist/chromium");
   console.log("  Firefox family:  about:debugging -> This Firefox -> Load Temporary Add-on");
   console.log("                   -> extension/dist/firefox/manifest.json");
-  console.log("\nThen register the host with the extension ID the browser shows you:");
-  console.log("  idm --install-host --extension-id <id>");
+  console.log("\nThen register the native messaging host:");
+  console.log(`  idm --install-host --extension-id ${builtId}`);
+  console.log("\nThat id is pinned by the key in extension/keys/, so it is the");
+  console.log("same wherever the folder sits and on every machine.");
 }

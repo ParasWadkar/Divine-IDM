@@ -55,14 +55,38 @@ async function setSettings(update) {
  *
  * Generated once and kept. It is not a secret and not a credential: it tells
  * the engine *which* extension is asking so a human can approve or revoke it.
+ *
+ * Single-flight, and that is not a micro-optimisation. The read, the generate
+ * and the write are separated by awaits, so two callers that start before
+ * either writes -- the top-level greet and the one from onInstalled, which is
+ * exactly what happens on a fresh install -- each mint an id and each ask to
+ * be paired. The user then sees two prompts, and approving the wrong one
+ * pairs an identity the extension has already discarded, leaving it
+ * permanently unpaired with no visible reason. Memoising the promise means
+ * every caller in this worker waits on the same one.
  */
-async function clientId() {
-  const stored = await api.storage.local.get("clientId");
-  if (stored.clientId) return stored.clientId;
-  const bytes = crypto.getRandomValues(new Uint8Array(16));
-  const id = Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
-  await api.storage.local.set({ clientId: id });
-  return id;
+let pendingClientId = null;
+
+function clientId() {
+  pendingClientId ??= (async () => {
+    const stored = await api.storage.local.get("clientId");
+    if (stored.clientId) return stored.clientId;
+
+    const bytes = crypto.getRandomValues(new Uint8Array(16));
+    const id = Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+
+    // Re-check: another worker generation may have written one while this
+    // call was awaiting. Deferring to it keeps one identity per installation.
+    const again = await api.storage.local.get("clientId");
+    if (again.clientId) return again.clientId;
+
+    await api.storage.local.set({ clientId: id });
+    return id;
+  })().catch((error) => {
+    pendingClientId = null; // a failed lookup must not be cached forever
+    throw error;
+  });
+  return pendingClientId;
 }
 
 async function setState(update) {
@@ -134,7 +158,7 @@ async function sendToHost(message) {
 
 /** Says hello, which doubles as the pairing request. */
 async function greet() {
-  const label = `${browserLabel()} on this PC`;
+  const label = `${await browserLabel()} on this PC`;
   const reply = await sendToHost({ type: "hello", label });
 
   switch (reply.type) {
@@ -149,19 +173,45 @@ async function greet() {
   }
 }
 
-function browserLabel() {
-  const agent = navigator.userAgent;
-  // Order matters: every Chromium browser also says "Chrome".
-  for (const [needle, name] of [
-    ["Edg/", "Edge"],
-    ["OPR/", "Opera"],
-    ["Vivaldi", "Vivaldi"],
-    ["Brave", "Brave"],
-    ["YaBrowser", "Yandex"],
-    ["Firefox", "Firefox"],
-    ["Chrome", "Chrome"],
-  ]) {
-    if (agent.includes(needle)) return name;
+/** Specific names first: every Chromium browser also says "Chrome". */
+const BROWSER_NAMES = [
+  ["Edg", "Edge"],
+  ["OPR", "Opera"],
+  ["Opera", "Opera"],
+  ["Vivaldi", "Vivaldi"],
+  ["Brave", "Brave"],
+  ["YaBrowser", "Yandex"],
+  ["Firefox", "Firefox"],
+  ["Chromium", "Chromium"],
+  ["Chrome", "Chrome"],
+];
+
+/**
+ * Names the browser for the pairing prompt.
+ *
+ * The user-agent string alone is not enough. Brave ships Chrome's UA verbatim
+ * to resist fingerprinting, so a UA match labels it "Chrome" -- and a prompt
+ * that says Chrome when Brave is asking defeats the one thing the label is
+ * for. Brave's own API and the UA-CH brand list both name it honestly, so
+ * they are consulted first and the UA is only the fallback.
+ */
+async function browserLabel() {
+  try {
+    if (await navigator.brave?.isBrave?.()) return "Brave";
+  } catch {
+    // Not Brave, or the API is unavailable. Fall through.
+  }
+
+  for (const { brand } of navigator.userAgentData?.brands ?? []) {
+    // Skip the deliberate decoys UA-CH includes, e.g. "Not;A=Brand".
+    if (/not[^a-z]*a[^a-z]*brand/i.test(brand)) continue;
+    for (const [needle, name] of BROWSER_NAMES) {
+      if (brand.includes(needle)) return name;
+    }
+  }
+
+  for (const [needle, name] of BROWSER_NAMES) {
+    if (navigator.userAgent.includes(needle)) return name;
   }
   return "Browser";
 }

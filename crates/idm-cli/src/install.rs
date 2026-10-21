@@ -247,34 +247,112 @@ mod platform {
     use windows::Win32::Foundation::ERROR_SUCCESS;
     use windows::Win32::System::Registry::{
         HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, KEY_WRITE, REG_OPTION_NON_VOLATILE,
-        REG_SZ, RegCloseKey, RegCreateKeyExW, RegDeleteTreeW, RegOpenKeyExW, RegSetValueExW,
+        REG_SZ, RegCloseKey, RegCreateKeyExW, RegDeleteTreeW, RegEnumKeyExW, RegOpenKeyExW,
+        RegQueryInfoKeyW, RegSetValueExW,
     };
-    use windows::core::PCWSTR;
+    use windows::core::{PCWSTR, PWSTR};
 
     fn wide(text: &str) -> Vec<u16> {
         text.encode_utf16().chain(std::iter::once(0)).collect()
     }
 
-    /// Whether a browser appears installed, by looking for its own key under
-    /// either hive. Per-user installs land in HKCU, machine-wide in HKLM.
+    /// Whether a browser appears installed.
+    ///
+    /// The obvious test -- does `Software\<root>` exist -- is wrong, and
+    /// wrong in a way that hides itself: registering the host *creates*
+    /// `Software\<root>\NativeMessagingHosts`, and so creates
+    /// `Software\<root>` too. Every browser we ever register then reports as
+    /// installed on every later run, including ones that were never on the
+    /// machine. Observed exactly that: `HKCU\Software\Vivaldi` existed with
+    /// `NativeMessagingHosts` as its only child, on a PC with no Vivaldi.
+    ///
+    /// So the evidence has to be something the browser itself wrote: any
+    /// value, or any subkey that is not the one we create. Browsers write
+    /// `BLBeacon`, `StabilityMetrics` and similar on first run.
+    ///
+    /// A key left behind by an uninstalled browser still reads as present.
+    /// That is the harmless direction -- a registration nothing reads -- and
+    /// `--all-browsers` exists for the opposite case.
     pub(super) fn browser_present(root: &str) -> bool {
         let path = wide(&format!(r"Software\{root}"));
-        for hive in [HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE] {
-            let mut key = HKEY::default();
-            // SAFETY: `path` is a NUL-terminated wide string outliving the
-            // call; `key` is a valid out-pointer.
-            let status = unsafe {
-                RegOpenKeyExW(hive, PCWSTR(path.as_ptr()), Some(0), KEY_READ, &raw mut key)
-            };
-            if status == ERROR_SUCCESS {
-                // SAFETY: opened immediately above and not used again.
-                unsafe {
-                    let _ = RegCloseKey(key);
-                }
-                return true;
-            }
+        [HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE]
+            .into_iter()
+            .any(|hive| has_browser_written_content(hive, &path))
+    }
+
+    /// True if the key holds anything other than our own host registration.
+    fn has_browser_written_content(hive: HKEY, path: &[u16]) -> bool {
+        let mut key = HKEY::default();
+        // SAFETY: `path` is a NUL-terminated wide string outliving the call;
+        // `key` is a valid out-pointer.
+        let status =
+            unsafe { RegOpenKeyExW(hive, PCWSTR(path.as_ptr()), Some(0), KEY_READ, &raw mut key) };
+        if status != ERROR_SUCCESS {
+            return false;
         }
-        false
+
+        let mut subkeys = 0u32;
+        let mut values = 0u32;
+        // SAFETY: `key` is open; every out-pointer is valid for the call.
+        let queried = unsafe {
+            RegQueryInfoKeyW(
+                key,
+                None,
+                None,
+                None,
+                Some(&raw mut subkeys),
+                None,
+                None,
+                Some(&raw mut values),
+                None,
+                None,
+                None,
+                None,
+            )
+        };
+
+        let present = if queried != ERROR_SUCCESS {
+            false
+        } else if values > 0 || subkeys > 1 {
+            // We write no values here and exactly one subkey, so anything
+            // beyond that came from the browser.
+            true
+        } else if subkeys == 1 {
+            !sole_subkey_is_ours(key)
+        } else {
+            false
+        };
+
+        // SAFETY: opened above and not used after this point.
+        unsafe {
+            let _ = RegCloseKey(key);
+        }
+        present
+    }
+
+    /// Whether the key's only child is the one `register` creates.
+    fn sole_subkey_is_ours(key: HKEY) -> bool {
+        // Long enough for any real key name; a longer one is not ours.
+        let mut name = [0u16; 256];
+        let mut len = name.len() as u32;
+        // SAFETY: `key` is open; `name`/`len` describe one writable buffer.
+        let status = unsafe {
+            RegEnumKeyExW(
+                key,
+                0,
+                Some(PWSTR(name.as_mut_ptr())),
+                &raw mut len,
+                None,
+                None,
+                None,
+                None,
+            )
+        };
+        if status != ERROR_SUCCESS {
+            return false;
+        }
+        let found = String::from_utf16_lossy(&name[..len as usize]);
+        found.eq_ignore_ascii_case("NativeMessagingHosts")
     }
 
     /// Points the browser at our manifest. Always HKCU: registering per-user
@@ -318,6 +396,17 @@ mod platform {
     }
 
     /// Returns whether anything was actually removed.
+    /// Removes a whole browser root. Tests only: a real uninstall leaves
+    /// the browser's own keys alone and touches only our registration.
+    #[cfg(test)]
+    pub(super) fn delete_root(root: &str) {
+        let path = wide(&format!(r"Software\{root}"));
+        // SAFETY: `path` is a NUL-terminated wide string outliving the call.
+        unsafe {
+            let _ = RegDeleteTreeW(HKEY_CURRENT_USER, PCWSTR(path.as_ptr()));
+        }
+    }
+
     pub(super) fn unregister(root: &str) -> Result<bool, InstallError> {
         let path = wide(&format!(r"Software\{root}\NativeMessagingHosts\{}", super::HOST_NAME));
         // SAFETY: NUL-terminated wide string outliving the call.
@@ -433,5 +522,37 @@ mod tests {
             .collect();
         println!("detected browsers: {present:?}");
         assert!(!platform::browser_present(r"Nonexistent\Browser\XYZZY"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn registering_a_host_does_not_make_a_browser_look_installed() {
+        // The bug this guards for: `register` creates
+        // Software\<root>\NativeMessagingHosts, and so creates
+        // Software\<root>. A detector that asks only whether that key
+        // exists is reading evidence it planted itself, and reports every
+        // browser it has ever registered as installed forever after. Found on
+        // a machine where HKCU\Software\Vivaldi existed, held nothing but
+        // NativeMessagingHosts, and no Vivaldi had ever been installed.
+        const ROOT: &str = r"DivineIDMTest\PhantomBrowser";
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let manifest = dir.path().join("host.json");
+        std::fs::write(&manifest, "{}").expect("write manifest");
+
+        platform::delete_root(ROOT);
+        assert!(!platform::browser_present(ROOT), "absent before the test writes anything");
+
+        platform::register(ROOT, &manifest).expect("register");
+        let after_our_own_registration = platform::browser_present(ROOT);
+
+        // Stands in for a key the browser itself writes on first run.
+        platform::register(&format!(r"{ROOT}\BLBeacon"), &manifest).expect("evidence");
+        let with_browser_written_content = platform::browser_present(ROOT);
+
+        platform::delete_root(ROOT);
+
+        assert!(!after_our_own_registration, "our own registration is not evidence");
+        assert!(with_browser_written_content, "a key the browser wrote is evidence");
     }
 }

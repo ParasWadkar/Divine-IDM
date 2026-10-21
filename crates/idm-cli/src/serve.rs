@@ -274,12 +274,17 @@ impl Engine {
         };
         match self.inner.pairings.lock().await.request(&client_id, &label) {
             PairingOutcome::AlreadyPaired => Response::PairingApproved,
-            PairingOutcome::Pending { request_id } => {
+            PairingOutcome::Pending { request_id, fresh } => {
                 // Deliberately only a notice: approval has to come from the
                 // app, which is a different client on a different connection.
-                eprintln!(
-                    "Pairing requested by {label:?}. Approve with:  idm --approve {request_id}"
-                );
+                // Only for a new request -- an extension re-greets on every
+                // service worker wake, and repeating the same approval line
+                // reads like several browsers are asking.
+                if fresh {
+                    eprintln!(
+                        "Pairing requested by {label:?}. Approve with:  idm --approve {request_id}"
+                    );
+                }
                 Response::PairingPending { request_id }
             }
         }

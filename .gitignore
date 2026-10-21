@@ -6,6 +6,7 @@
 /app/ui/node_modules
 /app/ui/dist
 /extension/dist
+/extension/keys/*.pem
 /extension/**/node_modules
 /extension/**/dist
 *.idmpart

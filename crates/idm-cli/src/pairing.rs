@@ -41,7 +41,13 @@ pub const MAX_PENDING: usize = 5;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PairingOutcome {
     AlreadyPaired,
-    Pending { request_id: String },
+    Pending {
+        request_id: String,
+        /// False when this is an existing request being returned again, so
+        /// callers can notify a human once rather than on every greeting.
+        /// The extension greets on each service worker wake, which is often.
+        fresh: bool,
+    },
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -105,7 +111,10 @@ impl PairingStore {
             return PairingOutcome::AlreadyPaired;
         }
         if let Some(existing) = self.pending.iter().find(|p| p.client_id == client_id) {
-            return PairingOutcome::Pending { request_id: existing.request_id.clone() };
+            return PairingOutcome::Pending {
+                request_id: existing.request_id.clone(),
+                fresh: false,
+            };
         }
 
         let request_id = idm_ipc::security::random_id();
@@ -121,7 +130,7 @@ impl PairingStore {
         while self.pending.len() > MAX_PENDING {
             self.pending.remove(0);
         }
-        PairingOutcome::Pending { request_id }
+        PairingOutcome::Pending { request_id, fresh: true }
     }
 
     /// Approves a pending request. Returns the client that was paired.
@@ -197,7 +206,7 @@ mod tests {
         let (_dir, mut store) = store();
         assert!(!store.is_paired("abc"));
 
-        let PairingOutcome::Pending { request_id } = store.request("abc", "Chrome") else {
+        let PairingOutcome::Pending { request_id, .. } = store.request("abc", "Chrome") else {
             panic!("a new client should be pending, never auto-approved");
         };
         // Still not paired: asking is not the same as being allowed.
@@ -210,7 +219,7 @@ mod tests {
     #[test]
     fn an_already_paired_client_does_not_prompt_again() {
         let (_dir, mut store) = store();
-        let PairingOutcome::Pending { request_id } = store.request("abc", "Chrome") else {
+        let PairingOutcome::Pending { request_id, .. } = store.request("abc", "Chrome") else {
             panic!("expected pending")
         };
         store.approve(&request_id);
@@ -224,7 +233,18 @@ mod tests {
         let (_dir, mut store) = store();
         let first = store.request("abc", "Chrome");
         let second = store.request("abc", "Chrome");
-        assert_eq!(first, second);
+
+        let (
+            PairingOutcome::Pending { request_id: first_id, fresh: first_fresh },
+            PairingOutcome::Pending { request_id: second_id, fresh: second_fresh },
+        ) = (first, second)
+        else {
+            panic!("both requests should be pending");
+        };
+
+        assert_eq!(first_id, second_id, "a repeat must reuse the same prompt");
+        assert!(first_fresh, "the first request is new");
+        assert!(!second_fresh, "a repeat is not new, so it must not notify again");
         assert_eq!(store.pending().len(), 1);
     }
 
@@ -243,7 +263,7 @@ mod tests {
     #[test]
     fn denying_removes_the_request_without_pairing() {
         let (_dir, mut store) = store();
-        let PairingOutcome::Pending { request_id } = store.request("abc", "Chrome") else {
+        let PairingOutcome::Pending { request_id, .. } = store.request("abc", "Chrome") else {
             panic!("expected pending")
         };
         assert!(store.deny(&request_id));
@@ -263,7 +283,7 @@ mod tests {
     #[test]
     fn revoking_takes_effect_immediately() {
         let (_dir, mut store) = store();
-        let PairingOutcome::Pending { request_id } = store.request("abc", "Chrome") else {
+        let PairingOutcome::Pending { request_id, .. } = store.request("abc", "Chrome") else {
             panic!("expected pending")
         };
         store.approve(&request_id);
@@ -280,7 +300,7 @@ mod tests {
         let path = dir.path().join("pairings.json");
         {
             let mut store = PairingStore::load(path.clone());
-            let PairingOutcome::Pending { request_id } = store.request("abc", "Chrome") else {
+            let PairingOutcome::Pending { request_id, .. } = store.request("abc", "Chrome") else {
                 panic!("expected pending")
             };
             store.approve(&request_id);
@@ -299,7 +319,7 @@ mod tests {
     #[test]
     fn an_expired_request_can_no_longer_be_approved() {
         let (_dir, mut store) = store();
-        let PairingOutcome::Pending { request_id } = store.request("abc", "Chrome") else {
+        let PairingOutcome::Pending { request_id, .. } = store.request("abc", "Chrome") else {
             panic!("expected pending")
         };
         // Backdate it past the time-to-live.
