@@ -41,3 +41,16 @@ jobs:
         run: cargo test --all-features
         env:
           PROPTEST_CASES: "20000"
+
+      # Resume is the feature most likely to be quietly broken, and a single
+      # run of the crash loop proves very little: each seed crashes at
+      # different offsets, so sweep several. Each pass aborts a real child
+      # process mid-write and then verifies the finished file byte for byte.
+      - name: Crash-durability soak
+        shell: bash
+        run: |
+          for seed in 1 7 42 1337 99991; do
+            echo "--- crash soak seed $seed ---"
+            IDM_CRASH_TEST_SEED=$seed cargo test --all-features \
+              --test crash_resume -- --nocapture --test-threads=1
+          done
