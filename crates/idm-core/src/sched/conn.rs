@@ -257,14 +257,22 @@ impl ConnController {
     }
 
     /// Starts from a previously learned profile, skipping the ramp.
+    ///
+    /// Two clocks, deliberately. `now_ms` is the controller's own, monotonic
+    /// from the start of this download, and drives when decisions are next
+    /// allowed. `wall_clock_ms` is the time of day, and is the only thing a
+    /// profile's age can be judged against. One value cannot serve both: a
+    /// download that starts its clock at zero would find every profile
+    /// written in the last seven days, including one from last year.
     pub fn from_profile(
         policy: ConnPolicy,
         profile: &HostProfile,
         now_ms: u64,
+        wall_clock_ms: u64,
         fingerprint: u64,
     ) -> Self {
         let mut controller = Self::new(policy, now_ms);
-        if profile.is_usable(now_ms, fingerprint) {
+        if profile.is_usable(wall_clock_ms, fingerprint) {
             controller.current = profile.best_conn_count.clamp(1, controller.policy.per_host_max);
             controller.ceiling = profile.conn_ceiling.clamp(1, controller.policy.per_host_max);
             // Already tuned: hold here rather than re-climbing, but stay ready
@@ -769,7 +777,7 @@ mod tests {
             net_fingerprint: FINGERPRINT,
             updated_at_ms: now - 1000,
         };
-        let controller = ConnController::from_profile(policy, &profile, now, FINGERPRINT);
+        let controller = ConnController::from_profile(policy, &profile, now, now, FINGERPRINT);
         assert_eq!(controller.connections(), 12, "should start where it left off");
         assert_eq!(controller.ceiling(), 14);
     }
@@ -788,7 +796,7 @@ mod tests {
         };
         // Same host, different network: what was learned on a fibre link says
         // nothing about a tethered phone.
-        let controller = ConnController::from_profile(policy, &profile, now, 0x9999);
+        let controller = ConnController::from_profile(policy, &profile, now, now, 0x9999);
         assert_eq!(controller.connections(), 4, "should ignore a foreign profile");
     }
 
@@ -805,7 +813,7 @@ mod tests {
             updated_at_ms: now - PROFILE_MAX_AGE_MS - 1,
         };
         assert!(!profile.is_usable(now, FINGERPRINT));
-        let controller = ConnController::from_profile(policy, &profile, now, FINGERPRINT);
+        let controller = ConnController::from_profile(policy, &profile, now, now, FINGERPRINT);
         assert_eq!(controller.connections(), 4);
     }
 
@@ -847,7 +855,7 @@ mod tests {
         assert_eq!(profile.best_conn_count, controller.connections());
         assert!(profile.is_usable(clock, FINGERPRINT));
 
-        let restored = ConnController::from_profile(policy, &profile, clock, FINGERPRINT);
+        let restored = ConnController::from_profile(policy, &profile, clock, clock, FINGERPRINT);
         assert_eq!(restored.connections(), controller.connections());
     }
 }

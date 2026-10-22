@@ -85,13 +85,31 @@ pub struct Endpoint {
 use serde::Deserialize as Deserialize_;
 use serde::Serialize as Serialize_;
 
-/// `%LOCALAPPDATA%\DivineIDM\endpoint.json`, or the platform equivalent.
-pub fn endpoint_path() -> PathBuf {
+/// Where the engine keeps its state: the endpoint, settings, pairings and
+/// the database.
+///
+/// `IDM_STATE_DIR` overrides it, and exists for the end-to-end harnesses.
+/// Without it they share the real directory with the person running them,
+/// which has already caused one difficult afternoon: a test that died partway
+/// through left browser integration disabled in the shared settings file, and
+/// every later run failed for a reason that had nothing to do with the code
+/// under test. Tests that write where the application lives can also damage
+/// a real install — the pairings file and the download history are both
+/// there — so isolation is the point rather than tidiness.
+pub fn state_dir() -> PathBuf {
+    if let Some(overridden) = std::env::var_os("IDM_STATE_DIR") {
+        return PathBuf::from(overridden);
+    }
     let base = std::env::var_os("LOCALAPPDATA")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share")))
         .unwrap_or_else(std::env::temp_dir);
-    base.join("DivineIDM").join("endpoint.json")
+    base.join("DivineIDM")
+}
+
+/// `%LOCALAPPDATA%\DivineIDM\endpoint.json`, or the platform equivalent.
+pub fn endpoint_path() -> PathBuf {
+    state_dir().join("endpoint.json")
 }
 
 /// A short random identifier, for things that must be unguessable but are

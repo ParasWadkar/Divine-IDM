@@ -6,6 +6,7 @@ members = [
     "crates/idm-cli",
     "crates/idm-ipc",
     "crates/idm-host",
+    "crates/idm-store",
 ]
 
 [workspace.package]

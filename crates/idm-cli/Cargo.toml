@@ -13,6 +13,7 @@ path = "src/main.rs"
 
 [dependencies]
 idm-core = { path = "../idm-core" }
+idm-store = { path = "../idm-store" }
 idm-ipc = { path = "../idm-ipc" }
 idm-net = { path = "../idm-net" }
 clap.workspace = true

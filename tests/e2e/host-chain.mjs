@@ -84,6 +84,11 @@ async function main() {
   }
 
   const downloads = mkdtempSync(join(tmpdir(), "idm-e2e-"));
+  // Its own state directory. Sharing the real one means a run that dies
+  // partway can leave settings behind that break every later run, and can
+  // damage a real install's pairings and history.
+  const stateDir = mkdtempSync(join(tmpdir(), "idm-state-"));
+  process.env.IDM_STATE_DIR = stateDir;
   const port = 8123;
   const size = 4 * 1024 * 1024;
 
@@ -193,7 +198,14 @@ async function main() {
   } finally {
     engine.kill();
     mock.kill();
-    rmSync(downloads, { recursive: true, force: true });
+    for (const dir of [downloads, stateDir]) {
+      try {
+        rmSync(dir, { recursive: true, force: true, maxRetries: 3 });
+      } catch {
+        // The engine may still hold the database open. A temporary
+        // directory left behind is not worth failing a run over.
+      }
+    }
     if (failures && engineLog.length) {
       console.log("\nengine output:\n" + engineLog.join("").trim());
     }

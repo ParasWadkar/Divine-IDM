@@ -34,7 +34,10 @@ use idm_core::journal::{
 use idm_core::sched::conn::{ConnController, ConnDecision, ConnPolicy, Observation, SettleReason};
 use idm_core::sched::probe::{ProbeOutcome, classify};
 use idm_core::sched::steal::{Action, StealPolicy, next_action};
-use idm_core::sched::{ClaimId, ClaimSnapshot, LiveClaim, Protocol, WorkLedger, ledger};
+use idm_core::sched::{
+    ClaimId, ClaimSnapshot, HostKey, HostProfile, LiveClaim, ProfileStore, Protocol, WorkLedger,
+    ledger,
+};
 use idm_core::win::prealloc::{self, PreallocOptions, WriteMode};
 use idm_core::writer::{WriteAck, Writer, WriterConfig};
 use idm_core::{ByteRange, ExtentError, FileIdentity};
@@ -49,7 +52,7 @@ use crate::fetch::{FetchConfig, FetchOutcome, FetchStop, SegmentRequest, fetch_c
 /// trip is wasted learning the file's shape.
 const PROBE_BYTES: u64 = 1 << 20;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct DownloadConfig {
     pub url: String,
     pub output_dir: PathBuf,
@@ -79,6 +82,33 @@ pub struct DownloadConfig {
     pub pin_edges: bool,
     pub referrer: Option<String>,
     pub cookies: Option<String>,
+    /// Where to read and record what this machine has learned about a host.
+    ///
+    /// Optional because the engine must run without one — a download does
+    /// not depend on it, it only starts better informed.
+    pub profiles: Option<Arc<dyn ProfileStore>>,
+}
+
+impl std::fmt::Debug for DownloadConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Hand-written rather than derived: a trait object has no Debug, and
+        // the cookies field must never reach a log line.
+        f.debug_struct("DownloadConfig")
+            .field("url", &self.url)
+            .field("output_dir", &self.output_dir)
+            .field("filename", &self.filename)
+            .field("fixed_connections", &self.fixed_connections)
+            .field("conn", &self.conn)
+            .field("steal", &self.steal)
+            .field("allow_set_valid_data", &self.allow_set_valid_data)
+            .field("checkpoint_interval", &self.checkpoint_interval)
+            .field("conn_tick_interval", &self.conn_tick_interval)
+            .field("pin_edges", &self.pin_edges)
+            .field("referrer", &self.referrer)
+            .field("cookies", &self.cookies.as_ref().map(|_| "<redacted>"))
+            .field("profiles", &self.profiles.as_ref().map(|_| "<store>"))
+            .finish_non_exhaustive()
+    }
 }
 
 impl DownloadConfig {
@@ -98,6 +128,7 @@ impl DownloadConfig {
             pin_edges: true,
             referrer: None,
             cookies: None,
+            profiles: None,
         }
     }
 }
@@ -366,15 +397,10 @@ pub async fn download_with_progress<F: FnMut(Progress)>(
 
     let bdp = 2 << 20;
     let forced_single = ledger::force_single_connection(target.total, bdp);
-    let initial = match config.fixed_connections {
-        Some(fixed) => fixed.max(1),
-        None if forced_single => 1,
-        None => config.conn.start,
-    };
-    let (lane_count, streams) = lane_topology(initial);
-    let mut http = config.http.clone();
-    http.streams_per_lane = streams;
 
+    // Identity of what is being downloaded from, for the learned profile.
+    // Computed before the connection count is chosen, because a profile that
+    // arrives after the lane topology is fixed cannot change it.
     let host = reqwest::Url::parse(&target.pinned_url)
         .ok()
         .and_then(|url| url.host_str().map(str::to_owned));
@@ -382,6 +408,39 @@ pub async fn download_with_progress<F: FnMut(Progress)>(
         .ok()
         .and_then(|url| url.port_or_known_default())
         .unwrap_or(443);
+    let host_key = host
+        .as_ref()
+        .map(|host| HostKey::new(host.as_str(), port, alpn_label(&target.http_version)));
+
+    let fingerprint = idm_core::win::net_fingerprint();
+    let wall_clock_ms = wall_clock_ms();
+    let learned = match (config.profiles.as_ref(), host_key.as_ref()) {
+        (Some(store), Some(key)) => store.load(key, fingerprint),
+        _ => None,
+    };
+    // A pinned count and a one-connection file both teach nothing and should
+    // learn nothing: the first was not measured, the second was not tried.
+    let tuning_applies = config.fixed_connections.is_none() && !forced_single;
+    let learned =
+        learned.filter(|profile| tuning_applies && profile.is_usable(wall_clock_ms, fingerprint));
+
+    let initial = match config.fixed_connections {
+        Some(fixed) => fixed.max(1),
+        None if forced_single => 1,
+        None => {
+            learned.as_ref().map(|profile| profile.best_conn_count).unwrap_or(config.conn.start)
+        }
+    };
+    if let Some(profile) = &learned {
+        tracing::debug!(
+            host = host.as_deref().unwrap_or("?"),
+            connections = profile.best_conn_count,
+            "starting from a learned profile instead of ramping"
+        );
+    }
+    let (lane_count, streams) = lane_topology(initial);
+    let mut http = config.http.clone();
+    http.streams_per_lane = streams;
 
     let pool = Arc::new(match (&host, config.pin_edges) {
         (Some(host), true) => LanePool::pinned_to_edges(&http, host, port, lane_count)
@@ -394,7 +453,16 @@ pub async fn download_with_progress<F: FnMut(Progress)>(
     let handle = writer.handle();
     let budget = AsyncBudget::for_connections(config.conn.per_host_max);
 
-    let mut controller = ConnController::new(config.conn.clone(), 0);
+    let mut controller = match &learned {
+        Some(profile) => ConnController::from_profile(
+            config.conn.clone(),
+            profile,
+            0,
+            wall_clock_ms,
+            fingerprint,
+        ),
+        None => ConnController::new(config.conn.clone(), 0),
+    };
     let mut target_connections = initial;
     let mut stats = DownloadStats::default();
     let mut tracked: HashMap<ClaimId, Tracked> = HashMap::new();
@@ -672,6 +740,41 @@ pub async fn download_with_progress<F: FnMut(Progress)>(
     )?;
     let _ = std::fs::remove_file(&journal_path);
 
+    // Record what this run learned, now that it has finished successfully.
+    //
+    // Only when the controller settled: an unsettled count is wherever the
+    // ramp had got to when the bytes ran out, and storing that would teach a
+    // number nothing actually measured.
+    if let (Some(store), Some(key), Some(reason)) =
+        (config.profiles.as_ref(), host_key.as_ref(), controller.settled())
+        && tuning_applies
+        && fingerprint != 0
+    {
+        store.save(
+            key,
+            &HostProfile {
+                best_conn_count: target_connections,
+                conn_ceiling: controller.ceiling(),
+                // Nothing measures this yet, so carry forward whatever a
+                // previous run concluded rather than asserting false.
+                multiplexing_helped: learned
+                    .as_ref()
+                    .map(|profile| profile.multiplexing_helped)
+                    .unwrap_or(false),
+                // This run did not race h3; the store keeps any earlier answer.
+                h3_won_race: None,
+                net_fingerprint: fingerprint,
+                updated_at_ms: wall_clock_ms,
+            },
+        );
+        tracing::debug!(
+            host = host.as_deref().unwrap_or("?"),
+            connections = target_connections,
+            ?reason,
+            "recorded what this host taught"
+        );
+    }
+
     Ok(DownloadReport {
         path: final_path,
         http_version: target.http_version.clone(),
@@ -684,6 +787,28 @@ pub async fn download_with_progress<F: FnMut(Progress)>(
         stats,
         resumed_bytes,
     })
+}
+
+/// Wall-clock milliseconds, for judging how old a stored profile is.
+fn wall_clock_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| since.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Maps hyper's `Version` debug form onto the ALPN name used as a profile key.
+///
+/// The right connection count differs sharply between these, so an unknown
+/// version gets its own bucket rather than being folded in with HTTP/1.1 and
+/// inheriting a number learned for a protocol it is not.
+fn alpn_label(http_version: &str) -> &'static str {
+    match http_version {
+        "HTTP/0.9" | "HTTP/1.0" | "HTTP/1.1" => "http/1.1",
+        "HTTP/2.0" => "h2",
+        "HTTP/3.0" => "h3",
+        _ => "unknown",
+    }
 }
 
 fn median_rate(snapshots: &[ClaimSnapshot]) -> f64 {

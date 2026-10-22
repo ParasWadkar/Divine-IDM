@@ -45,6 +45,11 @@ struct Inner {
     jobs: Mutex<HashMap<JobId, JobRecord>>,
     settings: Mutex<Settings>,
     settings_file: PathBuf,
+    /// Durable state. Optional: the engine runs without it, and everything
+    /// it holds is a convenience rather than something a download needs.
+    store: Option<Arc<idm_store::Store>>,
+    /// Maps a live job to its row, so progress reaches the right one.
+    rows: Mutex<HashMap<JobId, i64>>,
     pairings: Mutex<PairingStore>,
     /// Cancels an armed post-download action, if one is counting down.
     armed: Mutex<Option<Canceller>>,
@@ -57,13 +62,34 @@ pub struct Engine {
 
 impl Engine {
     pub fn new(output_dir: PathBuf, max_connections: u32) -> Arc<Self> {
-        Self::with_settings_file(output_dir, max_connections, settings_path())
+        let store = crate::open_store();
+        if let Some(store) = &store {
+            // Anything still marked running belongs to an engine that is no
+            // longer there. Left alone it would show the user a download
+            // that looks live and will never move again.
+            if let Err(error) = store.mark_interrupted_as_paused() {
+                tracing::warn!(%error, "could not tidy interrupted downloads");
+            }
+        }
+        Self::with_parts(output_dir, max_connections, settings_path(), store)
     }
 
+    /// An engine with no store, pointed at a chosen settings file.
+    /// Tests only: real use goes through `new`, which opens the store.
+    #[cfg(test)]
     pub fn with_settings_file(
         output_dir: PathBuf,
         max_connections: u32,
         settings_file: PathBuf,
+    ) -> Arc<Self> {
+        Self::with_parts(output_dir, max_connections, settings_file, None)
+    }
+
+    fn with_parts(
+        output_dir: PathBuf,
+        max_connections: u32,
+        settings_file: PathBuf,
+        store: Option<Arc<idm_store::Store>>,
     ) -> Arc<Self> {
         Arc::new(Self {
             inner: Arc::new(Inner {
@@ -76,6 +102,8 @@ impl Engine {
                     settings_file.with_file_name("pairings.json"),
                 )),
                 settings_file,
+                store,
+                rows: Mutex::new(HashMap::new()),
                 armed: Mutex::new(None),
             }),
         })
@@ -149,6 +177,30 @@ impl Engine {
         config.conn.per_host_max = self.inner.max_connections;
         config.referrer = request.referrer.clone();
         config.cookies = request.cookies.clone();
+        config.profiles =
+            self.inner.store.clone().map(|store| store as Arc<dyn idm_core::sched::ProfileStore>);
+
+        // Recorded before the download starts, so a crash one second in
+        // still leaves a row saying what was being fetched. Cookies are not
+        // among the fields: see the store's own documentation.
+        if let Some(store) = &self.inner.store {
+            let row = idm_store::NewJob {
+                url: request.url.clone(),
+                filename: filename.clone(),
+                output_dir: self.inner.output_dir.display().to_string(),
+                total: request.size_hint,
+                referrer: request.referrer.clone(),
+                user_agent: request.user_agent.clone(),
+                mime: request.mime.clone(),
+                ..Default::default()
+            };
+            match store.add_job(&row) {
+                Ok(row_id) => {
+                    self.inner.rows.lock().await.insert(id, row_id);
+                }
+                Err(error) => tracing::warn!(%error, "could not record the job"),
+            }
+        }
 
         let status = JobStatus {
             id,
@@ -182,6 +234,7 @@ impl Engine {
                     finish(&inner, id, JobState::Failed, None, Some(error.to_string())).await;
                 }
             }
+            forget_row(&inner, id).await;
 
             // Every finishing job asks whether the queue has now drained.
             // Doing it here rather than on a timer means the action fires as
@@ -244,6 +297,36 @@ async fn set_state(inner: &Inner, id: JobId, state: JobState) {
     if let Some(record) = inner.jobs.lock().await.get_mut(&id) {
         record.status.state = state;
     }
+    write_state(inner, id, state, None).await;
+}
+
+/// The row id for a live job, if the store is keeping one.
+async fn row_of(inner: &Inner, id: JobId) -> Option<(Arc<idm_store::Store>, i64)> {
+    let store = inner.store.clone()?;
+    let row = *inner.rows.lock().await.get(&id)?;
+    Some((store, row))
+}
+
+async fn write_state(inner: &Inner, id: JobId, state: JobState, error: Option<&str>) {
+    let Some((store, row)) = row_of(inner, id).await else {
+        return;
+    };
+    let stored = match state {
+        JobState::Queued => idm_store::JobState::Queued,
+        JobState::Running => idm_store::JobState::Running,
+        JobState::Paused => idm_store::JobState::Paused,
+        JobState::Completed => idm_store::JobState::Completed,
+        JobState::Failed => idm_store::JobState::Failed,
+    };
+    if let Err(error) = store.set_job_state(row, stored, error) {
+        tracing::warn!(%error, "could not record the job state");
+    }
+}
+
+/// Drops the mapping once a job has finished, so the table does not grow for
+/// the life of the process. The row itself stays; it is the history.
+async fn forget_row(inner: &Inner, id: JobId) {
+    inner.rows.lock().await.remove(&id);
 }
 
 async fn finish(
@@ -255,13 +338,21 @@ async fn finish(
 ) {
     if let Some(record) = inner.jobs.lock().await.get_mut(&id) {
         record.status.state = state;
-        record.status.error = error;
+        record.status.error = error.clone();
         if let Some(total) = total {
             record.status.total = Some(total);
             record.status.downloaded = total;
         }
         record.abort = None;
     }
+
+    if let Some((store, row)) = row_of(inner, id).await
+        && let Some(total) = total
+        && let Err(error) = store.update_progress(row, total, Some(total))
+    {
+        tracing::warn!(%error, "could not record the final size");
+    }
+    write_state(inner, id, state, error.as_deref()).await;
 }
 
 impl Engine {

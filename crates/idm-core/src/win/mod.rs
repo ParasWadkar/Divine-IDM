@@ -4,12 +4,14 @@
 //! tests, rather than scattered through the writer and the journal.
 
 mod identity;
+pub mod network;
 pub mod power;
 pub mod prealloc;
 pub mod privilege;
 pub mod volume;
 
 pub use identity::FileIdentity;
+pub use network::net_fingerprint;
 pub use prealloc::{PreallocOptions, Preallocation, WriteMode};
 pub use volume::VolumeCaps;
 

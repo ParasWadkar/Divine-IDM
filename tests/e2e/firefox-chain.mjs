@@ -235,6 +235,11 @@ async function main() {
   const startedAt = Date.now();
 
   const downloads = mkdtempSync(join(tmpdir(), "idm-ffdl-"));
+  // Its own state directory. Sharing the real one means a run that dies
+  // partway can leave settings behind that break every later run, and can
+  // damage a real install's pairings and history.
+  const stateDir = mkdtempSync(join(tmpdir(), "idm-state-"));
+  process.env.IDM_STATE_DIR = stateDir;
   const browserDownloads = mkdtempSync(join(tmpdir(), "idm-ffbrowser-"));
   const profile = makeProfile(browserDownloads);
 
@@ -393,8 +398,13 @@ async function main() {
     engine.kill();
     mock.kill();
     await sleep(1000);
-    for (const dir of [downloads, browserDownloads, profile]) {
-      rmSync(dir, { recursive: true, force: true, maxRetries: 3 });
+    for (const dir of [downloads, browserDownloads, profile, stateDir]) {
+      try {
+        rmSync(dir, { recursive: true, force: true, maxRetries: 3 });
+      } catch {
+        // The engine may still hold the database open. A temporary
+        // directory left behind is not worth failing a run over.
+      }
     }
     const addonLines = browserLog
       .join("")
