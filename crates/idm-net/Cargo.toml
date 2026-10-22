@@ -22,6 +22,8 @@ url.workspace = true
 # trust store, which is what an FTPS server with a corporate or self-signed
 # certificate needs, and it needs no client config built by hand.
 suppaftp = { version = "12", features = ["native-tls"] }
+russh = "0.63.1"
+russh-sftp = "3.0.1"
 
 [dev-dependencies]
 tempfile.workspace = true

@@ -141,6 +141,22 @@ struct Args {
     #[arg(long)]
     password: Option<String>,
 
+    /// A private key to authenticate with, for sftp.
+    #[arg(long, value_name = "PATH")]
+    identity: Option<std::path::PathBuf>,
+
+    /// Passphrase for that key, if it has one.
+    #[arg(long)]
+    identity_passphrase: Option<String>,
+
+    /// Trust an sftp host that is not yet in known_hosts, and record it.
+    ///
+    /// Without this an unknown host is refused and its fingerprint printed,
+    /// because a client that accepts any key has no security at all and
+    /// there is nobody to prompt when a browser started the download.
+    #[arg(long)]
+    accept_new_host_key: bool,
+
     /// For a stream, take the best rendition no taller than this.
     ///
     /// Streams offer several renditions of the same video; without this the
@@ -293,6 +309,9 @@ async fn main() -> std::process::ExitCode {
     }
     if idm_net::ftp::handles(&url) {
         return download_ftp(&url, &args, show_progress).await;
+    }
+    if idm_net::sftp::handles(&url) {
+        return download_sftp(&url, &args, show_progress).await;
     }
 
     let outcome = download_with_progress(&config, |progress| {
@@ -551,6 +570,64 @@ fn tracing_subscriber_init() {
     // over. RUST_LOG is honoured by whatever subscriber a host installs.
     if std::env::var_os("RUST_LOG").is_some() {
         tracing::debug!("tracing enabled via RUST_LOG");
+    }
+}
+
+/// Downloads over SFTP.
+async fn download_sftp(url: &str, args: &Args, show_progress: bool) -> std::process::ExitCode {
+    let mut options = idm_net::sftp::SftpOptions::new(args.out.clone());
+    options.filename = args.name.clone();
+    options.username = args.user.clone();
+    options.password = args.password.clone();
+    options.identity = args.identity.clone();
+    options.identity_passphrase = args.identity_passphrase.clone();
+    options.unknown_host = if args.accept_new_host_key {
+        idm_net::sftp::UnknownHost::AcceptNew
+    } else {
+        idm_net::sftp::UnknownHost::Refuse
+    };
+
+    let quiet = args.quiet;
+    let outcome = idm_net::sftp::download(url, &options, |done, total| {
+        if show_progress {
+            match total {
+                Some(total) if total > 0 => eprint!(
+                    "\r  {} of {}  ({:.0}%)        ",
+                    human_bytes(done),
+                    human_bytes(total),
+                    done as f64 / total as f64 * 100.0
+                ),
+                _ => eprint!("\r  {}        ", human_bytes(done)),
+            }
+            let _ = std::io::stderr().flush();
+        }
+    })
+    .await;
+
+    if show_progress {
+        eprintln!();
+    }
+
+    match outcome {
+        Ok(report) => {
+            if !quiet {
+                let resumed = if report.resumed_bytes > 0 {
+                    format!(", {} already on disk", human_bytes(report.resumed_bytes))
+                } else {
+                    String::new()
+                };
+                eprintln!(
+                    "{} — {} over SFTP{resumed}",
+                    report.path.display(),
+                    human_bytes(report.bytes)
+                );
+            }
+            std::process::ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("error: {error}");
+            std::process::ExitCode::FAILURE
+        }
     }
 }
 
