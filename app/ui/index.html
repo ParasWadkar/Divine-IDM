@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Divine IDM</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <svg class="mark" viewBox="0 0 32 32" aria-hidden="true">
+          <path d="M14 6h4v12h-4z" />
+          <path d="M16 25 7 18h18z" />
+          <path d="M7 26h18v2H7z" />
+        </svg>
+        <span>Divine IDM</span>
+      </div>
+
+      <form id="add" class="add">
+        <input
+          id="url"
+          type="url"
+          placeholder="Paste a URL to download"
+          spellcheck="false"
+          autocomplete="off"
+        />
+        <button type="submit">Download</button>
+      </form>
+
+      <div class="status">
+        <span id="engine-dot" class="dot" title="Engine"></span>
+        <span id="engine-text">starting</span>
+      </div>
+    </header>
+
+    <!-- Pairing is a security decision, so it interrupts rather than sitting
+         in a settings pane the user may never open. -->
+    <section id="pairing" class="pairing" hidden></section>
+
+    <nav class="tabs" role="tablist">
+      <button class="tab is-active" data-tab="active" role="tab">Downloads</button>
+      <button class="tab" data-tab="history" role="tab">History</button>
+      <button class="tab" data-tab="settings" role="tab">Settings</button>
+    </nav>
+
+    <main>
+      <section id="panel-active" class="panel">
+        <div class="speed">
+          <div class="speed-head">
+            <div>
+              <div id="speed-now" class="speed-now">0 B/s</div>
+              <div class="speed-label">across <span id="speed-conns">0</span> connections</div>
+            </div>
+            <div id="speed-peak" class="speed-peak"></div>
+          </div>
+          <canvas id="graph" height="72"></canvas>
+        </div>
+        <div id="jobs" class="jobs"></div>
+      </section>
+
+      <section id="panel-history" class="panel" hidden>
+        <div class="panel-head">
+          <h2>Finished</h2>
+          <button id="clear-history" class="ghost">Clear</button>
+        </div>
+        <div id="history" class="history"></div>
+      </section>
+
+      <section id="panel-settings" class="panel" hidden>
+        <h2>Browser integration</h2>
+        <label class="row switch">
+          <input type="checkbox" id="integration" />
+          <span>
+            Take over downloads from the browser
+            <small>
+              Enforced by the engine, not the extension, so it holds even if an
+              extension is out of date or compromised.
+            </small>
+          </span>
+        </label>
+
+        <label class="row">
+          <span>Only take over files larger than</span>
+          <select id="min-size">
+            <option value="1048576">1 MB</option>
+            <option value="2097152">2 MB</option>
+            <option value="5242880">5 MB</option>
+            <option value="10485760">10 MB</option>
+            <option value="52428800">50 MB</option>
+          </select>
+        </label>
+
+        <h2>When the queue finishes</h2>
+        <label class="row">
+          <span>Then</span>
+          <select id="post-action">
+            <option value="nothing">do nothing</option>
+            <option value="exit_app">quit Divine IDM</option>
+            <option value="sleep">sleep</option>
+            <option value="hibernate">hibernate</option>
+            <option value="shutdown">shut down the PC</option>
+          </select>
+        </label>
+        <label class="row">
+          <span>after a countdown of</span>
+          <select id="countdown">
+            <option value="15">15 seconds</option>
+            <option value="30">30 seconds</option>
+            <option value="60">60 seconds</option>
+            <option value="120">2 minutes</option>
+          </select>
+        </label>
+
+        <h2>Paired extensions</h2>
+        <div id="paired" class="paired"></div>
+      </section>
+    </main>
+
+    <div id="toast" class="toast" hidden></div>
+    <script type="module" src="app.js"></script>
+  </body>
+</html>

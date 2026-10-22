@@ -7,6 +7,8 @@ members = [
     "crates/idm-ipc",
     "crates/idm-host",
     "crates/idm-store",
+    "crates/idm-engine",
+    "app/src-tauri",
 ]
 
 [workspace.package]

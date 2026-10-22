@@ -10,8 +10,6 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 mod install;
-mod pairing;
-mod serve;
 
 use clap::Parser;
 use idm_core::sched::ProfileStore;
@@ -233,7 +231,7 @@ async fn main() -> std::process::ExitCode {
     }
 
     if args.serve {
-        return match serve::run(args.out.clone(), args.max_connections.max(1)).await {
+        return match idm_engine::serve::run(args.out.clone(), args.max_connections.max(1)).await {
             Ok(()) => std::process::ExitCode::SUCCESS,
             Err(error) => {
                 eprintln!("error: {error}");
@@ -249,7 +247,7 @@ async fn main() -> std::process::ExitCode {
 
     // A download works without the store; it only starts better informed,
     // so a store that will not open is a warning rather than a failure.
-    let store = open_store();
+    let store = idm_engine::open_store();
 
     let mut config = DownloadConfig::new(&url, &args.out);
     config.profiles = store.clone().map(|store| store as std::sync::Arc<dyn ProfileStore>);
@@ -526,26 +524,4 @@ fn tracing_subscriber_init() {
     if std::env::var_os("RUST_LOG").is_some() {
         tracing::debug!("tracing enabled via RUST_LOG");
     }
-}
-
-/// Opens the durable store, or explains why there is none.
-///
-/// Returns `None` rather than failing. Everything the store holds is a
-/// convenience — what was learned about a host, what is in the history —
-/// and none of it is needed to fetch bytes correctly. A database that will
-/// not open should cost a re-climbed ramp, never a download.
-pub(crate) fn open_store() -> Option<std::sync::Arc<idm_store::Store>> {
-    let path = store_path();
-    match idm_store::Store::open(&path) {
-        Ok(store) => Some(std::sync::Arc::new(store)),
-        Err(error) => {
-            eprintln!("note: continuing without the store ({error})");
-            None
-        }
-    }
-}
-
-/// `%LOCALAPPDATA%\DivineIDM\state.sqlite3`, beside the other engine state.
-pub(crate) fn store_path() -> std::path::PathBuf {
-    idm_ipc::endpoint_path().with_file_name("state.sqlite3")
 }

@@ -1,0 +1,29 @@
+[package]
+name = "idm-app"
+description = "Divine IDM desktop application."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "divine-idm"
+path = "src/main.rs"
+
+[dependencies]
+idm-core = { path = "../../crates/idm-core" }
+idm-engine = { path = "../../crates/idm-engine" }
+idm-ipc = { path = "../../crates/idm-ipc" }
+idm-store = { path = "../../crates/idm-store" }
+serde = { workspace = true }
+serde_json.workspace = true
+tauri = { version = "2.11.6", features = ["tray-icon"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "sync"] }
+tracing.workspace = true
+
+[build-dependencies]
+tauri-build = "2.6.3"
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"

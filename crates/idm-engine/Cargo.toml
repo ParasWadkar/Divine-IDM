@@ -1,0 +1,26 @@
+[package]
+name = "idm-engine"
+description = "The download engine as a library: job registry, IPC server, pairing and settings."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+idm-core = { path = "../idm-core" }
+idm-ipc = { path = "../idm-ipc" }
+idm-net = { path = "../idm-net" }
+idm-store = { path = "../idm-store" }
+serde = { workspace = true }
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "time", "sync"] }
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["full"] }
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
