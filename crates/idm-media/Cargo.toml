@@ -1,0 +1,21 @@
+[package]
+name = "idm-media"
+description = "Streaming manifests: HLS and DASH, and the sidecars that mux what they produce."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+m3u8-rs = "6.0.1"
+quick-xml = "0.41.0"
+thiserror.workspace = true
+tracing.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"

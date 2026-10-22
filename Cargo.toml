@@ -8,6 +8,7 @@ members = [
     "crates/idm-host",
     "crates/idm-store",
     "crates/idm-engine",
+    "crates/idm-media",
     "app/src-tauri",
 ]
 
