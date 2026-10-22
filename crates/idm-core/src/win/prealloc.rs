@@ -139,8 +139,10 @@ pub fn preallocate(
     let caps = volume::caps_for(path)?;
 
     // A sparse file reserves nothing, so the filesystem will not catch us
-    // running out of room -- check before writing a byte, and the writer
-    // re-checks as it goes.
+    // running out of room. Checked here before a byte is written, and again
+    // by the writer every SPACE_CHECK_INTERVAL bytes, because this check
+    // cannot know what another program will do during the hour that
+    // follows.
     let space = volume::disk_space(path)?;
     let needed = options.total_len.saturating_add(FREE_SPACE_HEADROOM);
     if space.available_to_caller < needed {

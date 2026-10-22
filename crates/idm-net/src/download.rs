@@ -35,8 +35,7 @@ use idm_core::sched::conn::{ConnController, ConnDecision, ConnPolicy, Observatio
 use idm_core::sched::probe::{ProbeOutcome, classify};
 use idm_core::sched::steal::{Action, StealPolicy, next_action};
 use idm_core::sched::{
-    ClaimId, ClaimSnapshot, HostKey, HostProfile, LiveClaim, ProfileStore, Protocol, WorkLedger,
-    ledger,
+    ClaimId, ClaimSnapshot, HostKey, LiveClaim, ProfileStore, Protocol, WorkLedger, ledger,
 };
 use idm_core::win::prealloc::{self, PreallocOptions, WriteMode};
 use idm_core::writer::{WriteAck, Writer, WriterConfig};
@@ -750,23 +749,13 @@ pub async fn download_with_progress<F: FnMut(Progress)>(
         && tuning_applies
         && fingerprint != 0
     {
-        store.save(
-            key,
-            &HostProfile {
-                best_conn_count: target_connections,
-                conn_ceiling: controller.ceiling(),
-                // Nothing measures this yet, so carry forward whatever a
-                // previous run concluded rather than asserting false.
-                multiplexing_helped: learned
-                    .as_ref()
-                    .map(|profile| profile.multiplexing_helped)
-                    .unwrap_or(false),
-                // This run did not race h3; the store keeps any earlier answer.
-                h3_won_race: None,
-                net_fingerprint: fingerprint,
-                updated_at_ms: wall_clock_ms,
-            },
-        );
+        // Built by the controller rather than assembled here. The two
+        // differ: this loop clamps the connection count in places the
+        // controller does not, so a profile written from the loop's copy
+        // can disagree with what the controller actually settled on.
+        let multiplexing_helped =
+            learned.as_ref().map(|profile| profile.multiplexing_helped).unwrap_or(false);
+        store.save(key, &controller.to_profile(wall_clock_ms, fingerprint, multiplexing_helped));
         tracing::debug!(
             host = host.as_deref().unwrap_or("?"),
             connections = target_connections,

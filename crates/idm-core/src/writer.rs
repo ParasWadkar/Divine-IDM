@@ -266,6 +266,19 @@ struct PendingChunk {
 }
 
 /// One shard: its own handle, its own reorder buffer, its own region of the file.
+/// How much is written between checks of the volume's free space.
+///
+/// Often enough to stop well before a disk fills, rare enough that the cost
+/// is nothing: one call per 512 MiB against writes measured in gigabytes.
+const SPACE_CHECK_INTERVAL: u64 = 512 << 20;
+
+/// How much room must remain for the download to carry on.
+///
+/// The same headroom preallocation demands before starting, so a download
+/// that was allowed to begin does not stop for a reason it would have been
+/// refused for.
+const SPACE_CHECK_HEADROOM: u64 = crate::win::prealloc::FREE_SPACE_HEADROOM;
+
 struct Shard {
     file: File,
     pending: BTreeMap<u64, PendingChunk>,
@@ -280,6 +293,21 @@ struct Shard {
     acks: SyncSender<WriteAck>,
     issued_bytes: Arc<AtomicU64>,
     dropped_stale: Arc<AtomicU64>,
+    /// Bytes written since the free space on the volume was last checked.
+    ///
+    /// A sparse file reserves nothing, so the filesystem will not stop this
+    /// download running the volume out of room — and the check before the
+    /// first byte cannot know what some other program will do during the
+    /// hour that follows. Without this, a disk filling up halfway through a
+    /// large download surfaces as a write error at whatever percentage it
+    /// happened to reach.
+    since_space_check: u64,
+    /// Where the file lives, for asking about its volume.
+    volume_path: std::path::PathBuf,
+    /// How much room must remain. A field rather than a constant so a test
+    /// can demand more than any disk has and prove the check fires; nothing
+    /// outside a test sets it to anything but the default.
+    space_headroom: u64,
 }
 
 impl Shard {
@@ -304,6 +332,32 @@ impl Shard {
             if !self.issue_from(start)? {
                 return Ok(());
             }
+        }
+        Ok(())
+    }
+
+    /// Stops early if the volume is running out of room.
+    ///
+    /// Reported as an ordinary write error, which the coordinator already
+    /// treats as a reason to stop and keep the part file. That is the point:
+    /// a download that stops with a clear reason and a resumable part file
+    /// is recoverable, while one that fills the disk and fails at ninety-nine
+    /// percent has taken the machine down with it.
+    fn check_space(&self) -> io::Result<()> {
+        let space = match crate::win::volume::disk_space(&self.volume_path) {
+            Ok(space) => space,
+            // Not being able to ask is not a reason to stop.
+            Err(_) => return Ok(()),
+        };
+        if space.available_to_caller < self.space_headroom {
+            return Err(io::Error::new(
+                io::ErrorKind::StorageFull,
+                format!(
+                    "only {} bytes left on the volume; stopping while the partial file is \
+                     still resumable",
+                    space.available_to_caller
+                ),
+            ));
         }
         Ok(())
     }
@@ -334,9 +388,16 @@ impl Shard {
             return Ok(false);
         }
 
+        let written_now = buffer.len() as u64;
         let result = pio::write_all_at(&self.file, start, &buffer);
         self.scratch = buffer;
         result?;
+
+        self.since_space_check += written_now;
+        if self.since_space_check >= SPACE_CHECK_INTERVAL {
+            self.since_space_check = 0;
+            self.check_space()?;
+        }
 
         let range = ByteRange::new(start, cursor);
         self.issued_bytes.fetch_add(range.len(), Ordering::Relaxed);
@@ -533,6 +594,9 @@ impl Writer {
                 acks: ack_tx.clone(),
                 issued_bytes: Arc::clone(&issued_bytes),
                 dropped_stale: Arc::clone(&dropped_stale),
+                since_space_check: 0,
+                volume_path: path.to_path_buf(),
+                space_headroom: SPACE_CHECK_HEADROOM,
             };
             // A dedicated OS thread with blocking receives, deliberately not
             // tokio::fs: that is spawn_blocking per call with an owned-buffer
@@ -643,6 +707,86 @@ impl Drop for Writer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A shard pointed at a real directory, with the space rule of our
+    /// choosing.
+    fn shard_for(
+        dir: &std::path::Path,
+        headroom: u64,
+    ) -> (Shard, std::sync::mpsc::Receiver<WriteAck>) {
+        let path = dir.join("part.bin");
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(true)
+            .open(&path)
+            .unwrap();
+        let (ack_tx, ack_rx) = std::sync::mpsc::sync_channel(64);
+        let config = WriterConfig::new(1, 1 << 20);
+        let shard = Shard {
+            file,
+            pending: BTreeMap::new(),
+            pending_bytes: 0,
+            written: RangeSet::new(),
+            crc_emitted: BTreeSet::new(),
+            scratch: Vec::new(),
+            read_back: Vec::new(),
+            config,
+            acks: ack_tx,
+            issued_bytes: Arc::new(AtomicU64::new(0)),
+            dropped_stale: Arc::new(AtomicU64::new(0)),
+            since_space_check: 0,
+            volume_path: path,
+            space_headroom: headroom,
+        };
+        (shard, ack_rx)
+    }
+
+    #[test]
+    fn a_volume_with_room_passes_the_space_check() {
+        let dir = tempfile::tempdir().unwrap();
+        let (shard, _acks) = shard_for(dir.path(), 1);
+        assert!(shard.check_space().is_ok());
+    }
+
+    #[test]
+    fn a_volume_running_out_stops_the_write_rather_than_filling_it() {
+        // The check this whole mechanism exists for. A sparse file reserves
+        // nothing, so without it a disk filling up halfway through a large
+        // download surfaces as a write failure at whatever percentage it
+        // reached, with no explanation.
+        let dir = tempfile::tempdir().unwrap();
+        let (shard, _acks) = shard_for(dir.path(), u64::MAX);
+
+        let error = shard.check_space().expect_err("no disk has u64::MAX free");
+        assert_eq!(error.kind(), std::io::ErrorKind::StorageFull);
+        assert!(error.to_string().contains("resumable"), "{error}");
+    }
+
+    #[test]
+    fn the_space_check_is_actually_reached_while_writing() {
+        // The point of the audit that produced this: a check nothing calls
+        // is worth nothing. Writing past the interval must trip it.
+        let dir = tempfile::tempdir().unwrap();
+        let (mut shard, _acks) = shard_for(dir.path(), u64::MAX);
+        // Pretend almost an interval's worth has already gone by, so one
+        // ordinary write crosses it.
+        shard.since_space_check = SPACE_CHECK_INTERVAL;
+
+        // Placed straight into the reorder buffer, which is what the
+        // message loop does with an accepted job.
+        shard.pending_bytes += 8;
+        shard.pending.insert(
+            0,
+            PendingChunk { bytes: bytes::Bytes::from_static(b"12345678"), permit: None },
+        );
+        let result = shard.drain(true);
+
+        assert!(result.is_err(), "the write should have stopped on the space check");
+        assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::StorageFull);
+    }
+
     use crate::win::prealloc::{PreallocOptions, preallocate};
     use std::sync::mpsc::RecvTimeoutError;
     use std::time::Duration;
