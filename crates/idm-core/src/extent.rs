@@ -221,10 +221,10 @@ pub fn parse_content_range(value: &str) -> Result<ContentRange, ExtentError> {
     // `last` is inclusive on the wire; this is the conversion.
     let end = last.checked_add(1).ok_or(ExtentError::Overflow)?;
     let range = ByteRange::try_new(first, end)?;
-    if let Some(total) = total {
-        if end > total {
-            return Err(ExtentError::ExceedsTotal { end, total });
-        }
+    if let Some(total) = total
+        && end > total
+    {
+        return Err(ExtentError::ExceedsTotal { end, total });
     }
     Ok(ContentRange::Satisfied { range, total })
 }

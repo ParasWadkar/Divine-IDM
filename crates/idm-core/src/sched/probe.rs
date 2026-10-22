@@ -118,10 +118,10 @@ pub fn pick_validator(facts: &ResponseFacts<'_>) -> ValidatorKind {
             return ValidatorKind::StrongETag;
         }
     }
-    if let Some(age) = facts.last_modified_age_secs {
-        if age >= MIN_LAST_MODIFIED_AGE_SECS {
-            return ValidatorKind::LastModified;
-        }
+    if let Some(age) = facts.last_modified_age_secs
+        && age >= MIN_LAST_MODIFIED_AGE_SECS
+    {
+        return ValidatorKind::LastModified;
     }
     if facts.content_length.is_some() {
         return ValidatorKind::LengthOnly;
@@ -234,15 +234,15 @@ pub fn validators_agree(
     facts: &ResponseFacts<'_>,
     observed_total: Option<u64>,
 ) -> bool {
-    if let (Some(expected), Some(seen)) = (expected_etag, facts.etag) {
-        if expected.trim() != seen.trim() {
-            return false;
-        }
+    if let (Some(expected), Some(seen)) = (expected_etag, facts.etag)
+        && expected.trim() != seen.trim()
+    {
+        return false;
     }
-    if let (Some(expected), Some(seen)) = (expected_total, observed_total) {
-        if expected != seen {
-            return false;
-        }
+    if let (Some(expected), Some(seen)) = (expected_total, observed_total)
+        && expected != seen
+    {
+        return false;
     }
     true
 }

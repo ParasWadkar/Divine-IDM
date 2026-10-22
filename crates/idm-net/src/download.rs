@@ -860,10 +860,10 @@ fn open_resumable(journal_path: &Path, data: &File, target: &Target) -> Option<J
     }
     // A changed strong validator means the file on the server is not the file
     // on disk; resuming would splice two representations together.
-    if let (Some(etag), false) = (&target.etag, journal.strings().etag.is_empty()) {
-        if journal.strings().etag != *etag {
-            return None;
-        }
+    if let (Some(etag), false) = (&target.etag, journal.strings().etag.is_empty())
+        && journal.strings().etag != *etag
+    {
+        return None;
     }
     Some(journal)
 }

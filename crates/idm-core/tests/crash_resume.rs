@@ -160,12 +160,12 @@ fn run_pass(dir: &Path, abort_after: Option<u64>, seed: u64) -> bool {
             checkpoint(&writer, &acks, &mut journal, &data, &mut pending_ranges, &mut pending_crcs);
             written_since_checkpoint = 0;
 
-            if let Some(limit) = abort_after {
-                if total_written >= limit {
-                    // The crash: no destructors, no flush, no unwinding.
-                    eprintln!("driver: aborting after {total_written} bytes");
-                    std::process::abort();
-                }
+            if let Some(limit) = abort_after
+                && total_written >= limit
+            {
+                // The crash: no destructors, no flush, no unwinding.
+                eprintln!("driver: aborting after {total_written} bytes");
+                std::process::abort();
             }
         }
     }

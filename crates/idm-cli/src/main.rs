@@ -129,6 +129,18 @@ struct Args {
     #[arg(long)]
     cookies: Option<String>,
 
+    /// Username, for a server that wants one.
+    ///
+    /// Preferred over putting credentials in the address: a URL reaches the
+    /// job list, the history and any log line that prints it, and a password
+    /// in one ends up in all three.
+    #[arg(long)]
+    user: Option<String>,
+
+    /// Password, for a server that wants one.
+    #[arg(long)]
+    password: Option<String>,
+
     /// For a stream, take the best rendition no taller than this.
     ///
     /// Streams offer several renditions of the same video; without this the
@@ -278,6 +290,9 @@ async fn main() -> std::process::ExitCode {
     // what actually decides, inside.
     if idm_net::stream::looks_like_manifest(&url) {
         return download_stream(&url, &args, show_progress).await;
+    }
+    if idm_net::ftp::handles(&url) {
+        return download_ftp(&url, &args, show_progress).await;
     }
 
     let outcome = download_with_progress(&config, |progress| {
@@ -536,6 +551,58 @@ fn tracing_subscriber_init() {
     // over. RUST_LOG is honoured by whatever subscriber a host installs.
     if std::env::var_os("RUST_LOG").is_some() {
         tracing::debug!("tracing enabled via RUST_LOG");
+    }
+}
+
+/// Downloads over FTP or FTPS.
+async fn download_ftp(url: &str, args: &Args, show_progress: bool) -> std::process::ExitCode {
+    let mut options = idm_net::ftp::FtpOptions::new(args.out.clone());
+    options.filename = args.name.clone();
+    options.username = args.user.clone();
+    options.password = args.password.clone();
+
+    let quiet = args.quiet;
+    let outcome = idm_net::ftp::download(url, &options, move |done, total| {
+        if show_progress {
+            match total {
+                Some(total) if total > 0 => eprint!(
+                    "\r  {} of {}  ({:.0}%)        ",
+                    human_bytes(done),
+                    human_bytes(total),
+                    done as f64 / total as f64 * 100.0
+                ),
+                _ => eprint!("\r  {}        ", human_bytes(done)),
+            }
+            let _ = std::io::stderr().flush();
+        }
+    })
+    .await;
+
+    if show_progress {
+        eprintln!();
+    }
+
+    match outcome {
+        Ok(report) => {
+            if !quiet {
+                let how = if report.secure { "FTPS" } else { "FTP" };
+                let resumed = if report.resumed_bytes > 0 {
+                    format!(", {} already on disk", human_bytes(report.resumed_bytes))
+                } else {
+                    String::new()
+                };
+                eprintln!(
+                    "{} — {} over {how}{resumed}",
+                    report.path.display(),
+                    human_bytes(report.bytes)
+                );
+            }
+            std::process::ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("error: {error}");
+            std::process::ExitCode::FAILURE
+        }
     }
 }
 

@@ -211,10 +211,10 @@ pub fn next_action(
     policy: &StealPolicy,
 ) -> Action {
     // Free work always wins: it costs no cancellation and wastes nothing.
-    if let Some(gap) = free_gap {
-        if !gap.is_empty() {
-            return Action::TakeGap(gap);
-        }
+    if let Some(gap) = free_gap
+        && !gap.is_empty()
+    {
+        return Action::TakeGap(gap);
     }
 
     match plan_split(claims, thief_rate_bps, steal_tokens, policy) {

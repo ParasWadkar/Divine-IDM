@@ -18,6 +18,10 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "ti
 tokio-stream.workspace = true
 tracing.workspace = true
 url.workspace = true
+# native-tls rather than rustls for FTPS: it uses the operating system's
+# trust store, which is what an FTPS server with a corporate or self-signed
+# certificate needs, and it needs no client config built by hand.
+suppaftp = { version = "12", features = ["native-tls"] }
 
 [dev-dependencies]
 tempfile.workspace = true

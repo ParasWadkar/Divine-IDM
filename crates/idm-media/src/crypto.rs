@@ -65,7 +65,7 @@ pub fn decrypt_segment(
     if ciphertext.is_empty() {
         return Ok(Vec::new());
     }
-    if ciphertext.len() % 16 != 0 {
+    if !ciphertext.len().is_multiple_of(16) {
         return Err(MediaError::Unsupported(format!(
             "an encrypted segment is {} bytes, which is not a whole number of AES blocks",
             ciphertext.len()

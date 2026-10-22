@@ -82,7 +82,21 @@ impl DownloadRequest {
     /// Only `http` and `https` are accepted. `file:` would turn the extension
     /// into a local file reader, and `data:`/`blob:` carry their payload in
     /// the URL itself, which has no business going through a download engine.
+    /// Checks a request from a browser extension.
+    ///
+    /// The strict form: http and https only. A page cannot be allowed to
+    /// hand over an `ftp://` address — it would carry credentials in the
+    /// URL, and it would let a web page reach file servers inside a network
+    /// the browser itself could not reach.
     pub fn validate(&self) -> Result<(), String> {
+        self.validate_with(false)
+    }
+
+    /// Checks a request, optionally allowing file-transfer protocols.
+    ///
+    /// `file_transfer` is true only for the application and the command
+    /// line, where the address came from the person using them.
+    pub fn validate_with(&self, file_transfer: bool) -> Result<(), String> {
         let url = self.url.trim();
         if url.is_empty() {
             return Err("empty url".into());
@@ -91,8 +105,17 @@ impl DownloadRequest {
             return Err("url is implausibly long".into());
         }
         let lower = url.to_ascii_lowercase();
-        if !(lower.starts_with("http://") || lower.starts_with("https://")) {
-            return Err("only http and https urls are accepted".into());
+        let web = lower.starts_with("http://") || lower.starts_with("https://");
+        let transfer = file_transfer
+            && (lower.starts_with("ftp://")
+                || lower.starts_with("ftps://")
+                || lower.starts_with("sftp://"));
+        if !(web || transfer) {
+            return Err(if file_transfer {
+                "only http, https, ftp, ftps and sftp urls are accepted".into()
+            } else {
+                "only http and https urls are accepted".to_owned()
+            });
         }
         if let Some(name) = &self.filename {
             if name.len() > 512 {
@@ -404,6 +427,35 @@ mod tests {
     fn the_scheme_check_is_case_insensitive() {
         // Otherwise "FILE://" walks straight past it.
         assert!(request("HTTPS://example.invalid/a.bin").validate().is_ok());
+    }
+
+    #[test]
+    fn a_browser_may_not_hand_over_a_file_transfer_address() {
+        // It would carry credentials in the URL, and let a web page reach
+        // servers inside a network the browser itself could not.
+        for url in [
+            "ftp://user:pass@fileserver.internal/secrets.zip",
+            "ftps://fileserver.internal/a.bin",
+            "sftp://root@10.0.0.1/etc/shadow",
+        ] {
+            assert!(request(url).validate().is_err(), "{url} should be refused from a browser");
+            assert!(
+                request(url).validate_with(true).is_ok(),
+                "{url} should be allowed from the app"
+            );
+        }
+    }
+
+    #[test]
+    fn allowing_file_transfer_does_not_allow_everything_else() {
+        for url in [
+            "file:///C:/Windows/System32/config/SAM",
+            "data:text/plain;base64,AAAA",
+            "javascript:alert(1)",
+            "\\\\server\\share\\file",
+        ] {
+            assert!(request(url).validate_with(true).is_err(), "{url} should still be refused");
+        }
         assert!(request("FILE:///C:/secret").validate().is_err());
         assert!(request("JavaScript:alert(1)").validate().is_err());
     }

@@ -119,8 +119,13 @@ impl Engine {
     ///
     /// Returns a sanitised *leaf* name. The caller joins it to our output
     /// directory; nothing from the request contributes a path component.
-    fn vet(&self, request: &DownloadRequest, min_takeover_bytes: u64) -> Result<String, String> {
-        request.validate()?;
+    fn vet(
+        &self,
+        request: &DownloadRequest,
+        min_takeover_bytes: u64,
+        file_transfer: bool,
+    ) -> Result<String, String> {
+        request.validate_with(file_transfer)?;
 
         // The threshold is about whether a download is big enough to be
         // worth taking over. A stream manifest is a few hundred bytes and
@@ -178,7 +183,10 @@ impl Engine {
             }
         }
 
-        let filename = match self.vet(&request, settings.min_takeover_bytes) {
+        // Only the app and the command line may name an ftp or sftp
+        // address. A page handing one over would put credentials in a URL
+        // and reach servers the browser itself could not.
+        let filename = match self.vet(&request, settings.min_takeover_bytes, !client.is_browser()) {
             Ok(name) => name,
             Err(reason) => return Response::Rejected { reason },
         };
@@ -402,13 +410,13 @@ impl Engine {
 /// Uses `try_lock` deliberately: progress is advisory, and a checkpoint should
 /// never stall because something else is reading the registry.
 fn record_progress(inner: &Inner, id: JobId, progress: &Progress) {
-    if let Ok(mut jobs) = inner.jobs.try_lock() {
-        if let Some(record) = jobs.get_mut(&id) {
-            record.status.downloaded = progress.durable;
-            record.status.total = Some(progress.total);
-            record.status.bytes_per_sec = progress.rate_bps;
-            record.status.connections = progress.connections;
-        }
+    if let Ok(mut jobs) = inner.jobs.try_lock()
+        && let Some(record) = jobs.get_mut(&id)
+    {
+        record.status.downloaded = progress.durable;
+        record.status.total = Some(progress.total);
+        record.status.bytes_per_sec = progress.rate_bps;
+        record.status.connections = progress.connections;
     }
 }
 
@@ -981,7 +989,7 @@ mod tests {
             let mut req = request("https://example.invalid/a.bin");
             req.filename = Some(hostile.into());
             // Either refused outright, or reduced to a bare leaf name.
-            if let Ok(name) = engine.vet(&req, 0) {
+            if let Ok(name) = engine.vet(&req, 0, false) {
                 assert!(!name.contains('/') && !name.contains('\\'), "{hostile} -> {name}");
                 assert!(!name.contains(".."), "{hostile} -> {name}");
             }
@@ -993,13 +1001,14 @@ mod tests {
         let (_dir, engine) = engine();
         let mut req = request("https://example.invalid/a.bin");
         req.filename = Some("CON".into());
-        assert_eq!(engine.vet(&req, 0).unwrap(), "_CON");
+        assert_eq!(engine.vet(&req, 0, false).unwrap(), "_CON");
     }
 
     #[test]
     fn a_filename_is_derived_from_the_url_when_none_is_given() {
         let (_dir, engine) = engine();
-        let name = engine.vet(&request("https://example.invalid/path/report.pdf?x=1"), 0).unwrap();
+        let name =
+            engine.vet(&request("https://example.invalid/path/report.pdf?x=1"), 0, false).unwrap();
         assert_eq!(name, "report.pdf");
     }
 
@@ -1010,20 +1019,23 @@ mod tests {
         let threshold = Settings::default().min_takeover_bytes;
         let mut req = request("https://example.invalid/small.bin");
         req.size_hint = Some(100 << 10);
-        assert!(engine.vet(&req, threshold).is_err());
+        assert!(engine.vet(&req, threshold, false).is_err());
 
         req.size_hint = Some(50 << 20);
-        assert!(engine.vet(&req, threshold).is_ok());
+        assert!(engine.vet(&req, threshold, false).is_ok());
         // An unknown size is accepted; the probe will settle it.
         req.size_hint = None;
-        assert!(engine.vet(&req, threshold).is_ok());
+        assert!(engine.vet(&req, threshold, false).is_ok());
     }
 
     #[test]
     fn non_http_schemes_never_reach_the_engine() {
         let (_dir, engine) = engine();
         for hostile in ["file:///C:/secret", "data:text/plain,hi", "javascript:alert(1)"] {
-            assert!(engine.vet(&request(hostile), 0).is_err(), "{hostile} should be refused");
+            assert!(
+                engine.vet(&request(hostile), 0, false).is_err(),
+                "{hostile} should be refused"
+            );
         }
     }
 

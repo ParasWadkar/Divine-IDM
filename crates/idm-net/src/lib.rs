@@ -11,4 +11,5 @@ pub mod client;
 pub mod download;
 pub mod facts;
 pub mod fetch;
+pub mod ftp;
 pub mod stream;

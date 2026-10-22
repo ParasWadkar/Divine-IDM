@@ -548,8 +548,11 @@ impl Journal {
         // A short read means the table was never fully written; the zeros left
         // behind simply read as "not recorded".
         let read = pio::read_at(&self.file, self.layout.block_crc_off, &mut bytes)?;
-        for (index, chunk) in bytes[..read - read % 4].chunks_exact(4).enumerate() {
-            self.block_crc[index] = u32::from_le_bytes(chunk.try_into().unwrap());
+        // `as_chunks` gives fixed-size arrays, so there is no fallible
+        // conversion to unwrap on every entry.
+        let (whole, _) = bytes[..read - read % 4].as_chunks::<4>();
+        for (index, chunk) in whole.iter().enumerate() {
+            self.block_crc[index] = u32::from_le_bytes(*chunk);
         }
         Ok(())
     }
@@ -825,10 +828,10 @@ impl Journal {
     /// from backup or recreated, in which case the extent map describes bytes
     /// that are not there.
     pub fn check_part_file(&self, data_file: &File) -> Result<(), JournalError> {
-        if let Ok(identity) = FileIdentity::of(data_file) {
-            if identity != self.header.part_identity {
-                return Err(JournalError::IdentityMismatch);
-            }
+        if let Ok(identity) = FileIdentity::of(data_file)
+            && identity != self.header.part_identity
+        {
+            return Err(JournalError::IdentityMismatch);
         }
         if self.header.flags & flags::LENGTH_UNKNOWN == 0 {
             let actual = data_file.metadata()?.len();

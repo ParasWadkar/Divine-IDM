@@ -170,10 +170,8 @@ pub fn preallocate(
 
     // On a non-sparse file, reserving clusters up front limits fragmentation.
     // It does not help a sparse file, where allocation follows the writes.
-    if !sparse {
-        if let Err(error) = platform::set_allocation_size(file, options.total_len) {
-            tracing::debug!(%error, "FileAllocationInfo failed; continuing");
-        }
+    if !sparse && let Err(error) = platform::set_allocation_size(file, options.total_len) {
+        tracing::debug!(%error, "FileAllocationInfo failed; continuing");
     }
 
     // Step 3: SetFileValidData, only when everything lines up and the user
