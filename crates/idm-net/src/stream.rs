@@ -17,7 +17,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use idm_media::sidecar::{self, Tool};
-use idm_media::{Plan, Track, assemble, container_for, dash, hls};
+use idm_media::{Decryption, Plan, Track, assemble, container_for, crypto, dash, hls};
 use tokio::sync::Semaphore;
 
 use crate::client::HttpConfig;
@@ -189,6 +189,10 @@ fn plan_dash(body: &str, url: &str, options: &StreamOptions) -> Result<Plan> {
         init: audio.init.clone(),
         segments: audio.segments.clone(),
         container: audio.segments.first().map_or("m4a", |u| container_for(u)),
+        // DASH protects content with Common Encryption, which is a
+        // different mechanism from HLS's whole-segment AES-128 and needs a
+        // licence server. Nothing here claims to handle it.
+        decryption: None,
     });
 
     Ok(Plan {
@@ -196,6 +200,7 @@ fn plan_dash(body: &str, url: &str, options: &StreamOptions) -> Result<Plan> {
             init: video.init.clone(),
             segments: video.segments.clone(),
             container: video.segments.first().map_or("mp4", |u| container_for(u)),
+            decryption: None,
         },
         audio,
         live: manifest.live,
@@ -205,10 +210,22 @@ fn plan_dash(body: &str, url: &str, options: &StreamOptions) -> Result<Plan> {
 
 fn track_from(media: &hls::Media) -> Track {
     let segments: Vec<String> = media.segments.iter().map(|s| s.url.clone()).collect();
+    // The first segment's number, because each segment's initialisation
+    // vector is derived from its own.
+    let first_sequence = media.segments.first().map_or(0, |s| s.sequence);
+
+    let decryption = match &media.encryption {
+        hls::Encryption::Aes128 { key_url, iv } => {
+            Some(Decryption { key_url: key_url.clone(), stated_iv: *iv, first_sequence })
+        }
+        _ => None,
+    };
+
     Track {
         container: segments.first().map_or("ts", |u| container_for(u)),
         init: media.init.clone(),
         segments,
+        decryption,
     }
 }
 
@@ -368,6 +385,23 @@ where
     let offset = usize::from(track.init.is_some());
     urls.extend(track.segments.iter().cloned().enumerate().map(|(i, u)| (i + offset, u)));
 
+    // Fetched once rather than per segment: a playlist names one key for
+    // all of them, and asking the key server hundreds of times for the same
+    // sixteen bytes is both slow and conspicuous.
+    let key = match &track.decryption {
+        Some(decryption) => {
+            let bytes = get_bytes(
+                client,
+                &decryption.key_url,
+                options.referrer.as_deref(),
+                options.cookies.as_deref(),
+            )
+            .await?;
+            Some(crypto::key_from_bytes(&bytes)?)
+        }
+        None => None,
+    };
+
     let limit = Arc::new(Semaphore::new(options.concurrency.max(1)));
     let mut tasks = Vec::with_capacity(urls.len());
 
@@ -382,10 +416,22 @@ where
         let bytes = Arc::clone(bytes);
         let referrer = options.referrer.clone();
         let cookies = options.cookies.clone();
+        // The initialisation segment is not part of the encrypted sequence,
+        // so only media segments are numbered for a vector.
+        let iv = match (&track.decryption, index.checked_sub(offset)) {
+            (Some(decryption), Some(segment_index)) => Some(decryption.iv_for_index(segment_index)),
+            _ => None,
+        };
 
         tasks.push(tokio::spawn(async move {
             let _permit = limit.acquire().await;
             let body = get_bytes(&client, &url, referrer.as_deref(), cookies.as_deref()).await?;
+
+            let body = match (key, iv) {
+                (Some(key), Some(iv)) => crypto::decrypt_segment(&key, &iv, &body)?,
+                _ => body,
+            };
+
             std::fs::write(&path, &body)?;
             done.fetch_add(1, Ordering::Relaxed);
             bytes.fetch_add(body.len() as u64, Ordering::Relaxed);

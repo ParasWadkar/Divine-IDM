@@ -15,6 +15,7 @@
 // GET /_routes for the machine-readable route list.
 
 import { createServer } from "node:http";
+import { createCipheriv } from "node:crypto";
 import { gzipSync } from "node:zlib";
 
 const DEFAULT_PORT = 8080;
@@ -27,6 +28,22 @@ function byteAt(offset) {
   x = Math.imul(x ^ (x >>> 13), 0xc2b2ae35);
   x = x ^ (x >>> 16);
   return x & 0xff;
+}
+
+/** The key the encrypted HLS routes use. Fixed, so tests are repeatable. */
+const HLS_KEY = Buffer.from("0123456789abcdef0123456789abcdef", "hex");
+
+/** An explicit IV, for the playlist variant that states one. */
+const STATED_IV = Buffer.from("00112233445566778899aabbccddeeff", "hex");
+
+/**
+ * The IV HLS derives from a media sequence number: the number as a
+ * 16-octet big-endian value, per RFC 8216.
+ */
+function ivForSequence(sequence) {
+  const iv = Buffer.alloc(16);
+  iv.writeBigUInt64BE(BigInt(sequence), 8);
+  return iv;
 }
 
 /** Bytes for the half-open range [start, end). */
@@ -135,6 +152,77 @@ const routes = {
   // exercised without reaching the internet. The segments are slices of the
   // same generated sequence every other route uses, which means the joined
   // file can be verified byte for byte against it.
+
+  "/hls/key.bin": {
+    description: "The AES-128 key for the encrypted HLS stream. Sixteen bytes.",
+    handler: (req, res) => {
+      res.writeHead(200, {
+        "Content-Type": "application/octet-stream",
+        "Content-Length": HLS_KEY.length,
+      });
+      res.end(HLS_KEY);
+    },
+  },
+
+  "/hls-aes/index.m3u8": {
+    description:
+      "AES-128 encrypted HLS media playlist. ?iv=stated uses an explicit IV; " +
+      "otherwise the media sequence number is the IV, which is the usual case.",
+    handler: (req, res, url) => {
+      const origin = `http://${req.headers.host}`;
+      const count = Number(url.searchParams.get("segments") ?? 6);
+      const size = Number(url.searchParams.get("size") ?? 32768);
+      const first = Number(url.searchParams.get("first") ?? 0);
+      const stated = url.searchParams.get("iv") === "stated";
+
+      const lines = [
+        "#EXTM3U",
+        "#EXT-X-VERSION:3",
+        "#EXT-X-TARGETDURATION:2",
+        `#EXT-X-MEDIA-SEQUENCE:${first}`,
+      ];
+      const keyTag = stated
+        ? `#EXT-X-KEY:METHOD=AES-128,URI="${origin}/hls/key.bin",IV=0x${STATED_IV.toString("hex")}`
+        : `#EXT-X-KEY:METHOD=AES-128,URI="${origin}/hls/key.bin"`;
+      lines.push(keyTag);
+
+      for (let i = 0; i < count; i += 1) {
+        lines.push("#EXTINF:2.0,");
+        lines.push(
+          `seg${i}.ts?size=${size}&index=${i}&seq=${first + i}` +
+            (stated ? "&iv=stated" : ""),
+        );
+      }
+      lines.push("#EXT-X-ENDLIST", "");
+      const body = lines.join("\n");
+      res.writeHead(200, {
+        "Content-Type": "application/vnd.apple.mpegurl",
+        "Content-Length": Buffer.byteLength(body),
+      });
+      res.end(body);
+    },
+  },
+
+  "/hls-aes/segment": {
+    description: "One AES-128 encrypted segment of the generated sequence.",
+    handler: (req, res, url) => {
+      const size = Number(url.searchParams.get("size") ?? 32768);
+      const index = Number(url.searchParams.get("index") ?? 0);
+      const sequence = Number(url.searchParams.get("seq") ?? index);
+      const stated = url.searchParams.get("iv") === "stated";
+
+      const plaintext = bodyFor(index * size, (index + 1) * size);
+      const iv = stated ? STATED_IV : ivForSequence(sequence);
+      const cipher = createCipheriv("aes-128-cbc", HLS_KEY, iv);
+      const body = Buffer.concat([cipher.update(plaintext), cipher.final()]);
+
+      res.writeHead(200, {
+        "Content-Type": "video/mp2t",
+        "Content-Length": body.length,
+      });
+      res.end(body);
+    },
+  },
 
   "/hls/master.m3u8": {
     description: "HLS master playlist offering three renditions.",
@@ -554,6 +642,8 @@ const server = createServer((req, res) => {
   let pathname = url.pathname;
   if (/^\/hls\/[^/]+\/index\.m3u8$/.test(pathname)) {
     pathname = "/hls/index.m3u8";
+  } else if (/^\/hls-aes\/seg\d+\.ts$/.test(pathname)) {
+    pathname = "/hls-aes/segment";
   } else if (/^\/hls\/[^/]+\/seg\d+\.ts$/.test(pathname)) {
     pathname = "/hls/segment";
   }

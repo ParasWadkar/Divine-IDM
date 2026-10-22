@@ -125,6 +125,44 @@ async function main() {
       result.status === 0 && /ffmpeg was not found/.test(said),
       /ffmpeg/.test(said) ? "noted" : "no note (ffmpeg may be installed)",
     );
+    // 5. AES-128 encrypted streams. Each segment is encrypted with its own
+    //    initialisation vector, derived from its media sequence number, so a
+    //    stream decrypted with one vector throughout gives a correct first
+    //    segment and ruins every one after — which reads as success unless
+    //    the bytes are checked.
+    for (const [label, query, segments, size] of [
+      ["an encrypted stream decrypts", "", 6, 32768],
+      ["a stated initialisation vector is used", "&iv=stated", 4, 16384],
+      ["a media sequence offset is carried into the vector", "&first=9000", 4, 16384],
+    ]) {
+      const dir = mkdtempSync(join(tmpdir(), "idm-stream-"));
+      const got = run(
+        `http://127.0.0.1:${PORT}/hls-aes/index.m3u8?segments=${segments}&size=${size}${query}`,
+        dir,
+      );
+      const file = onlyFile(dir);
+      let verdict = "no file";
+      let ok = false;
+
+      if (got.status === 0 && file) {
+        const body = readFileSync(file);
+        let bad = -1;
+        for (let i = 0; i < body.length; i += 1) {
+          if (body[i] !== byteAt(i)) {
+            bad = i;
+            break;
+          }
+        }
+        ok = bad < 0 && body.length === segments * size;
+        verdict = bad < 0 ? `${body.length} bytes, all correct` : `wrong at byte ${bad}`;
+      } else {
+        verdict = (got.stderr || got.stdout).trim().split("\n").pop() ?? "failed";
+      }
+
+      check(label, ok, verdict);
+      rmSync(dir, { recursive: true, force: true });
+    }
+
   } finally {
     mock.kill();
     await sleep(500);

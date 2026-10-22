@@ -12,6 +12,7 @@
 //! knows how to do it quickly.
 
 pub mod assemble;
+pub mod crypto;
 pub mod dash;
 pub mod hls;
 pub mod sidecar;
@@ -60,6 +61,29 @@ pub struct Track {
     pub segments: Vec<String>,
     /// What the joined segments will be: `ts`, `mp4`, `m4a`, `webm`.
     pub container: &'static str,
+    /// Set when the segments are AES-128 encrypted.
+    pub decryption: Option<Decryption>,
+}
+
+/// What is needed to decrypt a track's segments.
+///
+/// The sequence number of the first segment is kept because each segment is
+/// encrypted with its own initialisation vector, derived from its own
+/// number. A track decrypted with one vector throughout yields a correct
+/// first segment and ruins every one after it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Decryption {
+    pub key_url: String,
+    /// Stated by the playlist. When absent the sequence number is used.
+    pub stated_iv: Option<[u8; 16]>,
+    pub first_sequence: u64,
+}
+
+impl Decryption {
+    /// The initialisation vector for the segment at `index` in this track.
+    pub fn iv_for_index(&self, index: usize) -> [u8; 16] {
+        crate::crypto::iv_for(self.first_sequence + index as u64, self.stated_iv)
+    }
 }
 
 impl Plan {
@@ -128,6 +152,7 @@ mod tests {
                 init: Some("https://x/init.mp4".into()),
                 segments: vec!["https://x/1.m4s".into(), "https://x/2.m4s".into()],
                 container: "mp4",
+                decryption: None,
             },
             audio: None,
             live: false,
@@ -139,11 +164,37 @@ mod tests {
     }
 
     #[test]
+    fn each_segment_of_an_encrypted_track_gets_its_own_vector() {
+        // Not decoration: one vector for the whole track decrypts the first
+        // segment correctly and ruins the rest, which reads as success.
+        let decryption = Decryption {
+            key_url: "https://x/key.bin".into(),
+            stated_iv: None,
+            first_sequence: 100,
+        };
+        assert_eq!(decryption.iv_for_index(0), crypto::iv_for(100, None));
+        assert_eq!(decryption.iv_for_index(5), crypto::iv_for(105, None));
+        assert_ne!(decryption.iv_for_index(0), decryption.iv_for_index(1));
+    }
+
+    #[test]
+    fn a_stated_vector_is_used_for_every_segment() {
+        let decryption = Decryption {
+            key_url: "https://x/key.bin".into(),
+            stated_iv: Some([7u8; 16]),
+            first_sequence: 100,
+        };
+        assert_eq!(decryption.iv_for_index(0), [7u8; 16]);
+        assert_eq!(decryption.iv_for_index(9), [7u8; 16]);
+    }
+
+    #[test]
     fn two_tracks_need_muxing_and_one_does_not() {
         let track = |name: &str| Track {
             init: None,
             segments: vec![format!("https://x/{name}.ts")],
             container: "ts",
+            decryption: None,
         };
         let mut plan = Plan { video: track("v"), audio: None, live: false, label: "720p".into() };
         assert!(!plan.needs_muxing());
