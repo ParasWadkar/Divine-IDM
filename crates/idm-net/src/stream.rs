@@ -252,7 +252,7 @@ where
     let stem = options
         .filename
         .clone()
-        .map(|name| name.trim_end_matches(".mp4").to_owned())
+        .map(|name| strip_known_extension(&name))
         .unwrap_or_else(|| stem_from(url));
 
     std::fs::create_dir_all(&options.output_dir)?;
@@ -487,6 +487,22 @@ async fn get_bytes(
     Ok(response.bytes().await.map_err(|error| StreamError::Http(error.to_string()))?.to_vec())
 }
 
+/// Removes an extension the output is about to be given a better one than.
+///
+/// A browser suggests the manifest's own name, so a stream handed over as
+/// `lecture.m3u8` would otherwise be saved as `lecture.m3u8.ts`. Only
+/// extensions this code knows it is replacing are removed; anything else is
+/// part of the name the user chose.
+fn strip_known_extension(name: &str) -> String {
+    let lowered = name.to_ascii_lowercase();
+    for extension in [".m3u8", ".m3u", ".mpd", ".mp4", ".ts", ".m4s", ".m4a", ".webm"] {
+        if lowered.ends_with(extension) {
+            return name[..name.len() - extension.len()].to_owned();
+        }
+    }
+    name.to_owned()
+}
+
 /// A name for the output, from the manifest address.
 fn stem_from(url: &str) -> String {
     let path = url.split(['?', '#']).next().unwrap_or(url);
@@ -568,6 +584,18 @@ mod tests {
             assert!(!stem.contains(['/', '\\', ':']), "{stem}");
             assert!(!stem.contains(".."), "{stem}");
         }
+    }
+
+    #[test]
+    fn a_suggested_name_does_not_keep_the_manifest_extension() {
+        // A browser hands over the playlist's own name, so without this a
+        // stream is saved as lecture.m3u8.ts.
+        assert_eq!(strip_known_extension("lecture.m3u8"), "lecture");
+        assert_eq!(strip_known_extension("talk.MPD"), "talk");
+        assert_eq!(strip_known_extension("holiday.mp4"), "holiday");
+        // Anything else is part of the name the user chose.
+        assert_eq!(strip_known_extension("report.2024"), "report.2024");
+        assert_eq!(strip_known_extension("no extension"), "no extension");
     }
 
     #[test]

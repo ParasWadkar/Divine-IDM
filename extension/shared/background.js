@@ -287,11 +287,24 @@ async function shouldTakeOver(item, settings) {
   if (!/^https?:/i.test(item.url ?? "")) return false;
   if (item.byExtensionId) return false; // started by another extension
   if (settings.skipExtensions.includes(extensionOf(item.filename))) return false;
+
+  // A stream manifest is a few hundred bytes and stands for a video of
+  // gigabytes, so the size rule must not be applied to it. Measuring the
+  // playlist would leave every stream to the browser, which cannot fetch
+  // the segments in parallel and cannot join them.
+  if (isManifest(item.url ?? "") || isManifest(item.filename ?? "")) return true;
+
   // Unknown size is allowed through; the engine probes and decides.
   if (typeof item.fileSize === "number" && item.fileSize > 0) {
     if (item.fileSize < settings.minSizeBytes) return false;
   }
   return true;
+}
+
+/** Whether an address names a stream manifest rather than a file. */
+function isManifest(target) {
+  const path = String(target).split(/[?#]/)[0].toLowerCase();
+  return path.endsWith(".m3u8") || path.endsWith(".m3u") || path.endsWith(".mpd");
 }
 
 /** Collects cookies for a URL, only if the user opted in and granted access. */

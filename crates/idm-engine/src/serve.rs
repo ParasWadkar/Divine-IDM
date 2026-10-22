@@ -122,12 +122,18 @@ impl Engine {
     fn vet(&self, request: &DownloadRequest, min_takeover_bytes: u64) -> Result<String, String> {
         request.validate()?;
 
-        if let Some(size) = request.size_hint {
-            if size < min_takeover_bytes {
-                return Err(format!(
-                    "{size} bytes is below the {min_takeover_bytes} byte takeover threshold"
-                ));
-            }
+        // The threshold is about whether a download is big enough to be
+        // worth taking over. A stream manifest is a few hundred bytes and
+        // stands for a video of gigabytes, so its own size says nothing —
+        // measuring it would refuse every stream there is.
+        let manifest = idm_net::stream::looks_like_manifest(&request.url);
+        if let Some(size) = request.size_hint
+            && !manifest
+            && size < min_takeover_bytes
+        {
+            return Err(format!(
+                "{size} bytes is below the {min_takeover_bytes} byte takeover threshold"
+            ));
         }
 
         // A suggested name goes through the same sanitiser as a
@@ -406,6 +412,74 @@ fn record_progress(inner: &Inner, id: JobId, progress: &Progress) {
     }
 }
 
+/// Segments fetched at once for a stream, mirrored from the stream
+/// options so the status can say how many requests are in flight.
+const STREAM_CONCURRENCY: usize = 8;
+
+/// An ordinary file, through the scheduler.
+async fn run_file(
+    inner: &Arc<Inner>,
+    id: JobId,
+    config: &DownloadConfig,
+) -> std::result::Result<Option<u64>, String> {
+    let progress_inner = Arc::clone(inner);
+    let report = download_with_progress(config, move |progress: Progress| {
+        record_progress(&progress_inner, id, &progress);
+    })
+    .await
+    .map_err(|error| error.to_string())?;
+
+    if report.resumed_bytes > 0 {
+        // Worth saying out loud: it is the difference between picking a
+        // download up and quietly starting it again from nothing.
+        eprintln!(
+            "resumed {} after {} bytes already on disk",
+            report.path.display(),
+            report.resumed_bytes
+        );
+    }
+    Ok(Some(report.total))
+}
+
+/// A stream: manifest, rendition, segments, one file.
+///
+/// Progress is counted in segments rather than in a total that is not known
+/// until the last one arrives. The job's byte count still moves, so the
+/// window shows something advancing, but its total stays unset rather than
+/// being invented from a guess at the segment size.
+async fn run_stream(
+    inner: &Arc<Inner>,
+    id: JobId,
+    config: &DownloadConfig,
+) -> std::result::Result<Option<u64>, String> {
+    let mut options = idm_net::stream::StreamOptions::new(config.output_dir.clone());
+    options.filename = config.filename.clone();
+    options.referrer = config.referrer.clone();
+    options.cookies = config.cookies.clone();
+
+    let progress_inner = Arc::clone(inner);
+    let report = idm_net::stream::download(&config.url, &options, move |progress| {
+        if let Ok(mut jobs) = progress_inner.jobs.try_lock()
+            && let Some(record) = jobs.get_mut(&id)
+        {
+            record.status.downloaded = progress.bytes;
+            // How many segments are still being fetched, capped by how many
+            // are fetched at once. The status has no field for segments, and
+            // inventing a total from the bytes so far would put a progress
+            // bar on a number nobody measured.
+            let outstanding = progress.segments_total.saturating_sub(progress.segments_done);
+            record.status.connections = outstanding.min(STREAM_CONCURRENCY) as u32;
+        }
+    })
+    .await
+    .map_err(|error| error.to_string())?;
+
+    if let Some(note) = &report.note {
+        eprintln!("note: {note}");
+    }
+    Ok(Some(report.bytes))
+}
+
 /// Starts waiting downloads while there is room for them.
 ///
 /// Called when a job is queued and again when one finishes, rather than on a
@@ -488,30 +562,23 @@ async fn start(inner: &Arc<Inner>, id: JobId, config: DownloadConfig) {
         tokio::spawn(async move {
             set_state(&inner, id, JobState::Running).await;
 
-            let progress_inner = Arc::clone(&inner);
-            let outcome = download_with_progress(&config, move |progress: Progress| {
-                record_progress(&progress_inner, id, &progress);
-            })
-            .await;
+            // A manifest is not a file. Routed here rather than in the
+            // caller so every client — the window, the browser extension,
+            // the command line — gets streams without each one deciding.
+            let outcome = if idm_net::stream::looks_like_manifest(&config.url) {
+                run_stream(&inner, id, &config).await
+            } else {
+                run_file(&inner, id, &config).await
+            };
 
             match outcome {
-                Ok(report) => {
-                    if report.resumed_bytes > 0 {
-                        // Worth saying out loud: it is the difference
-                        // between picking a download up and quietly
-                        // starting it again from nothing.
-                        eprintln!(
-                            "resumed {} after {} bytes already on disk",
-                            report.path.display(),
-                            report.resumed_bytes
-                        );
-                    }
-                    finish(&inner, id, JobState::Completed, Some(report.total), None).await;
+                Ok(total) => {
+                    finish(&inner, id, JobState::Completed, total, None).await;
                 }
                 Err(error) => {
                     // The partial file and journal are deliberately left in
                     // place, so a retry resumes rather than restarts.
-                    finish(&inner, id, JobState::Failed, None, Some(error.to_string())).await;
+                    finish(&inner, id, JobState::Failed, None, Some(error)).await;
                 }
             }
             forget_row(&inner, id).await;
