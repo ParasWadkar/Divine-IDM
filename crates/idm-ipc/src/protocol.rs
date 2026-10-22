@@ -155,6 +155,16 @@ pub struct Settings {
     pub post_action_countdown_secs: u64,
     /// Downloads smaller than this are left to the browser.
     pub min_takeover_bytes: u64,
+    /// Pick up interrupted downloads when the engine starts.
+    ///
+    /// The bytes and the resume journal outlive any crash, so this costs
+    /// nothing but the decision to act on them. A download that needed
+    /// browser cookies is left alone whatever this says: the cookies were
+    /// never stored, so restarting it would only produce a refusal the user
+    /// has no way to account for.
+    pub resume_on_start: bool,
+    /// Start Divine IDM when this user signs in.
+    pub start_with_windows: bool,
     /// How many downloads may run at once. The rest wait their turn.
     ///
     /// This is about the origin and the link, not the disk: every running
@@ -174,6 +184,13 @@ impl Default for Settings {
             post_action: PostActionSetting::Nothing,
             post_action_countdown_secs: 60,
             min_takeover_bytes: 2 << 20,
+            // A download manager that forgets what it was doing when the
+            // machine rebooted is the thing people complain about, and the
+            // machinery to avoid it is already paid for.
+            resume_on_start: true,
+            // Never without being asked: adding yourself to someone's
+            // startup is theirs to decide.
+            start_with_windows: false,
             // Enough that a handful of files from a browser all start, few
             // enough that dropping a hundred-link batch in does not open a
             // hundred fans of connections at once.
@@ -205,6 +222,10 @@ pub enum Request {
         id: Option<JobId>,
     },
     Cancel {
+        id: JobId,
+    },
+    /// Starts a paused or interrupted download again.
+    Resume {
         id: JobId,
     },
     /// Asks the user to approve this client. Never self-approving: the reply

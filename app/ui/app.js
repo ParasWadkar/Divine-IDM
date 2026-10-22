@@ -183,7 +183,12 @@ function renderJobs(jobs) {
       cancel.textContent = "Cancel";
       cancel.onclick = () => act("cancel_job", { id: job.id });
 
+      const resume = document.createElement("button");
+      resume.textContent = "Resume";
+      resume.onclick = () => act("resume_job", { id: job.id });
+
       foot.append(size, speed, conns, eta, spacer);
+      if (job.state === "paused" || job.state === "failed") foot.append(resume);
       if (job.state === "running" || job.state === "queued") foot.append(cancel);
 
       card.append(top, bar, foot);
@@ -207,6 +212,8 @@ function renderSettings(settings) {
   $("integration").checked = settings.browser_integration;
   $("min-size").value = String(settings.min_takeover_bytes);
   $("max-concurrent").value = String(settings.max_concurrent_downloads);
+  $("start-with-windows").checked = settings.start_with_windows;
+  $("resume-on-start").checked = settings.resume_on_start;
   $("post-action").value = settings.post_action;
   $("countdown").value = String(settings.post_action_countdown_secs);
 }
@@ -323,6 +330,8 @@ async function saveSettings() {
     browser_integration: $("integration").checked,
     min_takeover_bytes: Number($("min-size").value),
     max_concurrent_downloads: Number($("max-concurrent").value),
+    start_with_windows: $("start-with-windows").checked,
+    resume_on_start: $("resume-on-start").checked,
     post_action: $("post-action").value,
     post_action_countdown_secs: Number($("countdown").value),
   };
@@ -404,7 +413,15 @@ for (const tab of document.querySelectorAll(".tab")) {
   });
 }
 
-for (const id of ["integration", "min-size", "max-concurrent", "post-action", "countdown"]) {
+for (const id of [
+  "integration",
+  "min-size",
+  "max-concurrent",
+  "start-with-windows",
+  "resume-on-start",
+  "post-action",
+  "countdown",
+]) {
   $(id).addEventListener("change", saveSettings);
 }
 

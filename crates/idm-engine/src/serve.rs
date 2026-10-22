@@ -198,6 +198,9 @@ impl Engine {
                 referrer: request.referrer.clone(),
                 user_agent: request.user_agent.clone(),
                 mime: request.mime.clone(),
+                // Not the cookies themselves — only that there were some,
+                // so a later restart knows this one cannot just be retried.
+                needs_browser_auth: request.cookies.is_some(),
                 ..Default::default()
             };
             match store.add_job(&row) {
@@ -250,6 +253,116 @@ impl Engine {
     #[cfg(test)]
     async fn waiting(&self) -> usize {
         self.inner.jobs.lock().await.values().filter(|job| job.pending.is_some()).count()
+    }
+
+    /// Starts a paused download again.
+    async fn resume(&self, id: JobId) -> Response {
+        let ready = {
+            let mut jobs = self.inner.jobs.lock().await;
+            match jobs.get_mut(&id) {
+                None => return Response::Rejected { reason: "no such download".into() },
+                Some(job) if job.pending.is_none() => {
+                    return Response::Rejected {
+                        reason: match job.status.state {
+                            JobState::Running | JobState::Queued => {
+                                "that download is already going"
+                            }
+                            JobState::Completed => "that download has already finished",
+                            _ => "that download cannot be resumed; start it again",
+                        }
+                        .into(),
+                    };
+                }
+                Some(job) => {
+                    job.status.state = JobState::Queued;
+                    job.status.error = None;
+                    true
+                }
+            }
+        };
+
+        if ready {
+            write_state(&self.inner, id, JobState::Queued, None).await;
+            pump(Arc::clone(&self.inner)).await;
+        }
+        Response::Accepted { id }
+    }
+
+    /// Brings interrupted downloads back after a restart.
+    ///
+    /// The bytes and the journal beside them already survive a crash; this
+    /// is only the decision to act on that. Anything that was running when
+    /// the engine stopped has been marked paused by the store, so what is
+    /// restored here is a list of jobs the user can see and resume, with
+    /// their progress intact.
+    ///
+    /// A download that was authorised by browser cookies is restored but
+    /// never started automatically. The cookies were deliberately not kept,
+    /// so retrying it would produce a refusal from the server and an error
+    /// the user has no way to connect to anything they did. Saying so is
+    /// more useful than failing.
+    pub async fn restore_interrupted(&self) -> usize {
+        let Some(store) = self.inner.store.clone() else {
+            return 0;
+        };
+        let rows = match store.unfinished_jobs() {
+            Ok(rows) => rows,
+            Err(error) => {
+                tracing::warn!(%error, "could not read interrupted downloads");
+                return 0;
+            }
+        };
+        if rows.is_empty() {
+            return 0;
+        }
+
+        let auto = self.inner.settings.lock().await.resume_on_start;
+        let mut restored = 0;
+
+        for row in rows {
+            let id = JobId(self.inner.next_id.fetch_add(1, Ordering::SeqCst));
+
+            let mut config = DownloadConfig::new(row.url.clone(), PathBuf::from(&row.output_dir));
+            config.filename = Some(row.filename.clone());
+            config.conn.per_host_max = self.inner.max_connections;
+            config.referrer = row.referrer.clone();
+            config.profiles = self
+                .inner
+                .store
+                .clone()
+                .map(|store| store as Arc<dyn idm_core::sched::ProfileStore>);
+
+            let blocked = row.needs_browser_auth;
+            let status = JobStatus {
+                id,
+                url: row.url.clone(),
+                filename: row.filename.clone(),
+                // Queued only when it is actually going to start; otherwise
+                // paused, which is what it is.
+                state: if auto && !blocked { JobState::Queued } else { JobState::Paused },
+                downloaded: row.downloaded,
+                total: row.total,
+                bytes_per_sec: 0.0,
+                connections: 0,
+                error: blocked.then(|| {
+                    "this download was authorised by your browser; start it there again".to_owned()
+                }),
+            };
+
+            self.inner.rows.lock().await.insert(id, row.id);
+            self.inner
+                .jobs
+                .lock()
+                .await
+                .insert(id, JobRecord { status, abort: None, pending: Some(Box::new(config)) });
+            restored += 1;
+        }
+
+        if auto {
+            pump(Arc::clone(&self.inner)).await;
+        }
+        tracing::info!(restored, auto, "restored interrupted downloads");
+        restored
     }
 
     async fn status(&self, id: Option<JobId>) -> Response {
@@ -383,6 +496,16 @@ async fn start(inner: &Arc<Inner>, id: JobId, config: DownloadConfig) {
 
             match outcome {
                 Ok(report) => {
+                    if report.resumed_bytes > 0 {
+                        // Worth saying out loud: it is the difference
+                        // between picking a download up and quietly
+                        // starting it again from nothing.
+                        eprintln!(
+                            "resumed {} after {} bytes already on disk",
+                            report.path.display(),
+                            report.resumed_bytes
+                        );
+                    }
                     finish(&inner, id, JobState::Completed, Some(report.total), None).await;
                 }
                 Err(error) => {
@@ -685,6 +808,7 @@ impl Handler for Engine {
             Request::Enqueue(req) => self.enqueue(client, req).await,
             Request::Status { id } => self.status(id).await,
             Request::Cancel { id } => self.cancel(id).await,
+            Request::Resume { id } => self.resume(id).await,
             Request::RequestPairing { label } => self.request_pairing(client, label).await,
             Request::ListPairings => self.list_pairings(client).await,
             Request::ApprovePairing { request_id } => {
@@ -705,6 +829,11 @@ pub async fn run(output_dir: PathBuf, max_connections: u32) -> Result<(), String
     std::fs::create_dir_all(&output_dir).map_err(|error| error.to_string())?;
     let server = IpcServer::bind().map_err(|error| error.to_string())?;
     let engine = Engine::new(output_dir.clone(), max_connections);
+
+    let restored = engine.restore_interrupted().await;
+    if restored > 0 {
+        eprintln!("picked up {restored} interrupted download(s)");
+    }
 
     eprintln!("Divine IDM serving");
     eprintln!("  downloads -> {}", output_dir.display());
@@ -738,6 +867,21 @@ mod tests {
             other => panic!("expected settings, got {other:?}"),
         };
         settings.max_concurrent_downloads = limit;
+        engine.handle(&desktop(), Request::SetSettings(settings)).await;
+    }
+
+    /// An engine sharing a caller-supplied store, so a restart can be
+    /// staged by building a second engine over the same rows.
+    fn engine_with_store(dir: &std::path::Path, store: Arc<idm_store::Store>) -> Arc<Engine> {
+        Engine::with_parts(dir.join("downloads"), 8, dir.join("settings.json"), Some(store))
+    }
+
+    async fn set_resume_on_start(engine: &Arc<Engine>, resume: bool) {
+        let mut settings = match engine.handle(&desktop(), Request::GetSettings).await {
+            Response::Settings(settings) => settings,
+            other => panic!("expected settings, got {other:?}"),
+        };
+        settings.resume_on_start = resume;
         engine.handle(&desktop(), Request::SetSettings(settings)).await;
     }
 
@@ -1075,5 +1219,122 @@ mod tests {
             jobs.iter().any(|job| job.state == JobState::Queued),
             "the waiting ones should read as queued"
         );
+    }
+
+    #[tokio::test]
+    async fn an_interrupted_download_comes_back_after_a_restart() {
+        // What a reboot looks like from the engine's side: rows left behind
+        // by a process that is gone, and a new one that has to find them.
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(idm_store::Store::open(&dir.path().join("state.sqlite3")).unwrap());
+
+        let row = store
+            .add_job(&idm_store::NewJob {
+                url: "http://127.0.0.1:9/big.bin".into(),
+                filename: "big.bin".into(),
+                output_dir: dir.path().join("downloads").display().to_string(),
+                total: Some(1 << 30),
+                ..Default::default()
+            })
+            .unwrap();
+        store.update_progress(row, 512 << 20, None).unwrap();
+        store.set_job_state(row, idm_store::JobState::Running, None).unwrap();
+
+        // The engine stops. Nothing is working on that row any more.
+        store.mark_interrupted_as_paused().unwrap();
+
+        let engine = engine_with_store(dir.path(), Arc::clone(&store));
+        set_limit(&engine, 1).await;
+        // Restored, but not started, so the assertion is about what came
+        // back rather than about a download racing it.
+        set_resume_on_start(&engine, false).await;
+
+        assert_eq!(engine.restore_interrupted().await, 1);
+
+        let Response::Status { jobs } = engine.status(None).await else {
+            panic!("expected a listing");
+        };
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].filename, "big.bin");
+        assert_eq!(jobs[0].state, JobState::Paused, "it should be waiting, not running");
+        assert_eq!(jobs[0].downloaded, 512 << 20, "progress should come back with it");
+    }
+
+    #[tokio::test]
+    async fn a_restored_download_can_be_resumed() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(idm_store::Store::open(&dir.path().join("state.sqlite3")).unwrap());
+        let row = store
+            .add_job(&idm_store::NewJob {
+                url: "http://127.0.0.1:9/big.bin".into(),
+                filename: "big.bin".into(),
+                output_dir: dir.path().join("downloads").display().to_string(),
+                ..Default::default()
+            })
+            .unwrap();
+        store.set_job_state(row, idm_store::JobState::Running, None).unwrap();
+        store.mark_interrupted_as_paused().unwrap();
+
+        let engine = engine_with_store(dir.path(), Arc::clone(&store));
+        set_resume_on_start(&engine, false).await;
+        engine.restore_interrupted().await;
+
+        let Response::Status { jobs } = engine.status(None).await else {
+            panic!("expected a listing");
+        };
+        let id = jobs[0].id;
+
+        assert!(matches!(engine.resume(id).await, Response::Accepted { .. }));
+        assert_eq!(engine.outstanding().await, 1, "resuming should hand it a slot");
+    }
+
+    #[tokio::test]
+    async fn a_download_the_browser_authorised_is_never_restarted_on_its_own() {
+        // Its cookies were deliberately never stored, so restarting it would
+        // produce a refusal from the server and an error the user has no way
+        // to connect to anything they did.
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(idm_store::Store::open(&dir.path().join("state.sqlite3")).unwrap());
+        let row = store
+            .add_job(&idm_store::NewJob {
+                url: "http://127.0.0.1:9/paywalled.bin".into(),
+                filename: "paywalled.bin".into(),
+                output_dir: dir.path().join("downloads").display().to_string(),
+                needs_browser_auth: true,
+                ..Default::default()
+            })
+            .unwrap();
+        store.set_job_state(row, idm_store::JobState::Running, None).unwrap();
+        store.mark_interrupted_as_paused().unwrap();
+
+        let engine = engine_with_store(dir.path(), Arc::clone(&store));
+        // Even with automatic resume asked for.
+        set_resume_on_start(&engine, true).await;
+        engine.restore_interrupted().await;
+
+        let Response::Status { jobs } = engine.status(None).await else {
+            panic!("expected a listing");
+        };
+        assert_eq!(jobs[0].state, JobState::Paused, "it must not start by itself");
+        assert_eq!(engine.outstanding().await, 0, "and must not hold a slot");
+        let reason = jobs[0].error.clone().unwrap_or_default();
+        assert!(reason.contains("browser"), "it should say why: {reason}");
+    }
+
+    #[tokio::test]
+    async fn resuming_something_already_running_is_refused_rather_than_doubled() {
+        let (_dir, engine) = engine();
+        let Response::Accepted { id } =
+            engine.enqueue(&desktop(), request("http://127.0.0.1:9/big.bin")).await
+        else {
+            panic!("expected the job to be accepted");
+        };
+        assert!(matches!(engine.resume(id).await, Response::Rejected { .. }));
+    }
+
+    #[tokio::test]
+    async fn resuming_an_unknown_download_is_refused() {
+        let (_dir, engine) = engine();
+        assert!(matches!(engine.resume(JobId(999)).await, Response::Rejected { .. }));
     }
 }

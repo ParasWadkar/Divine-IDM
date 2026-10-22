@@ -61,6 +61,12 @@ pub struct NewJob {
     pub user_agent: Option<String>,
     pub mime: Option<String>,
     pub queue_id: Option<i64>,
+    /// Whether the request carried cookies.
+    ///
+    /// The cookies themselves are not kept — see the crate documentation —
+    /// so this is the only trace of them, and it exists so that a job which
+    /// needed them is not silently resumed into a 403 after a restart.
+    pub needs_browser_auth: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -82,11 +88,12 @@ pub struct StoredJob {
     pub created_at_ms: u64,
     pub updated_at_ms: u64,
     pub finished_at_ms: Option<u64>,
+    pub needs_browser_auth: bool,
 }
 
-const COLUMNS: &str = "id, url, filename, output_dir, state, downloaded, total, error, category, \
+pub(crate) const COLUMNS: &str = "id, url, filename, output_dir, state, downloaded, total, error, category, \
                        referrer, user_agent, mime, queue_id, position, created_at_ms, \
-                       updated_at_ms, finished_at_ms";
+                       updated_at_ms, finished_at_ms, needs_browser_auth";
 
 pub(crate) fn read(row: &Row<'_>) -> rusqlite::Result<StoredJob> {
     Ok(StoredJob {
@@ -111,6 +118,7 @@ pub(crate) fn read(row: &Row<'_>) -> rusqlite::Result<StoredJob> {
         created_at_ms: row.get::<_, i64>(14)? as u64,
         updated_at_ms: row.get::<_, i64>(15)? as u64,
         finished_at_ms: row.get::<_, Option<i64>>(16)?.map(|v| v as u64),
+        needs_browser_auth: row.get::<_, i64>(17)? != 0,
     })
 }
 
@@ -121,10 +129,11 @@ impl Store {
         let conn = self.conn();
         conn.prepare_cached(
             "INSERT INTO jobs (url, filename, output_dir, state, total, category, referrer,
-                               user_agent, mime, queue_id, position, created_at_ms, updated_at_ms)
+                               user_agent, mime, queue_id, position, created_at_ms,
+                               updated_at_ms, needs_browser_auth)
              VALUES (?1, ?2, ?3, 'queued', ?4, ?5, ?6, ?7, ?8, ?9,
                      COALESCE((SELECT MAX(position) + 1 FROM jobs WHERE queue_id IS ?9), 0),
-                     ?10, ?10)",
+                     ?10, ?10, ?11)",
         )?
         .execute(params![
             job.url,
@@ -137,6 +146,7 @@ impl Store {
             job.mime,
             job.queue_id,
             now as i64,
+            job.needs_browser_auth as i64,
         ])?;
         Ok(conn.last_insert_rowid())
     }

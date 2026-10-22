@@ -109,15 +109,17 @@ impl Store {
         drop(conn);
 
         let conn = self.conn();
-        let mut statement = conn.prepare_cached(
-            "SELECT id, url, filename, output_dir, state, downloaded, total, error, category,
-                    referrer, user_agent, mime, queue_id, position, created_at_ms,
-                    updated_at_ms, finished_at_ms
+        // The same column list the row reader expects, not a copy of it: a
+        // column added to one and not the other reads the wrong field, or
+        // fails far from the edit that caused it.
+        let mut statement = conn.prepare_cached(&format!(
+            "SELECT {}
                FROM jobs
               WHERE queue_id = ?1 AND state = 'queued'
               ORDER BY position, id
               LIMIT ?2",
-        )?;
+            crate::jobs::COLUMNS
+        ))?;
         let rows = statement
             .query_map(params![id, room], crate::jobs::read)?
             .collect::<rusqlite::Result<Vec<_>>>()?;

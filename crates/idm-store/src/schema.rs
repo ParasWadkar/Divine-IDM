@@ -67,6 +67,15 @@ const MIGRATIONS: &[&str] = &[
         PRIMARY KEY (host, port, alpn, net_fingerprint)
     ) STRICT;
     "#,
+    // v2 — whether a job was authorised by cookies.
+    //
+    // Cookies are never stored, so a job that needed them cannot simply be
+    // restarted after a reboot: it would fail with a 403 the user has no way
+    // to account for. Recording that it needed them lets the engine leave it
+    // alone and say why, instead of resuming it into a failure.
+    r#"
+    ALTER TABLE jobs ADD COLUMN needs_browser_auth INTEGER NOT NULL DEFAULT 0;
+    "#,
 ];
 
 pub const LATEST: u32 = MIGRATIONS.len() as u32;
@@ -115,6 +124,38 @@ mod tests {
         migrate(&store.conn()).unwrap();
         migrate(&store.conn()).unwrap();
         assert_eq!(version(&store.conn()).unwrap(), LATEST);
+    }
+
+    #[test]
+    fn an_older_database_is_upgraded_without_losing_its_rows() {
+        // The point of migrations, and the first time this one is exercised
+        // against data rather than an empty file.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.sqlite3");
+
+        let id = {
+            let store = Store::open(&path).unwrap();
+            let conn = store.conn();
+            // Wind the database back to v1, then write a row the way v1
+            // would have: the point is that an upgrade preserves data that
+            // predates the column it adds.
+            conn.execute("ALTER TABLE jobs DROP COLUMN needs_browser_auth", []).unwrap();
+            conn.pragma_update(None, "user_version", 1).unwrap();
+            conn.execute(
+                "INSERT INTO jobs (url, filename, output_dir, state, created_at_ms, updated_at_ms)
+                 VALUES ('https://example.invalid/a.bin', 'a.bin', 'D:/downloads', 'queued', 1, 1)",
+                [],
+            )
+            .unwrap();
+            conn.last_insert_rowid()
+        };
+
+        let upgraded = Store::open(&path).unwrap();
+        assert_eq!(version(&upgraded.conn()).unwrap(), LATEST);
+
+        let job = upgraded.job(id).unwrap().expect("the row should survive the upgrade");
+        assert_eq!(job.filename, "a.bin");
+        assert!(!job.needs_browser_auth, "the new column should take its default");
     }
 
     #[test]

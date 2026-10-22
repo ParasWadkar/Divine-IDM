@@ -22,6 +22,7 @@ use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
 
+mod autostart;
 mod state;
 use state::AppState;
 
@@ -56,6 +57,11 @@ async fn add_download(
 }
 
 #[tauri::command]
+async fn resume_job(state: State<'_, AppState>, id: u64) -> Result<(), String> {
+    state.simple(Request::Resume { id: JobId(id) }).await
+}
+
+#[tauri::command]
 async fn cancel_job(state: State<'_, AppState>, id: u64) -> Result<(), String> {
     match state.request(Request::Cancel { id: JobId(id) }).await {
         Response::Rejected { reason } => Err(reason),
@@ -81,7 +87,12 @@ async fn revoke_pairing(state: State<'_, AppState>, client_id: String) -> Result
 
 #[tauri::command]
 async fn save_settings(state: State<'_, AppState>, settings: Settings) -> Result<(), String> {
-    state.simple(Request::SetSettings(settings)).await
+    // The registry is written only after the engine has accepted the
+    // settings, so a refused change cannot leave the two disagreeing about
+    // whether this app starts with Windows.
+    let wanted = settings.start_with_windows;
+    state.simple(Request::SetSettings(settings)).await?;
+    autostart::apply(wanted)
 }
 
 #[tauri::command]
@@ -137,6 +148,7 @@ fn main() {
             snapshot,
             add_download,
             cancel_job,
+            resume_job,
             approve_pairing,
             deny_pairing,
             revoke_pairing,
@@ -151,6 +163,16 @@ fn main() {
             build_tray(app.handle())?;
             start_ticker(app.handle().clone());
             start_endpoint(app.handle().clone());
+
+            // Started by the Run key at sign-in: come up in the tray rather
+            // than throwing a window at someone who has just logged in.
+            if std::env::args().any(|argument| argument == "--hidden")
+                && let Some(window) = app.get_webview_window("main")
+            {
+                let _ = window.hide();
+            }
+
+            restore_downloads(app.handle().clone());
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -164,6 +186,19 @@ fn main() {
         })
         .run(tauri::generate_context!())
         .expect("the application failed to start");
+}
+
+/// Brings back downloads that were interrupted by a restart.
+///
+/// After the endpoint, so a browser that reconnects first does not race it,
+/// and spawned rather than awaited so a slow disk cannot hold up the window.
+fn restore_downloads(app: AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        let restored = app.state::<AppState>().engine.restore_interrupted().await;
+        if restored > 0 {
+            let _ = app.emit("restored", restored);
+        }
+    });
 }
 
 /// Serves the local endpoint the browser extension talks to.
