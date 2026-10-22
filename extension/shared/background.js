@@ -101,6 +101,60 @@ async function getState() {
   return (await api.storage.session.get(STATE_KEY))[STATE_KEY] ?? {};
 }
 
+// ---------------------------------------------------------------------------
+// Downloads we paused while deciding what to do with them
+// ---------------------------------------------------------------------------
+
+const PAUSED_KEY = "idmPausedWhileDeciding";
+
+/**
+ * Serialises read-modify-write on the paused set.
+ *
+ * Two downloads starting together would otherwise each read the set, each add
+ * their own id, and each write back -- losing one of them, and with it the
+ * record that a download needs releasing.
+ */
+let pausedQueue = Promise.resolve();
+
+function withPausedIds(mutate) {
+  pausedQueue = pausedQueue
+    .catch(() => {})
+    .then(async () => {
+      const stored = (await api.storage.session.get(PAUSED_KEY))[PAUSED_KEY] ?? [];
+      const ids = new Set(stored);
+      await mutate(ids);
+      await api.storage.session.set({ [PAUSED_KEY]: [...ids] });
+    });
+  return pausedQueue;
+}
+
+/**
+ * Resumes anything left paused by a previous life of this background context.
+ *
+ * Taking a download over means pausing the browser's copy, asking the engine,
+ * then cancelling or resuming. That leaves a window -- a native messaging
+ * round trip -- in which an MV3 worker can be suspended or killed. If that
+ * happens the download stays paused with nothing left to resume it, and the
+ * user sees a download that simply stopped. Reconciling on every wake means
+ * the worst case is a pause, not a loss.
+ *
+ * Only ids this extension paused are listed, and an id is dropped as soon as
+ * its decision is made, so anything still here on a fresh wake is orphaned.
+ * Resuming a download that is already running throws and is ignored.
+ */
+function releaseOrphanedPauses() {
+  return withPausedIds(async (ids) => {
+    for (const id of ids) {
+      try {
+        await api.downloads.resume(id);
+      } catch {
+        // Already running, cancelled, or gone.
+      }
+    }
+    ids.clear();
+  });
+}
+
 /** Reflects connection and pairing state in the toolbar icon. */
 async function paintIcon(state) {
   const settings = await getSettings();
@@ -298,9 +352,58 @@ async function handOver(item) {
 // ---------------------------------------------------------------------------
 
 api.downloads.onCreated.addListener(async (item) => {
-  const settings = await getSettings();
-  if (await shouldTakeOver(item, settings)) {
-    await handOver(item);
+  // Pause before doing anything else, including reading settings.
+  //
+  // Handing over means asking the engine and only cancelling the browser's
+  // copy once it has agreed -- which is a race against the download itself.
+  // Reading settings and round-tripping to the host costs a few hundred
+  // milliseconds, and a small file from a fast origin is finished well
+  // inside that, so the browser keeps its copy and the engine fetches a
+  // second one: the same bytes downloaded twice, saved twice. Observed with
+  // Firefox on a 6 MiB file from localhost; Chromium only avoided it by
+  // winning the same race. Pausing first removes the race rather than
+  // narrowing it.
+  let paused = false;
+  try {
+    await api.downloads.pause(item.id);
+    paused = true;
+    // Recorded straight after, so that if this context dies before the
+    // decision is made, the next wake knows to let the download go.
+    await withPausedIds((ids) => ids.add(item.id));
+  } catch (error) {
+    // Already finished, or not pausable. Carry on: cancel may still work,
+    // and if it does not the browser simply keeps the download.
+    console.debug("Divine IDM: could not pause download", item.id, error);
+  }
+
+  let taken = false;
+  try {
+    const settings = await getSettings();
+    if (await shouldTakeOver(item, settings)) {
+      taken = await handOver(item);
+    }
+  } finally {
+    // Anything we paused and did not take must be let go again, including
+    // when the decision threw. A download left paused by a failure here
+    // would look to the user like the extension had silently eaten it.
+    if (paused && !taken) {
+      try {
+        await api.downloads.resume(item.id);
+      } catch (error) {
+        // Not silent: a download we paused and then could not resume is a
+        // download the user has lost, and swallowing this is what made that
+        // hard to see. Fall back to asking the browser for it again.
+        console.warn("Divine IDM: could not resume download", item.id, error);
+        try {
+          await api.downloads.download({ url: item.finalUrl || item.url });
+        } catch (retryError) {
+          console.warn("Divine IDM: could not restart download either", retryError);
+        }
+      }
+    }
+    if (paused) {
+      await withPausedIds((ids) => ids.delete(item.id));
+    }
   }
 });
 
@@ -384,4 +487,6 @@ api.runtime.onMessage.addListener((message, _sender, respond) => {
   return true; // reply arrives asynchronously
 });
 
+// Every wake: say hello, and let go of anything a previous wake left paused.
 greet();
+releaseOrphanedPauses();
