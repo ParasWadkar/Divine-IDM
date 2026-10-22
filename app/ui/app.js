@@ -213,6 +213,7 @@ function renderSettings(settings) {
   $("min-size").value = String(settings.min_takeover_bytes);
   $("max-concurrent").value = String(settings.max_concurrent_downloads);
   $("speed-limit").value = String(settings.speed_limit_bytes_per_sec ?? 0);
+  $("sort-into-folders").checked = settings.sort_into_folders ?? true;
   $("start-with-windows").checked = settings.start_with_windows;
   $("resume-on-start").checked = settings.resume_on_start;
   $("post-action").value = settings.post_action;
@@ -332,6 +333,7 @@ async function saveSettings() {
     min_takeover_bytes: Number($("min-size").value),
     max_concurrent_downloads: Number($("max-concurrent").value),
     speed_limit_bytes_per_sec: Number($("speed-limit").value),
+    sort_into_folders: $("sort-into-folders").checked,
     start_with_windows: $("start-with-windows").checked,
     resume_on_start: $("resume-on-start").checked,
     post_action: $("post-action").value,
@@ -420,6 +422,7 @@ for (const id of [
   "min-size",
   "max-concurrent",
   "speed-limit",
+  "sort-into-folders",
   "start-with-windows",
   "resume-on-start",
   "post-action",

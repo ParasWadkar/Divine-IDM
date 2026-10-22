@@ -30,6 +30,8 @@ use tokio::sync::Mutex;
 struct JobRecord {
     status: JobStatus,
     abort: Option<tokio::task::AbortHandle>,
+    /// The destination this job holds, released when it finishes.
+    claimed: Option<PathBuf>,
     /// Set while the job waits for a slot, taken when it starts.
     ///
     /// Held in memory rather than rebuilt from the stored row because it
@@ -58,6 +60,15 @@ struct Inner {
     rows: Mutex<HashMap<JobId, i64>>,
     /// One speed limit for every download the engine runs.
     limiter: Arc<idm_net::limiter::RateLimiter>,
+    /// Destinations a running download has claimed.
+    ///
+    /// Two downloads that derive the same name — `setup.exe` from two
+    /// different sites, or a batch whose URLs differ only in a query
+    /// parameter — would otherwise write the same part file and fight over
+    /// the rename at the end. One wins, one fails, and which is luck.
+    /// Checked against the disk as well, so an existing file is not
+    /// overwritten either.
+    claimed: Mutex<std::collections::HashSet<PathBuf>>,
     pairings: Mutex<PairingStore>,
     /// Cancels an armed post-download action, if one is counting down.
     armed: Mutex<Option<Canceller>>,
@@ -114,6 +125,7 @@ impl Engine {
                 store,
                 rows: Mutex::new(HashMap::new()),
                 limiter: Arc::new(idm_net::limiter::RateLimiter::new(starting_limit)),
+                claimed: Mutex::new(std::collections::HashSet::new()),
                 armed: Mutex::new(None),
             }),
         })
@@ -163,6 +175,89 @@ impl Engine {
         Ok(name)
     }
 
+    /// Queues a request, expanding a `[1-100]` range into one job each.
+    ///
+    /// Wrapped around `enqueue` rather than folded into it so that a single
+    /// download takes exactly the path it always did — the common case does
+    /// not go through list handling it has no use for.
+    ///
+    /// The reply names the first job, because a caller with one id can ask
+    /// about it; naming none would leave a browser extension unable to tell
+    /// a queued batch from a refused one.
+    async fn enqueue_batch(&self, client: &ClientInfo, request: DownloadRequest) -> Response {
+        if !crate::batch::is_pattern(&request.url) {
+            return self.enqueue(client, request).await;
+        }
+
+        let urls = match crate::batch::expand(&request.url) {
+            Ok(urls) => urls,
+            Err(error) => return Response::Rejected { reason: error.to_string() },
+        };
+
+        let mut first = None;
+        let mut accepted = 0usize;
+        let mut refused: Option<String> = None;
+
+        for url in urls {
+            // The suggested name belongs to one file, so it cannot be
+            // reused across a series; each URL names its own.
+            let one = DownloadRequest { url, filename: None, ..request.clone() };
+            match self.enqueue(client, one).await {
+                Response::Accepted { id } => {
+                    accepted += 1;
+                    first.get_or_insert(id);
+                }
+                Response::Rejected { reason } => refused = Some(reason),
+                other => return other,
+            }
+        }
+
+        match first {
+            // Partial failure is reported as success with a note in the log
+            // rather than as a refusal: the downloads that were accepted are
+            // running, and calling that a failure would be wrong.
+            Some(id) => {
+                if let Some(reason) = refused {
+                    tracing::warn!(accepted, %reason, "some of the batch was refused");
+                }
+                tracing::info!(accepted, "queued a batch");
+                Response::Accepted { id }
+            }
+            None => Response::Rejected {
+                reason: refused.unwrap_or_else(|| "nothing in that range could be queued".into()),
+            },
+        }
+    }
+
+    /// Reserves a destination, adding a counter if it is taken.
+    ///
+    /// Checks the claims of other running downloads and the disk together,
+    /// under one lock: checking only the disk would let two downloads
+    /// enqueued moments apart both find the name free, and checking only
+    /// the claims would overwrite a file already there. The part file is
+    /// checked too, because an interrupted download holds a name it means
+    /// to finish using.
+    async fn claim_destination(&self, dir: &std::path::Path, filename: &str) -> (String, PathBuf) {
+        let mut claimed = self.inner.claimed.lock().await;
+
+        for attempt in 0..1000u32 {
+            let candidate =
+                if attempt == 0 { filename.to_owned() } else { numbered(filename, attempt) };
+            let path = dir.join(&candidate);
+            let part = dir.join(format!("{candidate}.idmpart"));
+
+            if !claimed.contains(&path) && !path.exists() && !part.exists() {
+                claimed.insert(path.clone());
+                return (candidate, path);
+            }
+        }
+
+        // A thousand files of the same name is not a case worth more code;
+        // the download proceeds and the last one wins, as it did before.
+        let path = dir.join(filename);
+        (filename.to_owned(), path)
+    }
+
     async fn enqueue(&self, client: &ClientInfo, request: DownloadRequest) -> Response {
         let settings = self.inner.settings.lock().await.clone();
 
@@ -196,7 +291,21 @@ impl Engine {
         };
 
         let id = JobId(self.inner.next_id.fetch_add(1, Ordering::SeqCst));
-        let mut config = DownloadConfig::new(request.url.clone(), self.inner.output_dir.clone());
+
+        // Decided before the download starts, because the destination has
+        // to be settled before the first byte is written — there is no
+        // moving the file afterwards without racing whatever opened it.
+        let category =
+            settings.sort_into_folders.then(|| crate::category::category_for(&filename)).flatten();
+        let output_dir = match category {
+            Some(category) => self.inner.output_dir.join(category),
+            None => self.inner.output_dir.clone(),
+        };
+
+        // Settled before anything is written, and held until the job ends.
+        let (filename, claimed_path) = self.claim_destination(&output_dir, &filename).await;
+
+        let mut config = DownloadConfig::new(request.url.clone(), output_dir.clone());
         config.filename = Some(filename.clone());
         config.conn.per_host_max = self.inner.max_connections;
         config.referrer = request.referrer.clone();
@@ -212,11 +321,12 @@ impl Engine {
             let row = idm_store::NewJob {
                 url: request.url.clone(),
                 filename: filename.clone(),
-                output_dir: self.inner.output_dir.display().to_string(),
+                output_dir: output_dir.display().to_string(),
                 total: request.size_hint,
                 referrer: request.referrer.clone(),
                 user_agent: request.user_agent.clone(),
                 mime: request.mime.clone(),
+                category: category.map(str::to_owned),
                 // Not the cookies themselves — only that there were some,
                 // so a later restart knows this one cannot just be retried.
                 needs_browser_auth: request.cookies.is_some(),
@@ -242,11 +352,15 @@ impl Engine {
             error: None,
         };
 
-        self.inner
-            .jobs
-            .lock()
-            .await
-            .insert(id, JobRecord { status, abort: None, pending: Some(Box::new(config)) });
+        self.inner.jobs.lock().await.insert(
+            id,
+            JobRecord {
+                status,
+                abort: None,
+                claimed: Some(claimed_path),
+                pending: Some(Box::new(config)),
+            },
+        );
         pump(Arc::clone(&self.inner)).await;
         Response::Accepted { id }
     }
@@ -369,12 +483,23 @@ impl Engine {
                 }),
             };
 
-            self.inner.rows.lock().await.insert(id, row.id);
+            // The destination it was already using, so a new download
+            // cannot be given the same name while this one is paused.
             self.inner
-                .jobs
+                .claimed
                 .lock()
                 .await
-                .insert(id, JobRecord { status, abort: None, pending: Some(Box::new(config)) });
+                .insert(PathBuf::from(&row.output_dir).join(&row.filename));
+            self.inner.rows.lock().await.insert(id, row.id);
+            self.inner.jobs.lock().await.insert(
+                id,
+                JobRecord {
+                    status,
+                    abort: None,
+                    claimed: Some(PathBuf::from(&row.output_dir).join(&row.filename)),
+                    pending: Some(Box::new(config)),
+                },
+            );
             restored += 1;
         }
 
@@ -408,6 +533,31 @@ impl Engine {
             }
             None => Response::Rejected { reason: format!("no such job: {id}") },
         }
+    }
+}
+
+/// Gives up the destination a finished job was holding.
+///
+/// After it finishes, not before: releasing early would let a second
+/// download with the same name start writing the same part file while the
+/// first was still using it.
+async fn release_claim(inner: &Arc<Inner>, id: JobId) {
+    let path = inner.jobs.lock().await.get_mut(&id).and_then(|job| job.claimed.take());
+    if let Some(path) = path {
+        inner.claimed.lock().await.remove(&path);
+    }
+}
+
+/// `report.pdf` and 2 becomes `report (2).pdf`.
+///
+/// The counter goes before the extension, because a name ending in
+/// something other than its extension stops opening in the program that
+/// owns it.
+fn numbered(filename: &str, attempt: u32) -> String {
+    match filename.rsplit_once('.') {
+        // A leading dot is the whole name, not an extension.
+        Some((stem, extension)) if !stem.is_empty() => format!("{stem} ({attempt}).{extension}"),
+        _ => format!("{filename} ({attempt})"),
     }
 }
 
@@ -663,6 +813,7 @@ async fn start(inner: &Arc<Inner>, id: JobId, config: DownloadConfig) {
                 }
             }
             forget_row(&inner, id).await;
+            release_claim(&inner, id).await;
 
             // A slot has just opened, so whatever is next can begin.
             pump(Arc::clone(&inner)).await;
@@ -974,7 +1125,7 @@ impl Handler for Engine {
     async fn handle(&self, client: &ClientInfo, request: Request) -> Response {
         match request {
             Request::Ping => Response::Pong,
-            Request::Enqueue(req) => self.enqueue(client, req).await,
+            Request::Enqueue(req) => self.enqueue_batch(client, req).await,
             Request::Status { id } => self.status(id).await,
             Request::Cancel { id } => self.cancel(id).await,
             Request::Resume { id } => self.resume(id).await,
@@ -1052,6 +1203,37 @@ mod tests {
         };
         settings.resume_on_start = resume;
         engine.handle(&desktop(), Request::SetSettings(settings)).await;
+    }
+
+    /// Sets whether finished downloads are sorted into folders.
+    async fn set_sorting(engine: &Arc<Engine>, sorting: bool) {
+        let mut settings = match engine.handle(&desktop(), Request::GetSettings).await {
+            Response::Settings(settings) => settings,
+            other => panic!("expected settings, got {other:?}"),
+        };
+        settings.sort_into_folders = sorting;
+        engine.handle(&desktop(), Request::SetSettings(settings)).await;
+    }
+
+    /// Queues a job that is going nowhere, to occupy the only slot.
+    ///
+    /// A job that starts has its config taken by the runner, so the only
+    /// way to read the destination it was given is to keep it waiting.
+    async fn occupy_the_slot(engine: &Arc<Engine>) {
+        set_limit(engine, 1).await;
+        engine.enqueue(&desktop(), request("http://127.0.0.1:9/filler.bin")).await;
+    }
+
+    /// The directory a queued job will write into.
+    async fn output_dir_of(engine: &Arc<Engine>, id: JobId) -> String {
+        let jobs = engine.inner.jobs.lock().await;
+        let job = jobs.get(&id).expect("the job should exist");
+        job.pending
+            .as_ref()
+            .expect("a queued job keeps its config")
+            .output_dir
+            .display()
+            .to_string()
     }
 
     fn browser() -> ClientInfo {
@@ -1509,5 +1691,192 @@ mod tests {
     async fn resuming_an_unknown_download_is_refused() {
         let (_dir, engine) = engine();
         assert!(matches!(engine.resume(JobId(999)).await, Response::Rejected { .. }));
+    }
+
+    #[tokio::test]
+    async fn a_video_is_sorted_into_its_own_folder() {
+        // The wiring, not the classifier: category.rs has its own tests, and
+        // they would all pass with nothing calling it.
+        let (_dir, engine) = engine();
+        occupy_the_slot(&engine).await;
+        set_sorting(&engine, true).await;
+
+        let request = DownloadRequest {
+            url: "https://example.invalid/holiday.mp4".into(),
+            size_hint: Some(10 << 20),
+            ..Default::default()
+        };
+        let Response::Accepted { id } = engine.enqueue(&desktop(), request).await else {
+            panic!("expected the job to be accepted");
+        };
+
+        let directory = output_dir_of(&engine, id).await;
+        assert!(directory.ends_with("Video"), "{directory}");
+    }
+
+    #[tokio::test]
+    async fn an_unrecognised_file_stays_in_the_download_folder() {
+        // Not a junk folder: it goes where someone will look for it.
+        let (_dir, engine) = engine();
+        occupy_the_slot(&engine).await;
+        set_sorting(&engine, true).await;
+
+        let request = DownloadRequest {
+            url: "https://example.invalid/firmware.rom".into(),
+            size_hint: Some(10 << 20),
+            ..Default::default()
+        };
+        let Response::Accepted { id } = engine.enqueue(&desktop(), request).await else {
+            panic!("expected the job to be accepted");
+        };
+
+        let directory = output_dir_of(&engine, id).await;
+        assert!(!directory.ends_with("Video"), "{directory}");
+        assert!(directory.ends_with("downloads"), "{directory}");
+    }
+
+    #[tokio::test]
+    async fn sorting_can_be_switched_off() {
+        let (_dir, engine) = engine();
+        occupy_the_slot(&engine).await;
+        set_sorting(&engine, false).await;
+
+        let request = DownloadRequest {
+            url: "https://example.invalid/holiday.mp4".into(),
+            size_hint: Some(10 << 20),
+            ..Default::default()
+        };
+        let Response::Accepted { id } = engine.enqueue(&desktop(), request).await else {
+            panic!("expected the job to be accepted");
+        };
+
+        let directory = output_dir_of(&engine, id).await;
+        assert!(directory.ends_with("downloads"), "{directory}");
+    }
+
+    #[tokio::test]
+    async fn a_numbered_range_becomes_one_job_each() {
+        // Again the wiring: batch.rs is tested on its own, and the engine
+        // could have ignored it entirely.
+        let (_dir, engine) = engine();
+        set_limit(&engine, 1).await;
+
+        let request = DownloadRequest {
+            url: "https://example.invalid/page-[1-5].jpg".into(),
+            size_hint: Some(10 << 20),
+            ..Default::default()
+        };
+        assert!(matches!(
+            engine.enqueue_batch(&desktop(), request).await,
+            Response::Accepted { .. }
+        ));
+
+        let Response::Status { jobs } = engine.status(None).await else {
+            panic!("expected a listing");
+        };
+        assert_eq!(jobs.len(), 5, "one job per number in the range");
+        assert!(jobs.iter().any(|job| job.url.ends_with("page-1.jpg")));
+        assert!(jobs.iter().any(|job| job.url.ends_with("page-5.jpg")));
+    }
+
+    #[tokio::test]
+    async fn a_url_with_no_range_still_makes_exactly_one_job() {
+        let (_dir, engine) = engine();
+        let request = DownloadRequest {
+            url: "https://example.invalid/single.bin".into(),
+            size_hint: Some(10 << 20),
+            ..Default::default()
+        };
+        engine.enqueue_batch(&desktop(), request).await;
+
+        let Response::Status { jobs } = engine.status(None).await else {
+            panic!("expected a listing");
+        };
+        assert_eq!(jobs.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn an_oversized_range_is_refused_without_queueing_any_of_it() {
+        // Reachable from a browser extension, so a refusal has to leave
+        // nothing behind rather than queue until it hits the limit.
+        let (_dir, engine) = engine();
+        let request = DownloadRequest {
+            url: "https://example.invalid/[1-50000].bin".into(),
+            size_hint: Some(10 << 20),
+            ..Default::default()
+        };
+        assert!(matches!(
+            engine.enqueue_batch(&desktop(), request).await,
+            Response::Rejected { .. }
+        ));
+
+        let Response::Status { jobs } = engine.status(None).await else {
+            panic!("expected a listing");
+        };
+        assert!(jobs.is_empty(), "a refused batch should queue nothing");
+    }
+
+    #[tokio::test]
+    async fn two_downloads_of_the_same_name_do_not_fight_over_it() {
+        // Not exotic: setup.exe from two different sites. Before this, both
+        // wrote one part file and one of them failed at the rename.
+        let (_dir, engine) = engine();
+        occupy_the_slot(&engine).await;
+
+        let mut names = Vec::new();
+        for _ in 0..3 {
+            let request = DownloadRequest {
+                url: "https://example.invalid/setup.exe".into(),
+                size_hint: Some(10 << 20),
+                ..Default::default()
+            };
+            let Response::Accepted { id } = engine.enqueue(&desktop(), request).await else {
+                panic!("expected the job to be accepted");
+            };
+            let jobs = engine.inner.jobs.lock().await;
+            names.push(jobs.get(&id).unwrap().status.filename.clone());
+        }
+
+        assert_eq!(names[0], "setup.exe");
+        assert_eq!(names[1], "setup (1).exe", "the counter goes before the extension");
+        assert_eq!(names[2], "setup (2).exe");
+    }
+
+    #[tokio::test]
+    async fn a_counter_keeps_the_extension_where_a_program_expects_it() {
+        assert_eq!(numbered("report.pdf", 1), "report (1).pdf");
+        assert_eq!(numbered("archive.tar.gz", 2), "archive.tar (2).gz");
+        // No extension, and a name that is nothing but one.
+        assert_eq!(numbered("README", 1), "README (1)");
+        assert_eq!(numbered(".gitignore", 1), ".gitignore (1)");
+    }
+
+    #[tokio::test]
+    async fn a_finished_download_gives_its_name_back() {
+        // Otherwise every later download of the same name is numbered for
+        // the life of the process, even once the first has finished.
+        let (_dir, engine) = engine();
+        occupy_the_slot(&engine).await;
+
+        let request = DownloadRequest {
+            url: "https://example.invalid/once.bin".into(),
+            size_hint: Some(10 << 20),
+            ..Default::default()
+        };
+        let Response::Accepted { id } = engine.enqueue(&desktop(), request).await else {
+            panic!("expected the job to be accepted");
+        };
+        release_claim(&engine.inner, id).await;
+
+        let request = DownloadRequest {
+            url: "https://example.invalid/once.bin".into(),
+            size_hint: Some(10 << 20),
+            ..Default::default()
+        };
+        let Response::Accepted { id } = engine.enqueue(&desktop(), request).await else {
+            panic!("expected the job to be accepted");
+        };
+        let jobs = engine.inner.jobs.lock().await;
+        assert_eq!(jobs.get(&id).unwrap().status.filename, "once.bin");
     }
 }

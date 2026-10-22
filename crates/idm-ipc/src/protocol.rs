@@ -198,6 +198,12 @@ pub struct Settings {
     pub resume_on_start: bool,
     /// Start Divine IDM when this user signs in.
     pub start_with_windows: bool,
+    /// Sort finished downloads into Video, Audio, Documents and so on.
+    ///
+    /// The folder names are a fixed list in the engine, never taken from a
+    /// server or a URL, so they cannot be made to point outside the
+    /// download folder.
+    pub sort_into_folders: bool,
     /// A ceiling on the total download rate, in bytes per second; zero for
     /// none.
     ///
@@ -235,6 +241,10 @@ impl Default for Settings {
             // enough that dropping a hundred-link batch in does not open a
             // hundred fans of connections at once.
             max_concurrent_downloads: 4,
+            // On, as the download managers people are used to do it.
+            // A file whose type is not recognised stays where it would have
+            // gone anyway, so nothing goes missing because of this.
+            sort_into_folders: true,
             speed_limit_bytes_per_sec: 0,
         }
     }
