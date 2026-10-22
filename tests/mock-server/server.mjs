@@ -129,6 +129,78 @@ function serveHonestly(req, res, total, extraHeaders = {}) {
 }
 
 const routes = {
+  // --- streaming manifests -------------------------------------------
+  //
+  // A small but complete HLS stream, so segment fetching and joining can be
+  // exercised without reaching the internet. The segments are slices of the
+  // same generated sequence every other route uses, which means the joined
+  // file can be verified byte for byte against it.
+
+  "/hls/master.m3u8": {
+    description: "HLS master playlist offering three renditions.",
+    handler: (req, res, url) => {
+      const origin = `http://${req.headers.host}`;
+      const query = url.search ?? "";
+      const body = [
+        "#EXTM3U",
+        "#EXT-X-STREAM-INF:BANDWIDTH=400000,RESOLUTION=640x360",
+        `${origin}/hls/360/index.m3u8${query}`,
+        "#EXT-X-STREAM-INF:BANDWIDTH=1200000,RESOLUTION=1280x720",
+        `${origin}/hls/720/index.m3u8${query}`,
+        "#EXT-X-STREAM-INF:BANDWIDTH=3000000,RESOLUTION=1920x1080",
+        `${origin}/hls/1080/index.m3u8${query}`,
+        "",
+      ].join("\n");
+      res.writeHead(200, {
+        // Deliberately not an HLS content type: plenty of real servers get
+        // this wrong, so the body is what should decide.
+        "Content-Type": "text/plain",
+        "Content-Length": Buffer.byteLength(body),
+      });
+      res.end(body);
+    },
+  },
+
+  "/hls/index.m3u8": {
+    description: "HLS media playlist; ?segments=N&size=B sets its shape.",
+    handler: (req, res, url) => {
+      const count = Number(url.searchParams.get("segments") ?? 10);
+      const size = Number(url.searchParams.get("size") ?? 65536);
+      const lines = [
+        "#EXTM3U",
+        "#EXT-X-VERSION:3",
+        "#EXT-X-TARGETDURATION:2",
+        "#EXT-X-MEDIA-SEQUENCE:0",
+      ];
+      for (let i = 0; i < count; i += 1) {
+        lines.push("#EXTINF:2.0,");
+        // Relative, so address resolution is exercised too.
+        lines.push(`seg${i}.ts?size=${size}&index=${i}`);
+      }
+      lines.push("#EXT-X-ENDLIST", "");
+      const body = lines.join("\n");
+      res.writeHead(200, {
+        "Content-Type": "application/vnd.apple.mpegurl",
+        "Content-Length": Buffer.byteLength(body),
+      });
+      res.end(body);
+    },
+  },
+
+  "/hls/segment": {
+    description: "One HLS segment: a slice of the generated sequence.",
+    handler: (req, res, url) => {
+      const size = Number(url.searchParams.get("size") ?? 65536);
+      const index = Number(url.searchParams.get("index") ?? 0);
+      const body = bodyFor(index * size, (index + 1) * size);
+      res.writeHead(200, {
+        "Content-Type": "video/mp2t",
+        "Content-Length": body.length,
+      });
+      res.end(body);
+    },
+  },
+
   "/honest": {
     description: "Well-behaved baseline: honours Range, strong ETag, truthful lengths.",
     handler: (req, res, url) => serveHonestly(req, res, sizeFromQuery(url)),
@@ -477,7 +549,16 @@ const server = createServer((req, res) => {
     return undefined;
   }
 
-  const route = routes[url.pathname];
+  // Rendition directories and segment names are generated, so they are
+  // matched by shape rather than listed one by one.
+  let pathname = url.pathname;
+  if (/^\/hls\/[^/]+\/index\.m3u8$/.test(pathname)) {
+    pathname = "/hls/index.m3u8";
+  } else if (/^\/hls\/[^/]+\/seg\d+\.ts$/.test(pathname)) {
+    pathname = "/hls/segment";
+  }
+
+  const route = routes[pathname];
   if (!route) {
     res.writeHead(404, { "Content-Length": "0" });
     return res.end();

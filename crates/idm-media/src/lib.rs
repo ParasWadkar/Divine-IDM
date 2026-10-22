@@ -12,11 +12,7 @@
 //! knows how to do it quickly.
 
 pub mod assemble;
-// DASH parsing is written but not finished: inherited SegmentTemplate
-// elements are not reaching the representations that need them, so most
-// manifests come back empty. Left out of the build rather than shipped
-// looking finished. See dash.rs.
-// pub mod dash;
+pub mod dash;
 pub mod hls;
 pub mod sidecar;
 

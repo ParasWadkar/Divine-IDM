@@ -1,17 +1,3 @@
-//! UNFINISHED — not part of the build. See the note in lib.rs.
-//!
-//! What works: the overall shape, SegmentList, single-file BaseURL
-//! renditions, namespaced elements, ISO durations, and refusing a manifest
-//! that states no segment count.
-//!
-//! What does not: `SegmentTemplate` is a sibling of `Representation` inside
-//! an `AdaptationSet`, and this records it on the template element's own
-//! stack frame, which is popped when that element closes. The
-//! representations that should inherit it therefore see nothing and come
-//! back with no addresses. The fix is for inherited state to be written to
-//! the enclosing frame rather than the current one, which is a change to
-//! how the stack is kept rather than a patch.
-//!
 //! DASH manifests, as far as a downloader needs them.
 //!
 //! The specification is enormous and most of it describes playback: timing,
@@ -25,8 +11,8 @@
 //! which would put a second way of fetching things into a project whose
 //! point is the first one.
 
-use quick_xml::events::Event;
 use quick_xml::Reader;
+use quick_xml::events::Event;
 use url::Url;
 
 use crate::{MediaError, Result};
@@ -70,10 +56,7 @@ pub struct Manifest {
 
 impl Manifest {
     pub fn best_video(&self) -> Option<&Representation> {
-        self.representations
-            .iter()
-            .filter(|r| r.is_video())
-            .max_by_key(|r| r.bandwidth)
+        self.representations.iter().filter(|r| r.is_video()).max_by_key(|r| r.bandwidth)
     }
 
     pub fn best_audio(&self) -> Option<&Representation> {
@@ -88,7 +71,9 @@ impl Manifest {
             .iter()
             .filter(|r| r.is_video() && r.height.is_some_and(|h| h <= height))
             .max_by_key(|r| r.bandwidth)
-            .or_else(|| self.representations.iter().filter(|r| r.is_video()).min_by_key(|r| r.bandwidth))
+            .or_else(|| {
+                self.representations.iter().filter(|r| r.is_video()).min_by_key(|r| r.bandwidth)
+            })
     }
 }
 
@@ -102,6 +87,7 @@ struct Inherited {
     base: Option<String>,
     template: Option<Template>,
     segment_list: Vec<String>,
+    list_duration: Option<u64>,
     mime: Option<String>,
     codecs: Option<String>,
     width: Option<u64>,
@@ -119,6 +105,19 @@ struct Template {
     timescale: u64,
 }
 
+/// Elements that own a scope.
+///
+/// DASH lets `SegmentTemplate`, `SegmentList` and `BaseURL` sit at any of
+/// these levels, with the innermost winning. Only these push a frame;
+/// everything else modifies the frame of whatever contains it. Giving every
+/// element its own frame is the mistake that made this read nothing at all —
+/// a `SegmentTemplate` recorded against itself is discarded the moment it
+/// closes, and the representations that should have inherited it see an
+/// empty scope.
+fn owns_scope(name: &str) -> bool {
+    matches!(name, "MPD" | "Period" | "AdaptationSet" | "Representation")
+}
+
 /// Reads a manifest, resolving every address against `base`.
 pub fn parse(text: &str, base: &str) -> Result<Manifest> {
     let base_url = Url::parse(base).map_err(|_| MediaError::BadUrl(base.to_owned()))?;
@@ -127,171 +126,148 @@ pub fn parse(text: &str, base: &str) -> Result<Manifest> {
     reader.config_mut().trim_text(true);
 
     let mut manifest = Manifest::default();
-    // One frame per open element, so attributes fall out of scope with the
-    // element that set them.
-    let mut stack: Vec<Inherited> = vec![Inherited::default()];
-    let mut in_representation = false;
-    let mut current: Option<Representation> = None;
-    let mut text_target: Option<&'static str> = None;
+    let mut scopes: Vec<Inherited> = vec![Inherited::default()];
+    let mut pending: Vec<Option<Representation>> = Vec::new();
+    let mut reading_base_url = false;
     let mut saw_mpd = false;
-    let mut total_duration_seconds = 0.0f64;
+    let mut duration_seconds = 0.0f64;
 
     loop {
-        match reader.read_event() {
+        let event = match reader.read_event() {
             Err(error) => return Err(MediaError::Manifest(error.to_string())),
             Ok(Event::Eof) => break,
+            Ok(event) => event,
+        };
 
-            Ok(event @ (Event::Start(_) | Event::Empty(_))) => {
+        match event {
+            Event::Start(ref element) | Event::Empty(ref element) => {
                 // A self-closing element never produces an End, so it has to
-                // be opened and closed here. Getting this wrong is why every
-                // representation in a normal manifest came back empty: they
-                // are written <Representation .../> far more often than not.
+                // be opened and closed here. Manifests write
+                // `<Representation .../>` far more often than not.
                 let self_closing = matches!(event, Event::Empty(_));
-                let element = match &event {
-                    Event::Start(element) | Event::Empty(element) => element.clone(),
-                    _ => unreachable!("matched above"),
-                };
                 let name = local_name(element.name().as_ref());
-                let mut frame = stack.last().cloned().unwrap_or_default();
+
+                if owns_scope(&name) {
+                    let inherited = scopes.last().cloned().unwrap_or_default();
+                    scopes.push(inherited);
+                }
+                let scope = scopes.last_mut().expect("a scope is always open");
 
                 match name.as_str() {
                     "MPD" => {
                         saw_mpd = true;
-                        manifest.live = attribute(&element, "type")
+                        manifest.live = attribute(element, "type")
                             .is_some_and(|t| t.eq_ignore_ascii_case("dynamic"));
-                        if let Some(duration) = attribute(&element, "mediaPresentationDuration") {
-                            total_duration_seconds = parse_iso_duration(&duration);
+                        if let Some(iso) = attribute(element, "mediaPresentationDuration") {
+                            duration_seconds = parse_iso_duration(&iso);
                         }
                     }
-                    "BaseURL" => text_target = Some("BaseURL"),
+                    "BaseURL" => reading_base_url = true,
                     "SegmentTemplate" => {
-                        frame.template = Some(Template {
-                            media: attribute(&element, "media"),
-                            initialisation: attribute(&element, "initialization")
-                                .or_else(|| attribute(&element, "initialisation")),
-                            start_number: number(&element, "startNumber").unwrap_or(1),
+                        // Replaces rather than merges: an inner template is a
+                        // complete answer, and merging it with an outer one
+                        // would mix two addressing schemes.
+                        scope.template = Some(Template {
+                            media: attribute(element, "media"),
+                            initialisation: attribute(element, "initialization")
+                                .or_else(|| attribute(element, "initialisation")),
+                            start_number: number(element, "startNumber").unwrap_or(1),
                             timeline_count: None,
-                            duration: number(&element, "duration"),
-                            timescale: number(&element, "timescale").unwrap_or(1),
+                            duration: number(element, "duration"),
+                            timescale: number(element, "timescale").unwrap_or(1),
                         });
+                    }
+                    "SegmentList" => {
+                        scope.segment_list.clear();
+                        scope.list_duration = number(element, "duration");
                     }
                     "S" => {
                         // One timeline entry covers `r + 1` segments.
-                        let repeat = number(&element, "r").unwrap_or(0);
-                        if let Some(template) = frame.template.as_mut() {
-                            *template.timeline_count.get_or_insert(0) += repeat + 1;
-                        }
-                        // The timeline lives inside SegmentTemplate, whose
-                        // frame is the one below this element's own.
-                        if let Some(parent) = stack.last_mut()
-                            && let Some(template) = parent.template.as_mut()
-                        {
+                        let repeat = number(element, "r").unwrap_or(0);
+                        if let Some(template) = scope.template.as_mut() {
                             *template.timeline_count.get_or_insert(0) += repeat + 1;
                         }
                     }
                     "SegmentURL" => {
-                        if let Some(media) = attribute(&element, "media") {
-                            frame.segment_list.push(media.clone());
-                            if let Some(parent) = stack.last_mut() {
-                                parent.segment_list.push(media);
-                            }
+                        if let Some(media) = attribute(element, "media") {
+                            scope.segment_list.push(media);
                         }
                     }
                     "Initialization" | "Initialisation" => {
-                        if let Some(source) = attribute(&element, "sourceURL") {
-                            frame.template.get_or_insert_with(Default::default).initialisation =
-                                Some(source.clone());
-                            if let Some(parent) = stack.last_mut() {
-                                parent
-                                    .template
-                                    .get_or_insert_with(Default::default)
-                                    .initialisation = Some(source);
-                            }
+                        if let Some(source) = attribute(element, "sourceURL") {
+                            scope.template.get_or_insert_with(Default::default).initialisation =
+                                Some(source);
                         }
                     }
                     "AdaptationSet" => {
-                        frame.mime = attribute(&element, "mimeType").or(frame.mime);
-                        frame.codecs = attribute(&element, "codecs").or(frame.codecs);
-                        frame.width = number(&element, "width").or(frame.width);
-                        frame.height = number(&element, "height").or(frame.height);
+                        scope.mime = attribute(element, "mimeType").or(scope.mime.take());
+                        scope.codecs = attribute(element, "codecs").or(scope.codecs.take());
+                        scope.width = number(element, "width").or(scope.width);
+                        scope.height = number(element, "height").or(scope.height);
                     }
                     "Representation" => {
-                        in_representation = true;
-                        frame.mime = attribute(&element, "mimeType").or(frame.mime.clone());
-                        frame.codecs = attribute(&element, "codecs").or(frame.codecs.clone());
-                        frame.width = number(&element, "width").or(frame.width);
-                        frame.height = number(&element, "height").or(frame.height);
+                        scope.mime = attribute(element, "mimeType").or(scope.mime.take());
+                        scope.codecs = attribute(element, "codecs").or(scope.codecs.take());
+                        scope.width = number(element, "width").or(scope.width);
+                        scope.height = number(element, "height").or(scope.height);
 
-                        current = Some(Representation {
-                            id: attribute(&element, "id").unwrap_or_default(),
-                            bandwidth: number(&element, "bandwidth").unwrap_or(0),
-                            width: frame.width,
-                            height: frame.height,
-                            codecs: frame.codecs.clone(),
-                            mime: frame.mime.clone().unwrap_or_default(),
+                        pending.push(Some(Representation {
+                            id: attribute(element, "id").unwrap_or_default(),
+                            bandwidth: number(element, "bandwidth").unwrap_or(0),
+                            width: scope.width,
+                            height: scope.height,
+                            codecs: scope.codecs.clone(),
+                            mime: scope.mime.clone().unwrap_or_default(),
                             init: None,
                             segments: Vec::new(),
-                        });
+                        }));
                     }
                     _ => {}
                 }
 
-                stack.push(frame);
-
                 if self_closing {
-                    let frame = stack.pop().unwrap_or_default();
-                    if name == "Representation"
-                        && in_representation
-                        && let Some(mut representation) = current.take()
-                    {
-                        in_representation = false;
-                        fill_addresses(
-                            &mut representation,
-                            &frame,
+                    if name == "BaseURL" {
+                        reading_base_url = false;
+                    }
+                    if owns_scope(&name) {
+                        close_scope(
+                            &name,
+                            &mut scopes,
+                            &mut pending,
+                            &mut manifest,
                             &base_url,
-                            total_duration_seconds,
+                            duration_seconds,
                         )?;
-                        if !representation.segments.is_empty() {
-                            manifest.representations.push(representation);
-                        }
                     }
                 }
             }
 
-            Ok(Event::Text(text)) if text_target == Some("BaseURL") => {
-                let value = text.decode().unwrap_or_default().trim().to_owned();
-                if !value.is_empty() {
-                    // Applies to this element's parent, which is the frame
-                    // below the BaseURL element's own.
-                    let depth = stack.len();
-                    if depth >= 2 {
-                        stack[depth - 2].base = Some(value);
-                    }
-                }
-                text_target = None;
-            }
-
-            Ok(Event::End(element)) => {
-                let name = local_name(element.name().as_ref());
-                let frame = stack.pop().unwrap_or_default();
-
-                if name == "Representation"
-                    && in_representation
-                    && let Some(mut representation) = current.take()
+            Event::Text(ref body) if reading_base_url => {
+                let value = body.decode().unwrap_or_default().trim().to_owned();
+                if !value.is_empty()
+                    && let Some(scope) = scopes.last_mut()
                 {
-                    in_representation = false;
-                    fill_addresses(
-                        &mut representation,
-                        &frame,
-                        &base_url,
-                        total_duration_seconds,
-                    )?;
-                    if !representation.segments.is_empty() {
-                        manifest.representations.push(representation);
-                    }
+                    scope.base = Some(value);
                 }
             }
-            Ok(_) => {}
+
+            Event::End(ref element) => {
+                let name = local_name(element.name().as_ref());
+                if name == "BaseURL" {
+                    reading_base_url = false;
+                }
+                if owns_scope(&name) {
+                    close_scope(
+                        &name,
+                        &mut scopes,
+                        &mut pending,
+                        &mut manifest,
+                        &base_url,
+                        duration_seconds,
+                    )?;
+                }
+            }
+            _ => {}
         }
     }
 
@@ -302,6 +278,30 @@ pub fn parse(text: &str, base: &str) -> Result<Manifest> {
         return Err(MediaError::Empty);
     }
     Ok(manifest)
+}
+
+/// Pops a scope, finishing the representation it described.
+fn close_scope(
+    name: &str,
+    scopes: &mut Vec<Inherited>,
+    pending: &mut Vec<Option<Representation>>,
+    manifest: &mut Manifest,
+    base: &Url,
+    duration_seconds: f64,
+) -> Result<()> {
+    let scope = scopes.pop().unwrap_or_default();
+    if name != "Representation" {
+        return Ok(());
+    }
+
+    let Some(Some(mut representation)) = pending.pop() else {
+        return Ok(());
+    };
+    fill_addresses(&mut representation, &scope, base, duration_seconds)?;
+    if !representation.segments.is_empty() {
+        manifest.representations.push(representation);
+    }
+    Ok(())
 }
 
 /// Works out the addresses for one rendition, by whichever of the three
@@ -323,14 +323,11 @@ fn fill_addresses(
     {
         let count = segment_count(template, total_duration_seconds);
         if let Some(initialisation) = &template.initialisation {
-            representation.init =
-                Some(resolve(&root, &expand(initialisation, representation, 0))?);
+            representation.init = Some(resolve(&root, &expand(initialisation, representation, 0))?);
         }
         for index in 0..count {
             let number = template.start_number + index;
-            representation
-                .segments
-                .push(resolve(&root, &expand(pattern, representation, number))?);
+            representation.segments.push(resolve(&root, &expand(pattern, representation, number))?);
         }
         return Ok(());
     }
@@ -387,11 +384,8 @@ fn expand(pattern: &str, representation: &Representation, number: u64) -> String
             break;
         };
         let token = &out[start..start + end + 2];
-        let width: usize = token
-            .trim_start_matches("$Number%")
-            .trim_end_matches(['d', '$'])
-            .parse()
-            .unwrap_or(1);
+        let width: usize =
+            token.trim_start_matches("$Number%").trim_end_matches(['d', '$']).parse().unwrap_or(1);
         out = out.replacen(token, &format!("{number:0width$}"), 1);
     }
     out.replace("$Number$", &number.to_string()).replace("$$", "$")

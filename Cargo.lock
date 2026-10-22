@@ -2025,6 +2025,7 @@ dependencies = [
  "bytes",
  "httpdate",
  "idm-core",
+ "idm-media",
  "reqwest",
  "tempfile",
  "thiserror 2.0.21",

@@ -129,6 +129,13 @@ struct Args {
     #[arg(long)]
     cookies: Option<String>,
 
+    /// For a stream, take the best rendition no taller than this.
+    ///
+    /// Streams offer several renditions of the same video; without this the
+    /// largest is taken, which is usually what someone downloading it wants.
+    #[arg(long, value_name = "PIXELS")]
+    max_height: Option<u64>,
+
     /// One line of JSON on completion, for scripts.
     #[arg(long)]
     json: bool,
@@ -266,6 +273,12 @@ async fn main() -> std::process::ExitCode {
 
     let show_progress = !args.quiet && !args.json && std::io::stderr().is_terminal();
     let mut last_render = std::time::Instant::now();
+
+    // A manifest is not a file. Recognised by its address here; the body is
+    // what actually decides, inside.
+    if idm_net::stream::looks_like_manifest(&url) {
+        return download_stream(&url, &args, show_progress).await;
+    }
 
     let outcome = download_with_progress(&config, |progress| {
         // Throttled so a fast download does not spend its time drawing.
@@ -523,5 +536,56 @@ fn tracing_subscriber_init() {
     // over. RUST_LOG is honoured by whatever subscriber a host installs.
     if std::env::var_os("RUST_LOG").is_some() {
         tracing::debug!("tracing enabled via RUST_LOG");
+    }
+}
+
+/// Downloads a stream: manifest, rendition, segments, one file.
+async fn download_stream(url: &str, args: &Args, show_progress: bool) -> std::process::ExitCode {
+    let mut options = idm_net::stream::StreamOptions::new(args.out.clone());
+    options.filename = args.name.clone();
+    options.referrer = args.referrer.clone();
+    options.cookies = args.cookies.clone();
+    options.max_height = args.max_height;
+
+    let quiet = args.quiet;
+    let outcome = idm_net::stream::download(url, &options, move |progress| {
+        if show_progress && progress.segments_total > 0 {
+            eprint!(
+                "\r  {}/{} segments  {}        ",
+                progress.segments_done,
+                progress.segments_total,
+                human_bytes(progress.bytes)
+            );
+            let _ = std::io::stderr().flush();
+        }
+    })
+    .await;
+
+    if show_progress {
+        eprintln!();
+    }
+
+    match outcome {
+        Ok(report) => {
+            if !quiet {
+                eprintln!(
+                    "{} — {} from {} segments ({})",
+                    report.path.display(),
+                    human_bytes(report.bytes),
+                    report.segments,
+                    report.label
+                );
+                // Said plainly rather than left for the user to discover: the
+                // file is playable, just not in the shape they expected.
+                if let Some(note) = &report.note {
+                    eprintln!("note: {note}");
+                }
+            }
+            std::process::ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("error: {error}");
+            std::process::ExitCode::FAILURE
+        }
     }
 }
