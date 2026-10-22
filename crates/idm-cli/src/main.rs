@@ -67,6 +67,14 @@ struct Args {
     #[arg(long)]
     revoke: Option<String>,
 
+    /// Hand a URL to the running engine instead of downloading it here.
+    ///
+    /// The download then shows in the app's list, follows its queue and
+    /// speed limit, and survives this command exiting. Useful from scripts,
+    /// and from anything that can run a command but cannot talk to the app.
+    #[arg(long, value_name = "URL")]
+    send: Option<String>,
+
     /// Turn browser integration on or off, or show it with no value.
     ///
     /// Off makes the engine refuse anything a browser hands it, so downloads
@@ -265,6 +273,9 @@ async fn main() -> std::process::ExitCode {
     if let Some(choice) = args.integration {
         return run_integration_command(choice).await;
     }
+    if let Some(url) = args.send.clone() {
+        return run_send_command(url, args.name.clone()).await;
+    }
     if args.pairings || args.approve.is_some() || args.deny.is_some() || args.revoke.is_some() {
         return run_pairing_command(&args).await;
     }
@@ -422,6 +433,41 @@ fn run_install(args: &Args) -> std::process::ExitCode {
             }
             eprintln!("host: {}", host_path.display());
             std::process::ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("error: {error}");
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+/// Queues a URL in the running engine.
+async fn run_send_command(url: String, filename: Option<String>) -> std::process::ExitCode {
+    use idm_ipc::{DownloadRequest, IpcClient, Request, Response};
+
+    // Connected as the command line, not as a browser: this is someone at
+    // a terminal, so the file-transfer schemes a web page may not use are
+    // open to it, exactly as they are to the app.
+    let mut client = match IpcClient::connect("cli").await {
+        Ok(client) => client,
+        Err(error) => {
+            eprintln!("error: no running engine ({error}). Start the app, or: idm --serve");
+            return std::process::ExitCode::FAILURE;
+        }
+    };
+
+    let request = DownloadRequest { url, filename, ..Default::default() };
+    match client.request(Request::Enqueue(request)).await {
+        Ok(Response::Accepted { id }) => {
+            eprintln!("queued as download {}", id.0);
+            std::process::ExitCode::SUCCESS
+        }
+        Ok(Response::Rejected { reason }) => {
+            eprintln!("refused: {reason}");
+            std::process::ExitCode::FAILURE
+        }
+        Ok(other) => {
+            eprintln!("unexpected reply: {other:?}");
+            std::process::ExitCode::FAILURE
         }
         Err(error) => {
             eprintln!("error: {error}");

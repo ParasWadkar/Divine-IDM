@@ -69,6 +69,13 @@ pub struct SftpOptions {
     pub identity_passphrase: Option<String>,
     pub unknown_host: UnknownHost,
     pub resume: bool,
+    /// With no key and no password given, try the keys `ssh` would:
+    /// ~/.ssh/id_ed25519, id_ecdsa and id_rsa.
+    ///
+    /// Only unencrypted ones. An encrypted key needs its passphrase typed,
+    /// and a download started from the app or a browser has nobody there to
+    /// type it — so those are skipped rather than left to hang.
+    pub use_default_identities: bool,
     /// The engine-wide speed limit, if there is one.
     pub limiter: Option<Arc<crate::limiter::RateLimiter>>,
 }
@@ -84,6 +91,7 @@ impl SftpOptions {
             identity_passphrase: None,
             unknown_host: UnknownHost::default(),
             resume: true,
+            use_default_identities: true,
             limiter: None,
         }
     }
@@ -412,10 +420,59 @@ async fn authenticate(
         return Err(SftpError::Refused("the server rejected the password".to_owned()));
     }
 
+    if options.use_default_identities {
+        let candidates = default_identities();
+        for path in &candidates {
+            // An encrypted key fails to load without its passphrase, which
+            // is the cue to move on rather than to ask.
+            let Ok(key) = keys::load_secret_key(path, None) else {
+                continue;
+            };
+            let hash = session
+                .best_supported_rsa_hash()
+                .await
+                .map_err(|error| SftpError::Ssh(error.to_string()))?
+                .flatten();
+            let result = session
+                .authenticate_publickey(
+                    &target.username,
+                    russh::keys::PrivateKeyWithHashAlg::new(Arc::new(key), hash),
+                )
+                .await
+                .map_err(|error| SftpError::Ssh(error.to_string()))?;
+            if result.success() {
+                return Ok(());
+            }
+        }
+
+        return Err(SftpError::Refused(if candidates.is_empty() {
+            "sftp needs a key or a password: there is no key in ~/.ssh, so add one, or \
+             download from the command line with --password"
+                .to_owned()
+        } else {
+            "none of the keys in ~/.ssh was accepted. Encrypted keys are skipped, because \
+             there is nobody to type a passphrase; add an unencrypted key to the server, or \
+             download from the command line with --identity or --password"
+                .to_owned()
+        }));
+    }
+
     Err(SftpError::Refused(
         "sftp needs a password or a key: pass --password, or --identity with a private key"
             .to_owned(),
     ))
+}
+
+/// The private keys `ssh` tries by default, in its order, if they exist.
+fn default_identities() -> Vec<PathBuf> {
+    let Some(home) = home_dir() else {
+        return Vec::new();
+    };
+    ["id_ed25519", "id_ecdsa", "id_rsa"]
+        .iter()
+        .map(|name| home.join(".ssh").join(name))
+        .filter(|path| path.is_file())
+        .collect()
 }
 
 fn percent_decode(text: &str) -> String {

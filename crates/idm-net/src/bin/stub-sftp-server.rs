@@ -165,6 +165,25 @@ impl russh::server::Handler for SshHandler {
         }
     }
 
+    /// Accepts any key offered.
+    ///
+    /// This is a test server on localhost; the question it exists to answer
+    /// is whether the client finds a key, offers it and proceeds, not
+    /// whether this server can tell one key from another. Checking a real
+    /// authorized_keys would mean generating a matching pair for every run
+    /// and testing russh's signature verification rather than our own code.
+    async fn auth_publickey(
+        &mut self,
+        user: &str,
+        _key: &russh::keys::PublicKey,
+    ) -> Result<Auth, Self::Error> {
+        if user == USER {
+            Ok(Auth::Accept)
+        } else {
+            Ok(Auth::Reject { proceed_with_methods: None, partial_success: false })
+        }
+    }
+
     async fn channel_open_session(
         &mut self,
         channel: Channel<Msg>,
@@ -226,7 +245,7 @@ async fn main() {
     let config = Arc::new(russh::server::Config {
         inactivity_timeout: Some(std::time::Duration::from_secs(60)),
         auth_rejection_time: std::time::Duration::from_millis(100),
-        methods: MethodSet::from(&[russh::MethodKind::Password][..]),
+        methods: MethodSet::from(&[russh::MethodKind::Password, russh::MethodKind::PublicKey][..]),
         keys: vec![key],
         ..Default::default()
     });

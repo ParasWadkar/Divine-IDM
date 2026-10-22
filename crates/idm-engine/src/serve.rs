@@ -455,6 +455,63 @@ async fn run_file(
     Ok(Some(report.total))
 }
 
+/// Records byte progress for the transfers that report it as (done, total).
+fn record_transfer(inner: &Inner, id: JobId, done: u64, total: Option<u64>) {
+    if let Ok(mut jobs) = inner.jobs.try_lock()
+        && let Some(record) = jobs.get_mut(&id)
+    {
+        record.status.downloaded = done;
+        if total.is_some() {
+            record.status.total = total;
+        }
+        // One connection: FTP servers count logins per user, and SFTP's
+        // reads are pipelined on one channel.
+        record.status.connections = 1;
+    }
+}
+
+/// FTP or FTPS. Credentials, if any, come from the address; otherwise the
+/// login is anonymous, which is what a bare ftp:// means.
+async fn run_ftp(
+    inner: &Arc<Inner>,
+    id: JobId,
+    config: &DownloadConfig,
+) -> std::result::Result<Option<u64>, String> {
+    let mut options = idm_net::ftp::FtpOptions::new(config.output_dir.clone());
+    options.filename = config.filename.clone();
+    options.limiter = config.fetch.limiter.clone();
+
+    let progress_inner = Arc::clone(inner);
+    let report = idm_net::ftp::download(&config.url, &options, move |done, total| {
+        record_transfer(&progress_inner, id, done, total);
+    })
+    .await
+    .map_err(|error| error.to_string())?;
+    Ok(Some(report.bytes))
+}
+
+/// SFTP. There is nobody to type a password into, so this authenticates the
+/// way `ssh` does by default — with the keys in ~/.ssh — and checks the host
+/// against known_hosts, refusing one it has not seen.
+async fn run_sftp(
+    inner: &Arc<Inner>,
+    id: JobId,
+    config: &DownloadConfig,
+) -> std::result::Result<Option<u64>, String> {
+    let mut options = idm_net::sftp::SftpOptions::new(config.output_dir.clone());
+    options.filename = config.filename.clone();
+    options.limiter = config.fetch.limiter.clone();
+    options.use_default_identities = true;
+
+    let progress_inner = Arc::clone(inner);
+    let report = idm_net::sftp::download(&config.url, &options, move |done, total| {
+        record_transfer(&progress_inner, id, done, total);
+    })
+    .await
+    .map_err(|error| error.to_string())?;
+    Ok(Some(report.bytes))
+}
+
 /// A stream: manifest, rendition, segments, one file.
 ///
 /// Progress is counted in segments rather than in a total that is not known
@@ -580,8 +637,17 @@ async fn start(inner: &Arc<Inner>, id: JobId, config: DownloadConfig) {
             // A manifest is not a file. Routed here rather than in the
             // caller so every client — the window, the browser extension,
             // the command line — gets streams without each one deciding.
+            // Every scheme the engine accepts has to be routed here. Letting
+            // a client hand over an ftp:// address and then sending it down
+            // the HTTP path accepts the download and fails it with a message
+            // about a "builder error" — which is exactly what happened when
+            // the schemes were allowed in and this was not updated.
             let outcome = if idm_net::stream::looks_like_manifest(&config.url) {
                 run_stream(&inner, id, &config).await
+            } else if idm_net::ftp::handles(&config.url) {
+                run_ftp(&inner, id, &config).await
+            } else if idm_net::sftp::handles(&config.url) {
+                run_sftp(&inner, id, &config).await
             } else {
                 run_file(&inner, id, &config).await
             };
