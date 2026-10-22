@@ -27,7 +27,9 @@ russh-sftp = "3.0.1"
 
 [dev-dependencies]
 tempfile.workspace = true
-tokio = { workspace = true, features = ["full"] }
+# test-util for a paused clock, so the limiter's timing tests are exact
+# rather than racing the machine they run on.
+tokio = { workspace = true, features = ["full", "test-util"] }
 
 [lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

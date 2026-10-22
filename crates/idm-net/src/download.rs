@@ -412,6 +412,13 @@ pub async fn download_with_progress<F: FnMut(Progress)>(
         .map(|host| HostKey::new(host.as_str(), port, alpn_label(&target.http_version)));
 
     let fingerprint = idm_core::win::net_fingerprint();
+
+    // Whether the speed limit held anything back during this download, read
+    // as a before-and-after count. If it did, the throughput the controller
+    // measured was the limit's, not the host's, and the count it settled on
+    // says nothing about what the host can do. Saving it would teach the
+    // next unthrottled download from this host to start throttled.
+    let waits_before = config.fetch.limiter.as_ref().map_or(0, |limiter| limiter.waits());
     let wall_clock_ms = wall_clock_ms();
     let learned = match (config.profiles.as_ref(), host_key.as_ref()) {
         (Some(store), Some(key)) => store.load(key, fingerprint),
@@ -748,6 +755,7 @@ pub async fn download_with_progress<F: FnMut(Progress)>(
         (config.profiles.as_ref(), host_key.as_ref(), controller.settled())
         && tuning_applies
         && fingerprint != 0
+        && !config.fetch.limiter.as_ref().is_some_and(|limiter| limiter.waits() > waits_before)
     {
         // Built by the controller rather than assembled here. The two
         // differ: this loop clamps the connection count in places the

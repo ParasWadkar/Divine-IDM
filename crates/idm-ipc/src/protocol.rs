@@ -163,7 +163,17 @@ pub enum PostActionSetting {
 }
 
 /// Settings a client may read, and the desktop app may change.
+///
+/// `serde(default)` on the whole struct, so a field missing from the file is
+/// filled from [`Settings::default`] rather than failing the parse. Without
+/// it, every field added after a settings file was written made that file
+/// unreadable — and the loader treats unreadable as "use the defaults", so
+/// the user's own choices were silently thrown away on every start. That
+/// included browser integration switching itself back on after being
+/// turned off. Putting it on the struct rather than on each field means a
+/// field added later cannot reintroduce the problem by being forgotten.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Settings {
     /// Master switch for browser integration.
     ///
@@ -188,6 +198,13 @@ pub struct Settings {
     pub resume_on_start: bool,
     /// Start Divine IDM when this user signs in.
     pub start_with_windows: bool,
+    /// A ceiling on the total download rate, in bytes per second; zero for
+    /// none.
+    ///
+    /// Shared by every download rather than applied to each: a limit exists
+    /// so that downloading does not take over the connection, and four
+    /// downloads at a per-download 5 MB/s would be 20.
+    pub speed_limit_bytes_per_sec: u64,
     /// How many downloads may run at once. The rest wait their turn.
     ///
     /// This is about the origin and the link, not the disk: every running
@@ -218,6 +235,7 @@ impl Default for Settings {
             // enough that dropping a hundred-link batch in does not open a
             // hundred fans of connections at once.
             max_concurrent_downloads: 4,
+            speed_limit_bytes_per_sec: 0,
         }
     }
 }
@@ -427,6 +445,47 @@ mod tests {
     fn the_scheme_check_is_case_insensitive() {
         // Otherwise "FILE://" walks straight past it.
         assert!(request("HTTPS://example.invalid/a.bin").validate().is_ok());
+    }
+
+    #[test]
+    fn settings_written_by_an_older_build_keep_their_values() {
+        // Exactly the shape found on a real machine: four fields, written
+        // before the rest existed. Values that differ from the defaults, so
+        // the test can tell kept from reset — browser integration off is the
+        // one that matters, since silently switching it back on undoes the
+        // user's kill switch.
+        let old = r#"{
+            "browser_integration": false,
+            "post_action": "shutdown",
+            "post_action_countdown_secs": 30,
+            "min_takeover_bytes": 1048576
+        }"#;
+        let settings: Settings = serde_json::from_str(old).expect("an older file must still load");
+
+        assert!(!settings.browser_integration, "a switched-off integration must stay off");
+        assert_eq!(settings.post_action, PostActionSetting::Shutdown);
+        assert_eq!(settings.post_action_countdown_secs, 30);
+        assert_eq!(settings.min_takeover_bytes, 1 << 20);
+
+        // And the fields it never had take their defaults.
+        let defaults = Settings::default();
+        assert_eq!(settings.max_concurrent_downloads, defaults.max_concurrent_downloads);
+        assert_eq!(settings.resume_on_start, defaults.resume_on_start);
+        assert_eq!(settings.speed_limit_bytes_per_sec, 0);
+    }
+
+    #[test]
+    fn an_empty_settings_object_is_the_defaults() {
+        let settings: Settings = serde_json::from_str("{}").unwrap();
+        assert_eq!(settings, Settings::default());
+    }
+
+    #[test]
+    fn a_field_from_a_newer_build_is_ignored_rather_than_fatal() {
+        // A downgrade should keep what it understands.
+        let newer = r#"{"browser_integration": false, "some_future_setting": 7}"#;
+        let settings: Settings = serde_json::from_str(newer).unwrap();
+        assert!(!settings.browser_integration);
     }
 
     #[test]

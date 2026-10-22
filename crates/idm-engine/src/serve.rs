@@ -56,6 +56,8 @@ struct Inner {
     store: Option<Arc<idm_store::Store>>,
     /// Maps a live job to its row, so progress reaches the right one.
     rows: Mutex<HashMap<JobId, i64>>,
+    /// One speed limit for every download the engine runs.
+    limiter: Arc<idm_net::limiter::RateLimiter>,
     pairings: Mutex<PairingStore>,
     /// Cancels an armed post-download action, if one is counting down.
     armed: Mutex<Option<Canceller>>,
@@ -97,6 +99,7 @@ impl Engine {
         settings_file: PathBuf,
         store: Option<Arc<idm_store::Store>>,
     ) -> Arc<Self> {
+        let starting_limit = load_settings(&settings_file).speed_limit_bytes_per_sec;
         Arc::new(Self {
             inner: Arc::new(Inner {
                 output_dir,
@@ -110,6 +113,7 @@ impl Engine {
                 settings_file,
                 store,
                 rows: Mutex::new(HashMap::new()),
+                limiter: Arc::new(idm_net::limiter::RateLimiter::new(starting_limit)),
                 armed: Mutex::new(None),
             }),
         })
@@ -197,6 +201,7 @@ impl Engine {
         config.conn.per_host_max = self.inner.max_connections;
         config.referrer = request.referrer.clone();
         config.cookies = request.cookies.clone();
+        config.fetch.limiter = Some(Arc::clone(&self.inner.limiter));
         config.profiles =
             self.inner.store.clone().map(|store| store as Arc<dyn idm_core::sched::ProfileStore>);
 
@@ -340,6 +345,7 @@ impl Engine {
             config.filename = Some(row.filename.clone());
             config.conn.per_host_max = self.inner.max_connections;
             config.referrer = row.referrer.clone();
+            config.fetch.limiter = Some(Arc::clone(&self.inner.limiter));
             config.profiles = self
                 .inner
                 .store
@@ -464,6 +470,7 @@ async fn run_stream(
     options.filename = config.filename.clone();
     options.referrer = config.referrer.clone();
     options.cookies = config.cookies.clone();
+    options.limiter = config.fetch.limiter.clone();
 
     let progress_inner = Arc::clone(inner);
     let report = idm_net::stream::download(&config.url, &options, move |progress| {
@@ -763,8 +770,17 @@ impl Engine {
             };
         }
         let mut current = self.inner.settings.lock().await;
+        let limit_changed = current.speed_limit_bytes_per_sec != settings.speed_limit_bytes_per_sec;
         *current = settings.clone();
+        drop(current);
         save_settings(&self.inner.settings_file, &settings);
+
+        // Takes effect on the next read of every running download, not only
+        // on the ones started afterwards — the usual reason for changing a
+        // limit is that a download already running is in the way.
+        if limit_changed {
+            self.inner.limiter.set_rate(settings.speed_limit_bytes_per_sec).await;
+        }
         Response::Settings(settings)
     }
 
@@ -859,12 +875,24 @@ pub fn settings_path() -> PathBuf {
 }
 
 fn load_settings(path: &PathBuf) -> Settings {
-    // A missing or unreadable file means defaults, which are the safe ones:
-    // browser integration on, no post-download action.
-    std::fs::read(path)
-        .ok()
-        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-        .unwrap_or_default()
+    // A missing file means defaults, which are the safe ones: browser
+    // integration on, no post-download action.
+    let Ok(bytes) = std::fs::read(path) else {
+        return Settings::default();
+    };
+    match serde_json::from_slice(&bytes) {
+        Ok(settings) => settings,
+        Err(error) => {
+            // Said out loud. Falling back to defaults is the safe choice, but
+            // a silent fallback is how this file's own values were discarded
+            // on every start without anyone noticing.
+            eprintln!(
+                "warning: {} could not be read ({error}); using default settings",
+                path.display()
+            );
+            Settings::default()
+        }
+    }
 }
 
 fn save_settings(path: &PathBuf, settings: &Settings) {

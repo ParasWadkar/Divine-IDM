@@ -50,6 +50,8 @@ pub struct FtpOptions {
     pub password: Option<String>,
     /// Pick up where a previous attempt stopped, if the server allows it.
     pub resume: bool,
+    /// The engine-wide speed limit, if there is one.
+    pub limiter: Option<std::sync::Arc<crate::limiter::RateLimiter>>,
 }
 
 impl FtpOptions {
@@ -60,6 +62,7 @@ impl FtpOptions {
             username: None,
             password: None,
             resume: true,
+            limiter: None,
         }
     }
 }
@@ -153,13 +156,21 @@ where
 {
     let target = parse(url, options)?;
     let options = options.clone();
+    // The transfer runs on a blocking thread, which can still wait on the
+    // async limiter through a handle to the runtime it came from.
+    let runtime = tokio::runtime::Handle::current();
 
-    tokio::task::spawn_blocking(move || fetch(&target, &options, &mut progress))
+    tokio::task::spawn_blocking(move || fetch(&target, &options, &mut progress, &runtime))
         .await
         .map_err(|error| FtpError::Protocol(error.to_string()))?
 }
 
-fn fetch<F>(target: &Target, options: &FtpOptions, progress: &mut F) -> Result<FtpReport>
+fn fetch<F>(
+    target: &Target,
+    options: &FtpOptions,
+    progress: &mut F,
+    runtime: &tokio::runtime::Handle,
+) -> Result<FtpReport>
 where
     F: FnMut(u64, Option<u64>),
 {
@@ -176,10 +187,10 @@ where
         let mut stream = stream
             .into_secure(NativeTlsConnector::from(connector), &target.host)
             .map_err(protocol)?;
-        transfer(&mut stream, target, options, &part_path, &final_path, progress, true)
+        transfer(&mut stream, target, options, &part_path, &final_path, progress, runtime)
     } else {
         let mut stream = FtpStream::connect(&address).map_err(protocol)?;
-        transfer(&mut stream, target, options, &part_path, &final_path, progress, false)
+        transfer(&mut stream, target, options, &part_path, &final_path, progress, runtime)
     }
 }
 
@@ -191,7 +202,7 @@ fn transfer<T, F>(
     part_path: &Path,
     final_path: &Path,
     progress: &mut F,
-    secure: bool,
+    runtime: &tokio::runtime::Handle,
 ) -> Result<FtpReport>
 where
     T: suppaftp::TlsStream,
@@ -261,6 +272,12 @@ where
         sink.write_all(&buffer[..read])?;
         written += read as u64;
         progress(written, total);
+
+        if let Some(limiter) = &options.limiter
+            && limiter.rate() > 0
+        {
+            runtime.block_on(limiter.take(read));
+        }
     }
     sink.flush()?;
     drop(sink);
@@ -278,7 +295,13 @@ where
     }
 
     std::fs::rename(part_path, final_path)?;
-    Ok(FtpReport { path: final_path.to_path_buf(), bytes: written, resumed_bytes: resumed, secure })
+    Ok(FtpReport {
+        path: final_path.to_path_buf(),
+        bytes: written,
+        resumed_bytes: resumed,
+        // Read from where it was decided rather than passed alongside it.
+        secure: target.secure,
+    })
 }
 
 /// Turns an FTP error into a message, without the credentials.

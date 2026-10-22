@@ -47,11 +47,17 @@ pub const DEFAULT_PARTIAL_FLUSH: Duration = Duration::from_millis(50);
 pub struct FetchConfig {
     pub chunk_target: usize,
     pub partial_flush_after: Duration,
+    /// The engine-wide speed limit, if there is one.
+    pub limiter: Option<std::sync::Arc<crate::limiter::RateLimiter>>,
 }
 
 impl Default for FetchConfig {
     fn default() -> Self {
-        Self { chunk_target: DEFAULT_CHUNK_TARGET, partial_flush_after: DEFAULT_PARTIAL_FLUSH }
+        Self {
+            chunk_target: DEFAULT_CHUNK_TARGET,
+            partial_flush_after: DEFAULT_PARTIAL_FLUSH,
+            limiter: None,
+        }
     }
 }
 
@@ -190,6 +196,14 @@ pub async fn fetch_claim(
                 // stream here cancels it, cheaply on H2/H3.
                 if claim.is_done() {
                     break;
+                }
+
+                // Waiting here, between reads, is what makes the limit real.
+                // While this sleeps nothing polls the body, so hyper stops
+                // draining the socket and the server is slowed by TCP itself
+                // rather than having its bytes read and then held back.
+                if let Some(limiter) = &config.limiter {
+                    limiter.take(bytes.len()).await;
                 }
             }
             Some(Err(source)) => {

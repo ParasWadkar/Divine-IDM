@@ -69,6 +69,8 @@ pub struct SftpOptions {
     pub identity_passphrase: Option<String>,
     pub unknown_host: UnknownHost,
     pub resume: bool,
+    /// The engine-wide speed limit, if there is one.
+    pub limiter: Option<Arc<crate::limiter::RateLimiter>>,
 }
 
 impl SftpOptions {
@@ -82,6 +84,7 @@ impl SftpOptions {
             identity_passphrase: None,
             unknown_host: UnknownHost::default(),
             resume: true,
+            limiter: None,
         }
     }
 }
@@ -342,6 +345,10 @@ where
         sink.write_all(&buffer[..read]).await?;
         written += read as u64;
         progress(written, total);
+
+        if let Some(limiter) = &options.limiter {
+            limiter.take(read).await;
+        }
     }
     sink.flush().await?;
     drop(sink);

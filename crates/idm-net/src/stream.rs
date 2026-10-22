@@ -47,6 +47,8 @@ pub struct StreamOptions {
     pub concurrency: usize,
     pub referrer: Option<String>,
     pub cookies: Option<String>,
+    /// The engine-wide speed limit, if there is one.
+    pub limiter: Option<Arc<crate::limiter::RateLimiter>>,
 }
 
 impl StreamOptions {
@@ -60,6 +62,7 @@ impl StreamOptions {
             concurrency: 8,
             referrer: None,
             cookies: None,
+            limiter: None,
         }
     }
 }
@@ -416,6 +419,7 @@ where
         let bytes = Arc::clone(bytes);
         let referrer = options.referrer.clone();
         let cookies = options.cookies.clone();
+        let limiter = options.limiter.clone();
         // The initialisation segment is not part of the encrypted sequence,
         // so only media segments are numbered for a vector.
         let iv = match (&track.decryption, index.checked_sub(offset)) {
@@ -425,7 +429,14 @@ where
 
         tasks.push(tokio::spawn(async move {
             let _permit = limit.acquire().await;
-            let body = get_bytes(&client, &url, referrer.as_deref(), cookies.as_deref()).await?;
+            let body = get_limited(
+                &client,
+                &url,
+                referrer.as_deref(),
+                cookies.as_deref(),
+                limiter.as_deref(),
+            )
+            .await?;
 
             let body = match (key, iv) {
                 (Some(key), Some(iv)) => crypto::decrypt_segment(&key, &iv, &body)?,
@@ -485,6 +496,47 @@ async fn get_bytes(
         return Err(StreamError::Http(format!("{} for {url}", response.status())));
     }
     Ok(response.bytes().await.map_err(|error| StreamError::Http(error.to_string()))?.to_vec())
+}
+
+/// Fetches a segment, holding to the speed limit as it arrives.
+///
+/// Read chunk by chunk rather than in one call, so the limit is applied
+/// between reads and slows the server through TCP — taking a whole segment
+/// at full speed and then sleeping would average out to the limit while
+/// still saturating the link in bursts, which is the thing a limit is for
+/// preventing.
+async fn get_limited(
+    client: &reqwest::Client,
+    url: &str,
+    referrer: Option<&str>,
+    cookies: Option<&str>,
+    limiter: Option<&crate::limiter::RateLimiter>,
+) -> Result<Vec<u8>> {
+    let Some(limiter) = limiter.filter(|limiter| limiter.rate() > 0) else {
+        return get_bytes(client, url, referrer, cookies).await;
+    };
+
+    let mut request = client.get(url);
+    if let Some(referrer) = referrer {
+        request = request.header(reqwest::header::REFERER, referrer);
+    }
+    if let Some(cookies) = cookies {
+        request = request.header(reqwest::header::COOKIE, cookies);
+    }
+    let response = request.send().await.map_err(|error| StreamError::Http(error.to_string()))?;
+    if !response.status().is_success() {
+        return Err(StreamError::Http(format!("{} for {url}", response.status())));
+    }
+
+    use tokio_stream::StreamExt;
+    let mut body = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|error| StreamError::Http(error.to_string()))?;
+        body.extend_from_slice(&chunk);
+        limiter.take(chunk.len()).await;
+    }
+    Ok(body)
 }
 
 /// Removes an extension the output is about to be given a better one than.

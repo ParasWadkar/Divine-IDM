@@ -129,6 +129,10 @@ struct Args {
     #[arg(long)]
     cookies: Option<String>,
 
+    /// Cap the download rate, e.g. `5M` or `500K` per second.
+    #[arg(long, value_name = "RATE", value_parser = parse_limit)]
+    limit: Option<u64>,
+
     /// Username, for a server that wants one.
     ///
     /// Preferred over putting credentials in the address: a URL reaches the
@@ -301,17 +305,22 @@ async fn main() -> std::process::ExitCode {
 
     let show_progress = !args.quiet && !args.json && std::io::stderr().is_terminal();
     let mut last_render = std::time::Instant::now();
+    let limiter = args
+        .limit
+        .filter(|rate| *rate > 0)
+        .map(|rate| std::sync::Arc::new(idm_net::limiter::RateLimiter::new(rate)));
+    config.fetch.limiter = limiter.clone();
 
     // A manifest is not a file. Recognised by its address here; the body is
     // what actually decides, inside.
     if idm_net::stream::looks_like_manifest(&url) {
-        return download_stream(&url, &args, show_progress).await;
+        return download_stream(&url, &args, show_progress, limiter).await;
     }
     if idm_net::ftp::handles(&url) {
-        return download_ftp(&url, &args, show_progress).await;
+        return download_ftp(&url, &args, show_progress, limiter).await;
     }
     if idm_net::sftp::handles(&url) {
-        return download_sftp(&url, &args, show_progress).await;
+        return download_sftp(&url, &args, show_progress, limiter).await;
     }
 
     let outcome = download_with_progress(&config, |progress| {
@@ -574,8 +583,14 @@ fn tracing_subscriber_init() {
 }
 
 /// Downloads over SFTP.
-async fn download_sftp(url: &str, args: &Args, show_progress: bool) -> std::process::ExitCode {
+async fn download_sftp(
+    url: &str,
+    args: &Args,
+    show_progress: bool,
+    limiter: Option<std::sync::Arc<idm_net::limiter::RateLimiter>>,
+) -> std::process::ExitCode {
     let mut options = idm_net::sftp::SftpOptions::new(args.out.clone());
+    options.limiter = limiter;
     options.filename = args.name.clone();
     options.username = args.user.clone();
     options.password = args.password.clone();
@@ -632,8 +647,14 @@ async fn download_sftp(url: &str, args: &Args, show_progress: bool) -> std::proc
 }
 
 /// Downloads over FTP or FTPS.
-async fn download_ftp(url: &str, args: &Args, show_progress: bool) -> std::process::ExitCode {
+async fn download_ftp(
+    url: &str,
+    args: &Args,
+    show_progress: bool,
+    limiter: Option<std::sync::Arc<idm_net::limiter::RateLimiter>>,
+) -> std::process::ExitCode {
     let mut options = idm_net::ftp::FtpOptions::new(args.out.clone());
+    options.limiter = limiter;
     options.filename = args.name.clone();
     options.username = args.user.clone();
     options.password = args.password.clone();
@@ -684,8 +705,14 @@ async fn download_ftp(url: &str, args: &Args, show_progress: bool) -> std::proce
 }
 
 /// Downloads a stream: manifest, rendition, segments, one file.
-async fn download_stream(url: &str, args: &Args, show_progress: bool) -> std::process::ExitCode {
+async fn download_stream(
+    url: &str,
+    args: &Args,
+    show_progress: bool,
+    limiter: Option<std::sync::Arc<idm_net::limiter::RateLimiter>>,
+) -> std::process::ExitCode {
     let mut options = idm_net::stream::StreamOptions::new(args.out.clone());
+    options.limiter = limiter;
     options.filename = args.name.clone();
     options.referrer = args.referrer.clone();
     options.cookies = args.cookies.clone();
@@ -732,4 +759,9 @@ async fn download_stream(url: &str, args: &Args, show_progress: bool) -> std::pr
             std::process::ExitCode::FAILURE
         }
     }
+}
+
+/// Reads `--limit`, accepting the forms people actually type.
+fn parse_limit(text: &str) -> Result<u64, String> {
+    idm_net::limiter::parse_rate(text)
 }
