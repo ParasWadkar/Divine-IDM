@@ -91,6 +91,24 @@
           </select>
         </label>
 
+        <label class="row">
+          <span>
+            Download at most
+            <small>
+              Each download opens its own fan of connections, so more at once
+              is the same bandwidth split more ways, not more speed.
+            </small>
+          </span>
+          <select id="max-concurrent">
+            <option value="1">1 at a time</option>
+            <option value="2">2 at a time</option>
+            <option value="3">3 at a time</option>
+            <option value="4">4 at a time</option>
+            <option value="6">6 at a time</option>
+            <option value="8">8 at a time</option>
+          </select>
+        </label>
+
         <h2>When the queue finishes</h2>
         <label class="row">
           <span>Then</span>

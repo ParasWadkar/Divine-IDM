@@ -46,11 +46,7 @@ impl AppState {
         }
     }
 
-    pub async fn add_download(
-        &self,
-        url: String,
-        filename: Option<String>,
-    ) -> Result<u64, String> {
+    pub async fn add_download(&self, url: String, filename: Option<String>) -> Result<u64, String> {
         let request = DownloadRequest { url, filename, ..Default::default() };
         match self.request(Request::Enqueue(request)).await {
             Response::Accepted { id } => Ok(id.0),

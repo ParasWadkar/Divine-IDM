@@ -487,6 +487,41 @@ api.runtime.onMessage.addListener((message, _sender, respond) => {
   return true; // reply arrives asynchronously
 });
 
+const RECONNECT_ALARM = "idm-reconnect";
+
+// A browser started before the app finds nothing listening, and an MV3
+// background context then sleeps with "unavailable" as the last thing it
+// knew. Downloads still recover on their own, because handing one over wakes
+// the context and reaches the host then -- but the toolbar badge stays wrong,
+// and an extension that has never been paired has no way to raise its
+// pairing prompt until the user happens to start a download. An alarm is the
+// one timer that survives the context being suspended.
+api.alarms?.create(RECONNECT_ALARM, { periodInMinutes: 1 });
+
+api.alarms?.onAlarm.addListener(async (alarm) => {
+  if (alarm.name !== RECONNECT_ALARM) return;
+  const state = await getState();
+
+  if (state.unavailable) {
+    // Nothing was listening last time. Greeting again both reconnects and,
+    // if this extension has never been paired, asks to be.
+    await greet();
+    return;
+  }
+
+  if (state.paired === false) {
+    // Reachable but not paired: ask only whether that has changed. Greeting
+    // here would raise a fresh pairing prompt every minute, including right
+    // after the user declined one -- turning a refusal into a nag.
+    const reply = await sendToHost({ type: "get_state" });
+    if (reply.type === "state") {
+      await setState({ paired: reply.paired, unavailable: false });
+    } else if (reply.type === "unavailable") {
+      await setState({ unavailable: true, reason: reply.reason });
+    }
+  }
+});
+
 // Every wake: say hello, and let go of anything a previous wake left paused.
 greet();
 releaseOrphanedPauses();

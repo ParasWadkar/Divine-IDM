@@ -206,6 +206,7 @@ function renderSettings(settings) {
   }
   $("integration").checked = settings.browser_integration;
   $("min-size").value = String(settings.min_takeover_bytes);
+  $("max-concurrent").value = String(settings.max_concurrent_downloads);
   $("post-action").value = settings.post_action;
   $("countdown").value = String(settings.post_action_countdown_secs);
 }
@@ -321,6 +322,7 @@ async function saveSettings() {
   const settings = {
     browser_integration: $("integration").checked,
     min_takeover_bytes: Number($("min-size").value),
+    max_concurrent_downloads: Number($("max-concurrent").value),
     post_action: $("post-action").value,
     post_action_countdown_secs: Number($("countdown").value),
   };
@@ -402,7 +404,7 @@ for (const tab of document.querySelectorAll(".tab")) {
   });
 }
 
-for (const id of ["integration", "min-size", "post-action", "countdown"]) {
+for (const id of ["integration", "min-size", "max-concurrent", "post-action", "countdown"]) {
   $(id).addEventListener("change", saveSettings);
 }
 

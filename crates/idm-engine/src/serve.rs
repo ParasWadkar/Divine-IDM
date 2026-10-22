@@ -30,6 +30,12 @@ use tokio::sync::Mutex;
 struct JobRecord {
     status: JobStatus,
     abort: Option<tokio::task::AbortHandle>,
+    /// Set while the job waits for a slot, taken when it starts.
+    ///
+    /// Held in memory rather than rebuilt from the stored row because it
+    /// carries the cookies the browser handed over, which are deliberately
+    /// never written to the database and so could not be recovered from it.
+    pending: Option<Box<DownloadConfig>>,
 }
 
 /// Shared engine state.
@@ -214,42 +220,36 @@ impl Engine {
             error: None,
         };
 
-        let inner = Arc::clone(&self.inner);
-        let task = tokio::spawn(async move {
-            set_state(&inner, id, JobState::Running).await;
-
-            let progress_inner = Arc::clone(&inner);
-            let outcome = download_with_progress(&config, move |progress: Progress| {
-                record_progress(&progress_inner, id, &progress);
-            })
-            .await;
-
-            match outcome {
-                Ok(report) => {
-                    finish(&inner, id, JobState::Completed, Some(report.total), None).await;
-                }
-                Err(error) => {
-                    // The partial file and journal are deliberately left in
-                    // place, so a retry resumes rather than restarts.
-                    finish(&inner, id, JobState::Failed, None, Some(error.to_string())).await;
-                }
-            }
-            forget_row(&inner, id).await;
-
-            // Every finishing job asks whether the queue has now drained.
-            // Doing it here rather than on a timer means the action fires as
-            // soon as the last download lands.
-            if let Some((armed, all_succeeded)) = maybe_arm(&inner).await {
-                tokio::spawn(run_post_action(armed, all_succeeded));
-            }
-        });
-
         self.inner
             .jobs
             .lock()
             .await
-            .insert(id, JobRecord { status, abort: Some(task.abort_handle()) });
+            .insert(id, JobRecord { status, abort: None, pending: Some(Box::new(config)) });
+        pump(Arc::clone(&self.inner)).await;
         Response::Accepted { id }
+    }
+
+    /// How many jobs have been handed a slot and not yet finished.
+    ///
+    /// The number the limit actually governs. Counting running jobs instead
+    /// would miss one that has been started but whose task has not run yet.
+    #[cfg(test)]
+    async fn outstanding(&self) -> usize {
+        self.inner
+            .jobs
+            .lock()
+            .await
+            .values()
+            .filter(|job| {
+                job.pending.is_none()
+                    && matches!(job.status.state, JobState::Queued | JobState::Running)
+            })
+            .count()
+    }
+
+    #[cfg(test)]
+    async fn waiting(&self) -> usize {
+        self.inner.jobs.lock().await.values().filter(|job| job.pending.is_some()).count()
     }
 
     async fn status(&self, id: Option<JobId>) -> Response {
@@ -290,6 +290,123 @@ fn record_progress(inner: &Inner, id: JobId, progress: &Progress) {
             record.status.bytes_per_sec = progress.rate_bps;
             record.status.connections = progress.connections;
         }
+    }
+}
+
+/// Starts waiting downloads while there is room for them.
+///
+/// Called when a job is queued and again when one finishes, rather than on a
+/// timer. A slot opening is an event this code already knows about, so
+/// polling for it would only add latency to every handover.
+///
+/// The limit is about the origin and the link, not the disk. Each running
+/// download opens its own fan of connections, so ten at once is not ten times
+/// faster -- it is the same bandwidth split ten ways, with ten times the
+/// chance of tripping a rate limit. How many connections one download
+/// deserves is already measured; this decides how many downloads get to make
+/// that decision at the same time.
+fn pump(inner: Arc<Inner>) -> BoxFuture {
+    Box::pin(async move {
+        pump_inner(inner).await;
+    })
+}
+
+/// A future whose `Send` is stated rather than inferred.
+///
+/// `pump` starts downloads and each download calls `pump` again as it
+/// finishes. That mutual recursion leaves the compiler unable to settle
+/// either future's auto traits -- each depends on the other -- and would
+/// give the task's future its own type as a field. One boxed trait object
+/// in the cycle resolves both.
+type BoxFuture = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
+
+async fn pump_inner(inner: Arc<Inner>) {
+    let limit = inner.settings.lock().await.max_concurrent_downloads.max(1);
+
+    loop {
+        let next = {
+            let mut jobs = inner.jobs.lock().await;
+            // Counted by whether the job has been handed out, not by
+            // whether its task has got as far as marking itself running.
+            // `start` only spawns; the state changes a moment later, so a
+            // burst of enqueues would each see nothing running and start
+            // everything at once.
+            let outstanding = jobs
+                .values()
+                .filter(|job| {
+                    job.pending.is_none()
+                        && matches!(job.status.state, JobState::Queued | JobState::Running)
+                })
+                .count() as u32;
+            if outstanding >= limit {
+                return;
+            }
+
+            // Oldest first: ids are handed out in order, so that is the
+            // order they were asked for in.
+            let mut waiting: Vec<JobId> = jobs
+                .iter()
+                .filter(|(_, job)| job.pending.is_some() && job.status.state == JobState::Queued)
+                .map(|(id, _)| *id)
+                .collect();
+            waiting.sort_by_key(|id| id.0);
+
+            match waiting.first().copied() {
+                // Taken under the same lock that chose it, so two pumps
+                // running at once cannot both start the same job.
+                Some(id) => {
+                    jobs.get_mut(&id).and_then(|job| job.pending.take()).map(|config| (id, config))
+                }
+                None => None,
+            }
+        };
+
+        let Some((id, config)) = next else {
+            return;
+        };
+        start(&inner, id, *config).await;
+    }
+}
+
+/// Spawns the download task for a job that has just been given a slot.
+async fn start(inner: &Arc<Inner>, id: JobId, config: DownloadConfig) {
+    let task = {
+        let inner = Arc::clone(inner);
+        tokio::spawn(async move {
+            set_state(&inner, id, JobState::Running).await;
+
+            let progress_inner = Arc::clone(&inner);
+            let outcome = download_with_progress(&config, move |progress: Progress| {
+                record_progress(&progress_inner, id, &progress);
+            })
+            .await;
+
+            match outcome {
+                Ok(report) => {
+                    finish(&inner, id, JobState::Completed, Some(report.total), None).await;
+                }
+                Err(error) => {
+                    // The partial file and journal are deliberately left in
+                    // place, so a retry resumes rather than restarts.
+                    finish(&inner, id, JobState::Failed, None, Some(error.to_string())).await;
+                }
+            }
+            forget_row(&inner, id).await;
+
+            // A slot has just opened, so whatever is next can begin.
+            pump(Arc::clone(&inner)).await;
+
+            // Every finishing job asks whether the queue has now drained.
+            // Doing it here rather than on a timer means the action fires as
+            // soon as the last download lands.
+            if let Some((armed, all_succeeded)) = maybe_arm(&inner).await {
+                tokio::spawn(run_post_action(armed, all_succeeded));
+            }
+        })
+    };
+
+    if let Some(record) = inner.jobs.lock().await.get_mut(&id) {
+        record.abort = Some(task.abort_handle());
     }
 }
 
@@ -614,6 +731,16 @@ mod tests {
         (dir, engine)
     }
 
+    /// Sets the concurrency limit through the same path the UI uses.
+    async fn set_limit(engine: &Arc<Engine>, limit: u32) {
+        let mut settings = match engine.handle(&desktop(), Request::GetSettings).await {
+            Response::Settings(settings) => settings,
+            other => panic!("expected settings, got {other:?}"),
+        };
+        settings.max_concurrent_downloads = limit;
+        engine.handle(&desktop(), Request::SetSettings(settings)).await;
+    }
+
     fn browser() -> ClientInfo {
         ClientInfo { name: idm_ipc::BROWSER_CLIENT.to_owned(), client_id: Some("ext-1".to_owned()) }
     }
@@ -879,5 +1006,74 @@ mod tests {
     async fn cancelling_an_unknown_job_is_refused_not_panicked() {
         let (_dir, engine) = engine();
         assert!(matches!(engine.cancel(JobId(42)).await, Response::Rejected { .. }));
+    }
+
+    #[tokio::test]
+    async fn no_more_than_the_limit_start_at_once() {
+        // The guard is against a burst: `start` only spawns, and the job's
+        // state changes a moment later, so a pump that counted running jobs
+        // would see nothing running on each of five rapid enqueues and start
+        // all five.
+        let (_dir, engine) = engine();
+        set_limit(&engine, 2).await;
+
+        for _ in 0..5 {
+            engine.enqueue(&desktop(), request("http://127.0.0.1:9/big.bin")).await;
+        }
+
+        assert_eq!(engine.outstanding().await, 2, "only two may hold a slot");
+        assert_eq!(engine.waiting().await, 3, "the rest wait their turn");
+    }
+
+    #[tokio::test]
+    async fn a_waiting_download_starts_when_a_slot_frees() {
+        let (_dir, engine) = engine();
+        set_limit(&engine, 1).await;
+
+        for _ in 0..3 {
+            engine.enqueue(&desktop(), request("http://127.0.0.1:9/big.bin")).await;
+        }
+        assert_eq!(engine.outstanding().await, 1);
+        assert_eq!(engine.waiting().await, 2);
+
+        // The first one fails -- nothing is listening on port 9 -- which is
+        // a finish like any other and must free its slot.
+        let started = std::time::Instant::now();
+        while engine.waiting().await > 0 && started.elapsed() < std::time::Duration::from_secs(20) {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+
+        assert_eq!(engine.waiting().await, 0, "every job should have had its turn");
+    }
+
+    #[tokio::test]
+    async fn a_limit_of_zero_still_runs_one() {
+        // A queue that runs nothing is a stall with no way out of it from
+        // the UI, so the floor is one rather than an honoured zero.
+        let (_dir, engine) = engine();
+        set_limit(&engine, 0).await;
+
+        engine.enqueue(&desktop(), request("http://127.0.0.1:9/big.bin")).await;
+        assert_eq!(engine.outstanding().await, 1);
+    }
+
+    #[tokio::test]
+    async fn queued_downloads_are_visible_while_they_wait() {
+        // A download that is going to happen later should say so, rather
+        // than vanish until its turn comes.
+        let (_dir, engine) = engine();
+        set_limit(&engine, 1).await;
+        for _ in 0..3 {
+            engine.enqueue(&desktop(), request("http://127.0.0.1:9/big.bin")).await;
+        }
+
+        let Response::Status { jobs } = engine.status(None).await else {
+            panic!("expected a status listing");
+        };
+        assert_eq!(jobs.len(), 3, "all three should be listed");
+        assert!(
+            jobs.iter().any(|job| job.state == JobState::Queued),
+            "the waiting ones should read as queued"
+        );
     }
 }

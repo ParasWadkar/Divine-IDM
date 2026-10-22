@@ -4,10 +4,29 @@
   "version": "0.1.0",
   "description": "Hands large downloads to Divine IDM for parallel, resumable downloading.",
   "browser_specific_settings": {
-    "gecko": { "id": "idm@divine.local", "strict_min_version": "115.0" }
+    "gecko": {
+      "id": "idm@divine.local",
+      "strict_min_version": "115.0"
+    }
   },
-  "background": { "scripts": ["background.js"] },
-  "action": { "default_popup": "popup.html", "default_title": "Divine IDM" },
-  "permissions": ["downloads", "nativeMessaging", "storage", "contextMenus"],
-  "optional_permissions": ["cookies", "<all_urls>"]
+  "background": {
+    "scripts": [
+      "background.js"
+    ]
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Divine IDM"
+  },
+  "permissions": [
+    "downloads",
+    "nativeMessaging",
+    "storage",
+    "contextMenus",
+    "alarms"
+  ],
+  "optional_permissions": [
+    "cookies",
+    "<all_urls>"
+  ]
 }

@@ -124,6 +124,14 @@ fn main() {
     // Tauri runs its own tokio runtime, so there is no second one here. The
     // engine's download tasks and the IPC server both live on it.
     tauri::Builder::default()
+        // Registered first, as the plugin requires: a second launch hands
+        // its arguments to the copy already running and exits, rather than
+        // starting a second engine that opens the same database and loses a
+        // race for the same named pipe. Double-clicking the icon while the
+        // app sits in the tray is the ordinary way to hit this.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            reveal_window(app);
+        }))
         .manage(AppState::new())
         .invoke_handler(tauri::generate_handler![
             snapshot,

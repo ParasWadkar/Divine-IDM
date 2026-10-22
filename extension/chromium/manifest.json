@@ -4,9 +4,24 @@
   "version": "0.1.0",
   "description": "Hands large downloads to Divine IDM for parallel, resumable downloading.",
   "minimum_chrome_version": "102",
-  "background": { "service_worker": "background.js" },
-  "action": { "default_popup": "popup.html", "default_title": "Divine IDM" },
-  "permissions": ["downloads", "nativeMessaging", "storage", "contextMenus"],
-  "optional_permissions": ["cookies"],
-  "optional_host_permissions": ["<all_urls>"]
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Divine IDM"
+  },
+  "permissions": [
+    "downloads",
+    "nativeMessaging",
+    "storage",
+    "contextMenus",
+    "alarms"
+  ],
+  "optional_permissions": [
+    "cookies"
+  ],
+  "optional_host_permissions": [
+    "<all_urls>"
+  ]
 }

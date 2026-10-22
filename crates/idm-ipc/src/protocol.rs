@@ -155,6 +155,15 @@ pub struct Settings {
     pub post_action_countdown_secs: u64,
     /// Downloads smaller than this are left to the browser.
     pub min_takeover_bytes: u64,
+    /// How many downloads may run at once. The rest wait their turn.
+    ///
+    /// This is about the origin and the link, not the disk: every running
+    /// download opens its own fan of connections, so ten at once is not ten
+    /// times faster, it is the same bandwidth cut ten ways with ten times
+    /// the chance of tripping a rate limit. The scheduler already decides
+    /// how many *connections* a single download deserves; this decides how
+    /// many downloads get to make that decision simultaneously.
+    pub max_concurrent_downloads: u32,
 }
 
 impl Default for Settings {
@@ -165,6 +174,10 @@ impl Default for Settings {
             post_action: PostActionSetting::Nothing,
             post_action_countdown_secs: 60,
             min_takeover_bytes: 2 << 20,
+            // Enough that a handful of files from a browser all start, few
+            // enough that dropping a hundred-link batch in does not open a
+            // hundred fans of connections at once.
+            max_concurrent_downloads: 4,
         }
     }
 }
