@@ -24,6 +24,22 @@
         .bad { background: #3b1111; color: #fecaca; }
       }
       label { display: flex; align-items: center; gap: 8px; margin: 9px 0; }
+      .switch-row { justify-content: space-between; cursor: pointer; }
+      .toggle { display: inline-flex; align-items: center; gap: 8px; user-select: none; }
+      .toggle input { position: absolute; opacity: 0; width: 0; height: 0; }
+      .toggle .track {
+        position: relative; width: 34px; height: 18px; border-radius: 999px;
+        background: color-mix(in srgb, CanvasText 28%, Canvas);
+        transition: background .15s;
+      }
+      .toggle .track::after {
+        content: ""; position: absolute; top: 2px; left: 2px; width: 14px; height: 14px;
+        border-radius: 50%; background: Canvas; transition: transform .15s;
+      }
+      .toggle input:checked + .track { background: #2f9e5b; }
+      .toggle input:checked + .track::after { transform: translateX(16px); }
+      .toggle input:focus-visible + .track { outline: 2px solid Highlight; outline-offset: 2px; }
+      .toggle .state { min-width: 24px; font-size: 12px; font-weight: 600; }
       input[type="number"] { width: 72px; }
       button { margin-top: 10px; width: 100%; padding: 6px; }
       .hint { opacity: .75; font-size: 11px; margin-top: 4px; }
@@ -33,7 +49,16 @@
     <h1>Divine IDM</h1>
     <div id="status" class="status warn">Checking…</div>
 
-    <label><input type="checkbox" id="enabled" /> Take over downloads</label>
+    <!-- A switch with the word beside it, not a bare checkbox: "On" and "Off"
+         say which way is which without anyone having to guess. -->
+    <label class="switch-row" for="enabled">
+      <span>Take over downloads</span>
+      <span class="toggle">
+        <input type="checkbox" id="enabled" role="switch" />
+        <span class="track"></span>
+        <span class="state" id="enabled-state">On</span>
+      </span>
+    </label>
     <label>
       Only above
       <input type="number" id="minSize" min="0" step="1" /> MB

@@ -21,6 +21,13 @@ pub struct AppState {
     /// change settings; the browser kill switch does not apply to it, which
     /// is the whole point of a switch the app can still reach.
     client: ClientInfo,
+    /// Files the shell opened with this app, waiting for the window to ask.
+    ///
+    /// Kept rather than only announced, because a double-click can launch the
+    /// app from cold: the file is known before there is a window to tell, and
+    /// an event sent into nothing is lost. The window collects these when it
+    /// loads, and again whenever it is told there are more.
+    opened: std::sync::Mutex<Vec<String>>,
 }
 
 impl AppState {
@@ -30,7 +37,23 @@ impl AppState {
             engine: idm_engine::Engine::new(output_dir, 16),
             store: idm_engine::open_store(),
             client: ClientInfo { name: "desktop".to_owned(), client_id: None },
+            opened: std::sync::Mutex::new(Vec::new()),
         }
+    }
+
+    /// Records files the shell opened with this app.
+    pub fn note_opened(&self, files: Vec<String>) {
+        if let Ok(mut opened) = self.opened.lock() {
+            opened.extend(files);
+        }
+    }
+
+    /// Hands over, and forgets, everything recorded since the last call.
+    ///
+    /// Forgets so the same notice is not raised twice: it is a statement
+    /// about something that just happened, not a standing fact.
+    pub fn take_opened(&self) -> Vec<String> {
+        self.opened.lock().map(|mut opened| std::mem::take(&mut *opened)).unwrap_or_default()
     }
 
     pub async fn request(&self, request: Request) -> Response {

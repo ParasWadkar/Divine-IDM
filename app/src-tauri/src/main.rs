@@ -23,6 +23,7 @@ use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent}
 use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
 
 mod autostart;
+mod opened;
 mod state;
 use state::AppState;
 
@@ -93,8 +94,39 @@ async fn deny_pairing(state: State<'_, AppState>, request_id: String) -> Result<
 }
 
 #[tauri::command]
-async fn revoke_pairing(state: State<'_, AppState>, client_id: String) -> Result<(), String> {
-    state.simple(Request::RevokePairing { client_id }).await
+async fn set_browser_enabled(
+    state: State<'_, AppState>,
+    client_ids: Vec<String>,
+    enabled: bool,
+) -> Result<(), String> {
+    // Every profile of the browser, since the window shows one line per
+    // browser. Stops at the first refusal rather than leaving half of them
+    // switched.
+    for client_id in client_ids {
+        state.simple(Request::SetBrowserEnabled { client_id, enabled }).await?;
+    }
+    Ok(())
+}
+
+/// The browser list: which browsers are here, and what each is doing.
+///
+/// Built from what is installed, what is paired and what the user has hidden,
+/// by a function in the engine crate that has its own tests. This only gathers
+/// the three inputs; keeping the logic out of here is what keeps it testable.
+#[tauri::command]
+async fn browsers(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
+    let paired = match state.request(Request::ListPairings).await {
+        Response::Pairings { paired, .. } => paired,
+        Response::Error { message } => return Err(message),
+        _ => Vec::new(),
+    };
+    let hidden = match state.request(Request::GetSettings).await {
+        Response::Settings(settings) => settings.hidden_browsers,
+        _ => Vec::new(),
+    };
+    let installed = idm_engine::browsers::installed();
+    let rows = idm_engine::browsers::rows(&installed, &paired, &hidden);
+    serde_json::to_value(rows).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -134,7 +166,12 @@ async fn choose_folder(app: AppHandle, start: Option<String>) -> Option<String> 
     dialog.pick_folder(move |picked| {
         let _ = sender.send(picked);
     });
-    receiver.await.ok().flatten().and_then(|path| path.into_path().ok()).map(|path| path.display().to_string())
+    receiver
+        .await
+        .ok()
+        .flatten()
+        .and_then(|path| path.into_path().ok())
+        .map(|path| path.display().to_string())
 }
 
 #[tauri::command]
@@ -175,33 +212,98 @@ fn reveal(path: String) -> Result<(), String> {
 /// only way it does not become "ask the person who gave you this" is for the
 /// app to say where the folder is and open it.
 ///
-/// Returns nothing when the folder is not there, which is the normal case in
-/// a development build -- the resource is copied in by the bundler, so it
-/// only exists in an installed copy. The window hides the section rather than
-/// showing a path that goes nowhere.
+/// Returns nothing when the folder cannot be found, and the window then says
+/// so rather than showing a path that goes nowhere. See [`extension_dir`] for
+/// where it looks; none of it is a fixed location.
 #[tauri::command]
 fn browser_setup(app: AppHandle) -> Option<serde_json::Value> {
-    // The install directory, then beside the executable. Both are the same
-    // place in an installed copy; keeping the second means a portable
-    // unpacked build still finds it.
-    let roots = [
-        app.path().resource_dir().ok(),
-        std::env::current_exe().ok().and_then(|exe| exe.parent().map(|dir| dir.to_path_buf())),
-    ];
-
-    let chromium = roots
-        .iter()
-        .flatten()
-        .map(|root| root.join("extension").join("chromium"))
-        .find(|dir| dir.join("manifest.json").is_file())?;
+    let chromium = extension_dir(&app)?;
     // Firefox wants the manifest itself, not the folder, in its "load
     // temporary add-on" dialog.
     let firefox = chromium.with_file_name("firefox").join("manifest.json");
 
     Some(serde_json::json!({
-        "chromiumDir": chromium.display().to_string(),
-        "firefoxManifest": firefox.is_file().then(|| firefox.display().to_string()),
+        "chromiumDir": display_path(&chromium),
+        "firefoxManifest": firefox.is_file().then(|| display_path(&firefox)),
     }))
+}
+
+/// Where the bundled Chromium extension is, found from where the app runs.
+///
+/// Nothing here is a fixed path. An installed copy keeps it under its own
+/// install directory, which is wherever the user's installer put it, so it is
+/// found relative to the executable and to the resource directory. A copy run
+/// straight out of a source checkout has it under `extension/dist` at the
+/// repository root, which is found by walking up from `target\release` --
+/// and only from there: climbing the directory tree looking for any folder
+/// named `extension` would let a folder placed in a parent directory pose as
+/// the bundled one, and this path is what the user is told to load into their
+/// browser.
+fn extension_dir(app: &AppHandle) -> Option<std::path::PathBuf> {
+    let exe_dir =
+        std::env::current_exe().ok().and_then(|exe| exe.parent().map(|d| d.to_path_buf()));
+
+    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+
+    // Source checkout: <repo>\target\<profile>\divine-idm.exe. Checked
+    // first because that is where the extension is *built*. Building an
+    // installer also copies the extension into `target\<profile>\extension`,
+    // and that copy goes stale the moment the source changes -- so the window
+    // would point at an old extension while a new one sat next to it.
+    if let Some(dir) = &exe_dir {
+        let in_target = dir
+            .parent()
+            .is_some_and(|target| target.file_name().is_some_and(|name| name == "target"));
+        if in_target && let Some(repo) = dir.parent().and_then(|target| target.parent()) {
+            candidates.push(repo.join("extension").join("dist").join("chromium"));
+        }
+    }
+    // Installed: the install directory, then beside the executable. The same
+    // place in an installed copy; the second keeps a portable unpacked build
+    // working.
+    if let Ok(resources) = app.path().resource_dir() {
+        candidates.push(resources.join("extension").join("chromium"));
+    }
+    if let Some(dir) = &exe_dir {
+        candidates.push(dir.join("extension").join("chromium"));
+    }
+
+    candidates.into_iter().find(|dir| dir.join("manifest.json").is_file())
+}
+
+/// A path as a person would type it.
+///
+/// Tauri reports resource paths with Windows' verbatim prefix, `\\?\D:\...`.
+/// It is a valid path and an unfriendly thing to show someone who is about to
+/// paste it into a browser's folder dialog, so it is dropped here. A network
+/// share keeps its `\\?\UNC\` form converted to the ordinary `\\server\share`.
+fn display_path(path: &std::path::Path) -> String {
+    let text = path.display().to_string();
+    if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+        return format!(r"\\{rest}");
+    }
+    text.strip_prefix(r"\\?\").map(str::to_owned).unwrap_or(text)
+}
+
+/// Files the shell opened with this app since the window last asked.
+///
+/// Collected by the window when it loads and whenever it is told there are
+/// more, because a launch from a double-click can happen before the window
+/// exists to be told.
+#[tauri::command]
+fn opened_files(state: State<'_, AppState>) -> Vec<String> {
+    state.take_opened()
+}
+
+/// Remembers files the shell opened with this app, and tells the window.
+fn handle_opened_files(app: &AppHandle, files: Vec<String>) {
+    if files.is_empty() {
+        return;
+    }
+    app.state::<AppState>().note_opened(files);
+    // No payload: the window asks for the list, which also covers the case of
+    // it not being ready to hear this yet.
+    let _ = app.emit("opened-file", ());
 }
 
 #[tauri::command]
@@ -221,7 +323,10 @@ fn main() {
         // race for the same named pipe. Double-clicking the icon while the
         // app sits in the tray is the ordinary way to hit this.
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            // A second launch is how a double-clicked file reaches an app that
+            // is already running in the tray.
+            handle_opened_files(app, opened::torrent_files(&args));
             reveal_window(app);
         }))
         .manage(AppState::new())
@@ -234,7 +339,8 @@ fn main() {
             refresh_link,
             approve_pairing,
             deny_pairing,
-            revoke_pairing,
+            set_browser_enabled,
+            browsers,
             save_settings,
             cancel_post_action,
             history,
@@ -242,6 +348,7 @@ fn main() {
             reveal,
             choose_folder,
             browser_setup,
+            opened_files,
             quit,
         ])
         .setup(|app| {
@@ -255,6 +362,15 @@ fn main() {
                 && let Some(window) = app.get_webview_window("main")
             {
                 let _ = window.hide();
+            }
+
+            // A cold start from a double-click: the file is in this launch's
+            // own arguments. A file means the user wants to see something
+            // happen, so the window is not left hidden in the tray for it.
+            let files = opened::torrent_files(std::env::args());
+            if !files.is_empty() {
+                handle_opened_files(app.handle(), files);
+                reveal_window(app.handle());
             }
 
             restore_downloads(app.handle().clone());
@@ -373,5 +489,32 @@ fn reveal_window(app: &AppHandle) {
         // `show` alone, so the click would look like it did nothing.
         let _ = window.unminimize();
         let _ = window.set_focus();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::display_path;
+    use std::path::Path;
+
+    #[test]
+    fn the_verbatim_prefix_is_dropped() {
+        assert_eq!(
+            display_path(Path::new(r"\\?\D:\Apps\Divine IDM\extension")),
+            r"D:\Apps\Divine IDM\extension"
+        );
+    }
+
+    #[test]
+    fn a_network_share_keeps_its_shape() {
+        assert_eq!(display_path(Path::new(r"\\?\UNC\server\share\ext")), r"\\server\share\ext");
+    }
+
+    #[test]
+    fn an_ordinary_path_is_left_alone() {
+        assert_eq!(
+            display_path(Path::new(r"C:\Program Files\Divine IDM")),
+            r"C:\Program Files\Divine IDM"
+        );
     }
 }

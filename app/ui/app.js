@@ -21,6 +21,15 @@ let latest = { jobs: [], settings: null, paired: [], pending: [] };
 // setting was changed.
 let downloadDir = "";
 
+// Browsers taken off the list. Same reason as the folder above: the engine
+// treats any field missing from a save as its default, so leaving this out of
+// one would un-hide everything whenever any other setting was changed.
+let hiddenBrowsers = [];
+
+// What the browser list was last built from, so it is rebuilt only when that
+// changes.
+let browserSignature = "";
+
 /** Rolling throughput samples for the graph. */
 const SAMPLES = 120;
 const history = [];
@@ -42,10 +51,25 @@ function bytes(value) {
 const rate = (value) => `${bytes(value)}/s`;
 
 function duration(seconds) {
-  if (!Number.isFinite(seconds) || seconds <= 0) return "—";
-  if (seconds < 60) return `${Math.ceil(seconds)}s`;
-  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ${Math.round(seconds % 60)}s`;
-  return `${Math.floor(seconds / 3600)}h ${Math.round((seconds % 3600) / 60)}m`;
+  if (!Number.isFinite(seconds) || seconds <= 0) return "\u2014";
+  const whole = Math.ceil(seconds);
+  if (whole < 60) return `${whole}s`;
+
+  // Each unit is worked out from a total rounded once, at that unit's own
+  // precision. Rounding the remainder instead is how "1h 60m" gets written:
+  // 3599.6 seconds has 59 whole minutes and a remainder that rounds up to 60.
+  const total = whole;
+  if (total < 3600) return `${Math.floor(total / 60)}m ${total % 60}s`;
+
+  const minutes = Math.round(total / 60);
+  if (minutes < 24 * 60) return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
+
+  // Past a day, hours are the useful precision: "2d 3h" says how long this is
+  // going to take, and minutes on top would be noise at that scale. This is
+  // for a long download on a slow link, where "51h 20m" makes the reader do
+  // the arithmetic to find out it is more than two days.
+  const hours = Math.round(total / 3600);
+  return `${Math.floor(hours / 24)}d ${hours % 24}h`;
 }
 
 function when(ms) {
@@ -71,12 +95,62 @@ function toast(message, bad = false) {
 // Rendering
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Icons
+// ---------------------------------------------------------------------------
+
+const SVG_NS = "http://www.w3.org/2000/svg";
+
+// Drawn rather than typed. An eye, a pause bar or a play triangle written as a
+// Unicode character is left to whatever font the WebView falls back to, and the
+// eye came out as a small white blob. These are the same everywhere, take the
+// button's text colour, and are built with DOM calls instead of markup so
+// nothing here is ever parsed as HTML.
+const ICONS = {
+  eye: [
+    ["path", { d: "M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12z" }],
+    ["circle", { cx: "12", cy: "12", r: "3" }],
+  ],
+  pause: [
+    ["rect", { x: "6", y: "5", width: "4", height: "14", rx: "1", fill: "currentColor" }],
+    ["rect", { x: "14", y: "5", width: "4", height: "14", rx: "1", fill: "currentColor" }],
+  ],
+  play: [["path", { d: "M8 5v14l11-7z", fill: "currentColor" }]],
+};
+
+function icon(name) {
+  const svg = document.createElementNS(SVG_NS, "svg");
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("width", "16");
+  svg.setAttribute("height", "16");
+  svg.setAttribute("fill", "none");
+  svg.setAttribute("stroke", "currentColor");
+  svg.setAttribute("stroke-width", "2");
+  svg.setAttribute("stroke-linecap", "round");
+  svg.setAttribute("stroke-linejoin", "round");
+  svg.setAttribute("aria-hidden", "true");
+  for (const [tag, attributes] of ICONS[name]) {
+    const part = document.createElementNS(SVG_NS, tag);
+    for (const [key, value] of Object.entries(attributes)) part.setAttribute(key, value);
+    svg.append(part);
+  }
+  return svg;
+}
+
 function render(snapshot) {
   latest = snapshot;
   renderPairing(snapshot.pending ?? []);
   renderJobs(snapshot.jobs ?? []);
   renderSettings(snapshot.settings);
-  renderPaired(snapshot.paired ?? []);
+  // Only when something that changes the list has changed. The snapshot
+  // arrives twice a second, and the list is built from the registry as well
+  // as from this, so rebuilding it on every tick would be needless work and
+  // would close a Manage panel the user was in the middle of reading.
+  const signature = JSON.stringify([snapshot.paired, snapshot.settings?.hidden_browsers]);
+  if (signature !== browserSignature) {
+    browserSignature = signature;
+    refreshBrowsers();
+  }
 
   const running = (snapshot.jobs ?? []).filter((job) => job.state === "running");
   const total = running.reduce((sum, job) => sum + (job.bytes_per_sec ?? 0), 0);
@@ -168,7 +242,7 @@ function renderJobs(jobs) {
       toggle.className = "icon";
       // Symbols rather than words: they sit inline with the status and mean
       // the same thing in any language.
-      toggle.textContent = going ? "⏸" : "▶";
+      toggle.append(icon(going ? "pause" : "play"));
       toggle.title = going ? "Pause" : "Resume";
       toggle.setAttribute("aria-label", toggle.title);
       toggle.onclick = () => act(going ? "pause_job" : "resume_job", { id: job.id });
@@ -253,6 +327,7 @@ function renderSettings(settings) {
   // Always, even mid-interaction: this is the value the next save will
   // carry, and a stale one would revert the folder.
   downloadDir = settings?.download_dir ?? downloadDir;
+  hiddenBrowsers = settings?.hidden_browsers ?? hiddenBrowsers;
   if (!settings || document.activeElement?.closest("#panel-settings")) {
     // Not while the user is in the middle of changing something: a tick
     // landing mid-interaction would reset the control under their cursor.
@@ -270,28 +345,6 @@ function renderSettings(settings) {
   showFolder();
 }
 
-function renderPaired(paired) {
-  const box = $("paired");
-  if (!paired.length) {
-    box.replaceChildren(empty("No browser extensions paired yet."));
-    return;
-  }
-  box.replaceChildren(
-    ...paired.map((client) => {
-      const row = document.createElement("div");
-      row.className = "hrow";
-      const name = document.createElement("div");
-      name.className = "name";
-      name.textContent = client.label;
-      const revoke = document.createElement("button");
-      revoke.className = "ghost";
-      revoke.textContent = "Revoke";
-      revoke.onclick = () => act("revoke_pairing", { clientId: client.client_id });
-      row.append(name, revoke);
-      return row;
-    }),
-  );
-}
 
 function empty(message) {
   const element = document.createElement("div");
@@ -380,6 +433,7 @@ async function refresh() {
 async function saveSettings(overrides = {}) {
   const settings = {
     download_dir: downloadDir,
+    hidden_browsers: hiddenBrowsers,
     browser_integration: $("integration").checked,
     min_takeover_bytes: Number($("min-size").value),
     max_concurrent_downloads: Number($("max-concurrent").value),
@@ -396,6 +450,7 @@ async function saveSettings(overrides = {}) {
     // Only once the engine has accepted it. A folder it refused must not
     // be shown as the current one.
     downloadDir = settings.download_dir;
+    hiddenBrowsers = settings.hidden_browsers;
     showFolder();
     toast("Settings saved");
   } catch (error) {
@@ -426,8 +481,10 @@ async function showHistory() {
         meta.textContent = `${bytes(job.downloaded)} · ${when(job.finished_at_ms)}`;
 
         const open = document.createElement("button");
-        open.className = "ghost";
-        open.textContent = "Show";
+        open.className = "icon";
+        open.append(icon("eye"));
+        open.title = "Show in folder";
+        open.setAttribute("aria-label", "Show in folder");
         open.onclick = () =>
           invoke("reveal", { path: `${job.output_dir}\\${job.filename}` }).catch((error) =>
             toast(String(error), true),
@@ -470,6 +527,8 @@ for (const tab of document.querySelectorAll(".tab")) {
       $(`panel-${name}`).hidden = name !== tab.dataset.tab;
     }
     if (tab.dataset.tab === "history") showHistory();
+    // A browser may have been installed or paired since this was last looked at.
+    if (tab.dataset.tab === "settings") refreshBrowsers();
   });
 }
 
@@ -509,15 +568,297 @@ $("clear-history").addEventListener("click", async () => {
 listen("snapshot", (event) => render(event.payload));
 window.addEventListener("resize", drawGraph);
 
-// Asked once: the folder is part of the installation and cannot move while
-// the app is running.
+// ---------------------------------------------------------------------------
+// Browser integration
+// ---------------------------------------------------------------------------
+
+// Where the bundled extension lives, or null when it cannot be found. Resolved
+// by the app from where it is running, never a fixed path.
+let extensionSetup = null;
+let browserRows = [];
+// Rows whose Manage panel is open, by key, so a rebuild does not close them.
+const openPanels = new Set();
+
+async function refreshBrowsers() {
+  try {
+    browserRows = await invoke("browsers");
+  } catch (error) {
+    browserRows = [];
+    toast(String(error), true);
+  }
+  renderBrowsers();
+}
+
+const STATUS = {
+  connected: "Connected",
+  off: "Off",
+  not_connected: "Not connected",
+};
+
+/** An On/Off switch. The word is part of the control, not a separate label. */
+function toggleSwitch(checked, label, onChange) {
+  const wrap = document.createElement("label");
+  wrap.className = "toggle";
+  wrap.title = label;
+
+  const input = document.createElement("input");
+  input.type = "checkbox";
+  input.setAttribute("role", "switch");
+  input.setAttribute("aria-label", label);
+  input.checked = checked;
+
+  const track = document.createElement("span");
+  track.className = "track";
+  const state = document.createElement("span");
+  state.className = "state";
+  state.textContent = checked ? "On" : "Off";
+
+  input.addEventListener("change", () => {
+    // The word follows the switch at once; the engine's answer arrives with
+    // the next snapshot and corrects it if the change was refused.
+    state.textContent = input.checked ? "On" : "Off";
+    onChange(input.checked);
+  });
+
+  wrap.append(input, track, state);
+  return wrap;
+}
+
+function folderFor(row) {
+  if (!extensionSetup) return null;
+  return row.family === "gecko" ? extensionSetup.firefoxManifest : extensionSetup.chromiumDir;
+}
+
+function browserRow(row) {
+  const wrap = document.createElement("div");
+  wrap.className = "browser";
+
+  const line = document.createElement("div");
+  line.className = "browser-row";
+
+  const dot = document.createElement("span");
+  dot.className = row.state === "connected" ? "dot good" : "dot";
+  dot.setAttribute("aria-hidden", "true");
+
+  const name = document.createElement("span");
+  name.className = "browser-name";
+  name.textContent = row.name;
+
+  const status = document.createElement("span");
+  status.className = `browser-status ${row.state}`;
+  status.textContent = STATUS[row.state] ?? row.state;
+
+  const spacer = document.createElement("span");
+  spacer.className = "spacer";
+
+  line.append(dot, name, status, spacer);
+
+  const paired = row.client_ids.length > 0;
+  if (paired) {
+    line.append(
+      toggleSwitch(row.state === "connected", `Take over downloads from ${row.name}`, (enabled) =>
+        act("set_browser_enabled", { clientIds: row.client_ids, enabled }),
+      ),
+    );
+
+    const manage = document.createElement("button");
+    manage.className = "ghost";
+    manage.textContent = "Manage";
+    manage.setAttribute("aria-expanded", String(openPanels.has(row.key)));
+    manage.onclick = () => {
+      if (openPanels.has(row.key)) openPanels.delete(row.key);
+      else openPanels.add(row.key);
+      renderBrowsers();
+    };
+    line.append(manage);
+  } else {
+    const install = document.createElement("button");
+    install.textContent = "Install";
+    install.onclick = () => showInstructions(true);
+    line.append(install);
+  }
+
+  // Taking it off the list. Always there, because a browser the user never
+  // means to connect is exactly the one with nothing else on its row to click.
+  const hide = document.createElement("button");
+  hide.className = "icon quiet";
+  hide.textContent = "\u2715";
+  hide.title = `Hide ${row.name} from this list`;
+  hide.setAttribute("aria-label", hide.title);
+  hide.onclick = () => {
+    saveSettings({ hidden_browsers: [...hiddenBrowsers, row.name] });
+  };
+  line.append(hide);
+
+  wrap.append(line);
+
+  if (paired && openPanels.has(row.key)) {
+    const panel = document.createElement("div");
+    panel.className = "browser-panel";
+
+    const note = document.createElement("p");
+    note.className = "note";
+    note.textContent =
+      row.state === "off"
+        ? `${row.name} is paired but switched off, so its downloads stay with the browser. Switch it on above and it carries on without being approved again.`
+        : `${row.name} is paired. Switch it off above and its downloads stay with the browser; it stays paired, so switching it back on needs no approval.`;
+    panel.append(note);
+
+    const folder = folderFor(row);
+    if (folder) {
+      const where = document.createElement("div");
+      where.className = "row";
+      const path = document.createElement("code");
+      path.className = "path";
+      path.textContent = folder;
+      const open = document.createElement("button");
+      open.className = "ghost";
+      open.textContent = "Open folder";
+      open.onclick = () => invoke("reveal", { path: folder }).catch((e) => toast(String(e), true));
+      where.append(path, open);
+      panel.append(where);
+    }
+    wrap.append(panel);
+  }
+  return wrap;
+}
+
+function renderBrowsers() {
+  const list = $("browser-list");
+  const visible = browserRows.filter((row) => !row.hidden);
+  list.replaceChildren(
+    ...(visible.length
+      ? visible.map(browserRow)
+      : [empty("No browsers to show. Use the instructions below to add one.")]),
+  );
+
+  // Hidden ones, each one click from coming back.
+  const hidden = browserRows.filter((row) => row.hidden);
+  const box = $("browser-hidden");
+  box.hidden = hidden.length === 0;
+  box.replaceChildren();
+  if (hidden.length) {
+    const label = document.createElement("span");
+    label.className = "browser-hidden-label";
+    label.textContent = "Hidden:";
+    box.append(label);
+    for (const row of hidden) {
+      const chip = document.createElement("button");
+      chip.className = "chip";
+      chip.textContent = `${row.name} \u21BA`;
+      chip.title = `Show ${row.name} in the list again`;
+      chip.onclick = () => {
+        saveSettings({
+          hidden_browsers: hiddenBrowsers.filter(
+            (name) => name.trim().toLowerCase() !== row.name.trim().toLowerCase(),
+          ),
+        });
+      };
+      box.append(chip);
+    }
+  }
+}
+
+function showInstructions(show) {
+  const panel = $("instructions");
+  const button = $("toggle-instructions");
+  panel.hidden = !show;
+  button.setAttribute("aria-expanded", String(show));
+  button.textContent = show ? "Hide Installation Instructions" : "Show Installation Instructions";
+  if (show) panel.scrollIntoView({ block: "nearest", behavior: "smooth" });
+}
+
+function renderInstructionPaths() {
+  const box = $("instruction-paths");
+  box.replaceChildren();
+  if (!extensionSetup) {
+    box.append(
+      empty("The extension files were not found next to the app, so there is no folder to show."),
+    );
+    return;
+  }
+  const entries = [
+    ["Chrome, Edge, Brave and other Chromium browsers", extensionSetup.chromiumDir],
+    ["Firefox", extensionSetup.firefoxManifest],
+  ];
+  for (const [label, path] of entries) {
+    if (!path) continue;
+    const caption = document.createElement("div");
+    caption.className = "path-caption";
+    caption.textContent = label;
+    const row = document.createElement("div");
+    row.className = "row";
+    const code = document.createElement("code");
+    code.className = "path";
+    code.textContent = path;
+    const open = document.createElement("button");
+    open.className = "ghost";
+    open.textContent = "Open folder";
+    open.onclick = () => invoke("reveal", { path }).catch((e) => toast(String(e), true));
+    row.append(code, open);
+    box.append(caption, row);
+  }
+}
+
+$("toggle-instructions").addEventListener("click", () =>
+  showInstructions($("instructions").hidden),
+);
+
+// Files the shell opened with this app -- a double-clicked .torrent.
+//
+// Collected rather than just announced: a double-click can start the app from
+// cold, so the file is known before there is a window to tell. The window asks
+// when it loads, and again whenever the app says there are more.
+async function collectOpenedFiles() {
+  let files = [];
+  try {
+    files = await invoke("opened_files");
+  } catch {
+    return;
+  }
+  if (!files.length) return;
+
+  const box = $("notices");
+  for (const path of files) {
+    const name = path.split(/[\\/]/).pop();
+
+    const note = document.createElement("div");
+    note.className = "notice";
+
+    const text = document.createElement("p");
+    // textContent: a file name is chosen by whoever made the file.
+    const strong = document.createElement("strong");
+    strong.textContent = name;
+    text.append(
+      strong,
+      " was opened with Divine IDM, but nothing was started. Divine IDM downloads over HTTP, " +
+        "FTP and SFTP; BitTorrent is not supported yet, so it cannot download this.",
+    );
+
+    const dismiss = document.createElement("button");
+    dismiss.className = "ghost";
+    dismiss.textContent = "Dismiss";
+    dismiss.onclick = () => {
+      note.remove();
+      box.hidden = box.childElementCount === 0;
+    };
+
+    note.append(text, dismiss);
+    box.append(note);
+  }
+  box.hidden = false;
+}
+
+listen("opened-file", () => collectOpenedFiles());
+collectOpenedFiles();
+
+// Asked once: the folder is part of the installation and cannot move while the
+// app is running.
 (async () => {
-  const setup = await invoke("browser_setup").catch(() => null);
-  if (!setup) return;
-  $("extension-path").textContent = setup.chromiumDir;
-  $("show-extension").onclick = () =>
-    invoke("reveal", { path: setup.chromiumDir }).catch((error) => toast(String(error), true));
-  $("extension-setup").hidden = false;
+  extensionSetup = await invoke("browser_setup").catch(() => null);
+  renderInstructionPaths();
+  // The rows offer an Open folder button only once this is known.
+  renderBrowsers();
 })();
 
 refresh();

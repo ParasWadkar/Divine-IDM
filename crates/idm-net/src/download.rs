@@ -227,9 +227,7 @@ impl DownloadError {
             // Connecting, timing out, or a body that stopped arriving: the
             // connection went away. `is_request` covers a send that never
             // got off the ground.
-            Self::Request(error) => {
-                error.is_connect() || error.is_timeout() || error.is_request()
-            }
+            Self::Request(error) => error.is_connect() || error.is_timeout() || error.is_request(),
             Self::Fetch(crate::fetch::FetchError::Request(error)) => {
                 error.is_connect() || error.is_timeout() || error.is_request()
             }

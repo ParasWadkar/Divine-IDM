@@ -17,7 +17,11 @@ import re
 import sys
 from collections import defaultdict
 
-ROOT = pathlib.Path(r"D:\_Divine\Projects\Active\IDM")
+# Found from where this file is, not from a fixed path: it lives in
+# <repo>/tests, so the repository is one level up. A literal path worked on
+# exactly one machine and failed, confusingly, anywhere the checkout sat
+# somewhere else.
+ROOT = pathlib.Path(__file__).resolve().parent.parent
 SOURCE_DIRS = [ROOT / "crates", ROOT / "app"]
 
 # Names too common or too conventional to say anything.

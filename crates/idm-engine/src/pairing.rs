@@ -41,6 +41,14 @@ pub const MAX_PENDING: usize = 5;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PairingOutcome {
     AlreadyPaired,
+    /// Approved, and currently switched off by the user.
+    ///
+    /// Not the same as unpaired: the browser keeps its approval, and
+    /// switching it back on needs nothing from the extension. It has to be
+    /// said to the extension differently from either of the other answers,
+    /// though, or it would greet again and be told it was paired while
+    /// every download it handed over was refused.
+    SwitchedOff,
     Pending {
         request_id: String,
         /// False when this is an existing request being returned again, so
@@ -95,6 +103,23 @@ impl PairingStore {
         self.paired.contains_key(client_id)
     }
 
+    /// Paired, and not switched off.
+    pub fn is_enabled(&self, client_id: &str) -> bool {
+        self.paired.get(client_id).is_some_and(|client| client.enabled)
+    }
+
+    /// Switches a paired client on or off. False if it is not paired.
+    pub fn set_enabled(&mut self, client_id: &str, enabled: bool) -> bool {
+        let Some(client) = self.paired.get_mut(client_id) else {
+            return false;
+        };
+        if client.enabled != enabled {
+            client.enabled = enabled;
+            self.save();
+        }
+        true
+    }
+
     fn expire(&mut self) {
         let cutoff = now_unix().saturating_sub(PENDING_TTL_SECS);
         self.pending.retain(|request| request.requested_at_unix >= cutoff);
@@ -108,7 +133,11 @@ impl PairingStore {
     pub fn request(&mut self, client_id: &str, label: &str) -> PairingOutcome {
         self.expire();
         if self.is_paired(client_id) {
-            return PairingOutcome::AlreadyPaired;
+            return if self.is_enabled(client_id) {
+                PairingOutcome::AlreadyPaired
+            } else {
+                PairingOutcome::SwitchedOff
+            };
         }
         if let Some(existing) = self.pending.iter().find(|p| p.client_id == client_id) {
             return PairingOutcome::Pending {
@@ -142,6 +171,7 @@ impl PairingStore {
             client_id: request.client_id.clone(),
             label: request.label,
             paired_at_unix: now_unix(),
+            enabled: true,
         };
         self.paired.insert(request.client_id, client.clone());
         self.save();

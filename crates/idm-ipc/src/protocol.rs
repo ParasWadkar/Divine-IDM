@@ -139,6 +139,19 @@ pub struct PairedClient {
     /// Something the user will recognise, e.g. "Chrome on this PC".
     pub label: String,
     pub paired_at_unix: u64,
+    /// Whether this browser may hand downloads over right now.
+    ///
+    /// Switching a browser off keeps its pairing, so switching it back on
+    /// needs no new approval. That is the point of having it instead of
+    /// revoking: revoking is a decision about trust, and "not today" is not
+    /// that. Defaults to on so a pairing written before this existed keeps
+    /// working.
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
+}
+
+fn default_enabled() -> bool {
+    true
 }
 
 /// A pairing request waiting on the user.
@@ -237,6 +250,13 @@ pub struct Settings {
     /// journal are already there and moving them mid-transfer would only
     /// lose them.
     pub download_dir: String,
+    /// Browsers the user has removed from the list in the window.
+    ///
+    /// Only hidden from view: a hidden browser is still registered, still
+    /// pairable, and listed again the moment it is restored. Stored by name
+    /// rather than as a flag on each row because most of these browsers are
+    /// not paired with anything, so there is no row of ours to hang it on.
+    pub hidden_browsers: Vec<String>,
 }
 
 impl Default for Settings {
@@ -264,6 +284,7 @@ impl Default for Settings {
             sort_into_folders: true,
             speed_limit_bytes_per_sec: 0,
             download_dir: String::new(),
+            hidden_browsers: Vec::new(),
         }
     }
 }
@@ -327,6 +348,15 @@ pub enum Request {
     },
     RevokePairing {
         client_id: String,
+    },
+    /// Switches a paired browser on or off without unpairing it.
+    ///
+    /// Refused for browser clients, like every other change to who may do
+    /// what: an extension that could switch itself back on would make the
+    /// switch decoration.
+    SetBrowserEnabled {
+        client_id: String,
+        enabled: bool,
     },
     GetSettings,
     SetSettings(Settings),

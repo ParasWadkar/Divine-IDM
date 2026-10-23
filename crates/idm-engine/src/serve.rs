@@ -297,6 +297,18 @@ impl Engine {
                     reason: "this extension is not paired; approve it in Divine IDM".into(),
                 };
             }
+            // Enforced here, not in the extension, for the same reason as the
+            // kill switch above: a switch only the extension honours is
+            // cosmetic to anything holding the token.
+            let enabled = match &client.client_id {
+                Some(id) => self.inner.pairings.lock().await.is_enabled(id),
+                None => false,
+            };
+            if !enabled {
+                return Response::Rejected {
+                    reason: "this browser is switched off in Divine IDM".into(),
+                };
+            }
         }
 
         // Only the app and the command line may name an ftp or sftp
@@ -1175,8 +1187,7 @@ async fn pump_inner(inner: Arc<Inner>) {
             let outstanding = jobs
                 .values()
                 .filter(|job| {
-                    !job.waiting
-                        && matches!(job.status.state, JobState::Queued | JobState::Running)
+                    !job.waiting && matches!(job.status.state, JobState::Queued | JobState::Running)
                 })
                 .count() as u32;
             if outstanding >= limit {
@@ -1344,6 +1355,12 @@ impl Engine {
         };
         match self.inner.pairings.lock().await.request(&client_id, &label) {
             PairingOutcome::AlreadyPaired => Response::PairingApproved,
+            // Said as a refusal on purpose. The extension's greeting is also
+            // its status check, and "approved" here would have it report
+            // connected while every download it handed over was declined.
+            PairingOutcome::SwitchedOff => {
+                Response::Rejected { reason: "this browser is switched off in Divine IDM".into() }
+            }
             PairingOutcome::Pending { request_id, fresh } => {
                 // Deliberately only a notice: approval has to come from the
                 // app, which is a different client on a different connection.
@@ -1413,6 +1430,22 @@ impl Engine {
         }
     }
 
+    async fn set_browser_enabled(
+        &self,
+        client: &ClientInfo,
+        client_id: String,
+        enabled: bool,
+    ) -> Response {
+        if let Some(refusal) = Self::refuse_browser(client) {
+            return refusal;
+        }
+        if self.inner.pairings.lock().await.set_enabled(&client_id, enabled) {
+            Response::Pong
+        } else {
+            Response::Rejected { reason: "that client was not paired".into() }
+        }
+    }
+
     async fn get_settings(&self) -> Response {
         Response::Settings(self.inner.settings.lock().await.clone())
     }
@@ -1434,6 +1467,18 @@ impl Engine {
             Ok(vetted) => settings.download_dir = vetted,
             Err(reason) => return Response::Rejected { reason },
         }
+
+        // The hidden list is plain text from the window. Capped and trimmed so
+        // a settings file cannot be made to grow without bound, and
+        // de-duplicated so hiding the same browser twice is the same as once.
+        let mut seen = std::collections::HashSet::new();
+        settings.hidden_browsers = settings
+            .hidden_browsers
+            .iter()
+            .map(|name| name.trim().chars().take(64).collect::<String>())
+            .filter(|name| !name.is_empty() && seen.insert(name.to_ascii_lowercase()))
+            .take(64)
+            .collect();
 
         let mut current = self.inner.settings.lock().await;
         let limit_changed = current.speed_limit_bytes_per_sec != settings.speed_limit_bytes_per_sec;
@@ -1587,6 +1632,9 @@ impl Handler for Engine {
             }
             Request::DenyPairing { request_id } => self.deny_pairing(client, request_id).await,
             Request::RevokePairing { client_id } => self.revoke_pairing(client, client_id).await,
+            Request::SetBrowserEnabled { client_id, enabled } => {
+                self.set_browser_enabled(client, client_id, enabled).await
+            }
             Request::GetSettings => self.get_settings().await,
             Request::SetSettings(settings) => self.set_settings(client, settings).await,
             Request::CancelPostAction => self.cancel_post_action().await,
@@ -1833,6 +1881,161 @@ mod tests {
             Response::Rejected { reason } => assert!(reason.contains("not paired"), "{reason}"),
             other => panic!("a revoked client should be refused, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn a_browser_switched_off_is_refused_but_stays_paired() {
+        // Off is not the same as revoked. Revoking is a decision about trust
+        // and has to be re-approved; "not today" must not cost that.
+        let (_dir, engine) = engine();
+        let client = browser();
+        pair(&engine, &client).await;
+
+        assert!(matches!(
+            engine.set_browser_enabled(&desktop(), "ext-1".into(), false).await,
+            Response::Pong
+        ));
+        match engine.enqueue(&client, request("https://example.invalid/a.bin")).await {
+            Response::Rejected { reason } => assert!(reason.contains("switched off"), "{reason}"),
+            other => panic!("a switched-off browser should be refused, got {other:?}"),
+        }
+
+        // Still approved: the pairing list has it, and switching it back on
+        // needs nothing from the extension.
+        let Response::Pairings { paired, .. } =
+            engine.handle(&desktop(), Request::ListPairings).await
+        else {
+            panic!("expected the pairings");
+        };
+        assert_eq!(paired.len(), 1, "it must still be paired");
+        assert!(!paired[0].enabled);
+
+        engine.set_browser_enabled(&desktop(), "ext-1".into(), true).await;
+        assert!(matches!(
+            engine.enqueue(&client, request("https://example.invalid/a.bin")).await,
+            Response::Accepted { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_greeting_from_a_switched_off_browser_says_so() {
+        // The extension's greeting doubles as its status check. If a
+        // switched-off browser were told "approved" it would report
+        // connected while every download it handed over was declined.
+        let (_dir, engine) = engine();
+        let client = browser();
+        pair(&engine, &client).await;
+        engine.set_browser_enabled(&desktop(), "ext-1".into(), false).await;
+
+        let reply = engine.request_pairing(&client, "Chrome on this PC".into()).await;
+        match reply {
+            Response::Rejected { reason } => assert!(reason.contains("switched off"), "{reason}"),
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn the_browser_cannot_switch_itself_back_on() {
+        let (_dir, engine) = engine();
+        let client = browser();
+        pair(&engine, &client).await;
+        engine.set_browser_enabled(&desktop(), "ext-1".into(), false).await;
+
+        let reply = engine.set_browser_enabled(&client, "ext-1".into(), true).await;
+        assert!(matches!(reply, Response::Rejected { .. }), "{reply:?}");
+        assert!(
+            matches!(
+                engine.enqueue(&client, request("https://example.invalid/a.bin")).await,
+                Response::Rejected { .. }
+            ),
+            "and it must still be off"
+        );
+    }
+
+    #[tokio::test]
+    async fn switching_off_a_browser_that_is_not_paired_is_refused() {
+        let (_dir, engine) = engine();
+        let reply = engine.set_browser_enabled(&desktop(), "nobody".into(), false).await;
+        assert!(matches!(reply, Response::Rejected { .. }), "{reply:?}");
+    }
+
+    #[tokio::test]
+    async fn the_switch_survives_a_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let make = || {
+            Engine::with_settings_file(
+                dir.path().join("downloads"),
+                8,
+                dir.path().join("settings.json"),
+            )
+        };
+
+        let first = make();
+        pair(&first, &browser()).await;
+        first.set_browser_enabled(&desktop(), "ext-1".into(), false).await;
+        drop(first);
+
+        let second = make();
+        assert!(
+            matches!(
+                second.enqueue(&browser(), request("https://example.invalid/a.bin")).await,
+                Response::Rejected { .. }
+            ),
+            "a browser switched off must still be off after a restart"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_pairing_written_before_the_switch_existed_still_works() {
+        // pairings.json from an earlier version has no `enabled`. Treating
+        // that as off would silently stop every already-paired browser.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("pairings.json"),
+            r#"{"paired":[{"client_id":"ext-1","label":"Chrome on this PC","paired_at_unix":1}]}"#,
+        )
+        .unwrap();
+        let engine = Engine::with_settings_file(
+            dir.path().join("downloads"),
+            8,
+            dir.path().join("settings.json"),
+        );
+        assert!(matches!(
+            engine.enqueue(&browser(), request("https://example.invalid/a.bin")).await,
+            Response::Accepted { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn hidden_browsers_are_kept_trimmed_and_capped() {
+        let (_dir, engine) = engine();
+        let mut settings = match engine.handle(&desktop(), Request::GetSettings).await {
+            Response::Settings(settings) => settings,
+            other => panic!("expected settings, got {other:?}"),
+        };
+        settings.hidden_browsers = vec![
+            " Firefox ".into(),
+            "firefox".into(), // the same one again, differently cased
+            "".into(),
+            "x".repeat(500),
+        ];
+        let Response::Settings(saved) =
+            engine.handle(&desktop(), Request::SetSettings(settings)).await
+        else {
+            panic!("expected settings back");
+        };
+        assert_eq!(saved.hidden_browsers[0], "Firefox");
+        assert_eq!(saved.hidden_browsers.len(), 2, "{:?}", saved.hidden_browsers);
+        assert_eq!(saved.hidden_browsers[1].len(), 64, "a name is cut to a sane length");
+
+        let mut many = saved;
+        many.hidden_browsers = (0..200).map(|n| format!("browser-{n}")).collect();
+        let Response::Settings(capped) =
+            engine.handle(&desktop(), Request::SetSettings(many)).await
+        else {
+            panic!("expected settings back");
+        };
+        assert_eq!(capped.hidden_browsers.len(), 64);
     }
 
     #[tokio::test]

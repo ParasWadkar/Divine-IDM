@@ -38,6 +38,11 @@
          in a settings pane the user may never open. -->
     <section id="pairing" class="pairing" hidden></section>
 
+    <!-- Things the user opened with this app that it could not act on. Said
+         in the window rather than a toast, because a toast is gone in four
+         seconds and this is the only explanation there will be. -->
+    <section id="notices" class="notices" hidden></section>
+
     <nav class="tabs" role="tablist">
       <button class="tab is-active" data-tab="active" role="tab">Downloads</button>
       <button class="tab" data-tab="history" role="tab">History</button>
@@ -68,7 +73,7 @@
       </section>
 
       <section id="panel-settings" class="panel" hidden>
-        <h2>Browser integration</h2>
+        <h2>Downloads</h2>
         <label class="row switch">
           <input type="checkbox" id="integration" />
           <span>
@@ -189,35 +194,48 @@
           </select>
         </label>
 
-        <!-- Hidden unless the bundled copy is actually there, which is only
-             true in an installed build. -->
-        <section id="extension-setup" hidden>
-          <h2>Install the extension</h2>
-          <p class="note">
-            Divine IDM is already registered with your browsers. The extension
-            itself has to be added by hand, because it is not in any web store
-            and a browser will only load one from its own developer page.
-          </p>
-          <ol class="steps">
-            <li>
-              Open <code>chrome://extensions</code> — or
-              <code>about:debugging</code> in Firefox.
-            </li>
-            <li>Turn on <b>Developer mode</b>.</li>
-            <li>
-              Choose <b>Load unpacked</b> and pick the folder below. In Firefox
-              it is <b>Load Temporary Add-on</b>, and you pick
-              <code>manifest.json</code> inside it.
-            </li>
-          </ol>
-          <div class="row">
-            <code id="extension-path" class="path"></code>
-            <button id="show-extension" class="ghost">Show me</button>
+        <!-- Which browsers are connected, and how to connect the rest. One
+             place for what used to be two: installing the extension and
+             listing the paired ones were the same job seen from either end. -->
+        <section id="browser-card" class="card">
+          <h2>Browser integration</h2>
+          <div class="card-sub">Your browsers</div>
+
+          <div id="browser-list" class="browser-list"></div>
+
+          <!-- Browsers the user has taken off the list, each one click from
+               coming back. Hidden is only about the view. -->
+          <div id="browser-hidden" class="browser-hidden" hidden></div>
+
+          <div class="manual">
+            <div class="manual-title">Need to install manually?</div>
+            <button id="toggle-instructions" class="ghost" aria-expanded="false" aria-controls="instructions">
+              Show Installation Instructions
+            </button>
+
+            <div id="instructions" class="instructions" hidden>
+              <p class="note">
+                Divine IDM is already registered with your browsers. The
+                extension itself has to be added by hand, because it is not in
+                any web store and a browser will only load one from its own
+                developer page.
+              </p>
+              <ol class="steps">
+                <li>
+                  Open <code>chrome://extensions</code> — or
+                  <code>about:debugging</code> in Firefox.
+                </li>
+                <li>Turn on <b>Developer mode</b>.</li>
+                <li>
+                  Choose <b>Load unpacked</b> and pick the folder below. In
+                  Firefox it is <b>Load Temporary Add-on</b>, and you pick
+                  <code>manifest.json</code> inside it.
+                </li>
+              </ol>
+              <div id="instruction-paths" class="instruction-paths"></div>
+            </div>
           </div>
         </section>
-
-        <h2>Paired extensions</h2>
-        <div id="paired" class="paired"></div>
       </section>
     </main>
 

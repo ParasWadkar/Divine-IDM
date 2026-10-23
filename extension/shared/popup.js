@@ -47,7 +47,10 @@ function render({ state = {}, settings = {} }) {
     $("pair").hidden = true;
   }
 
-  if (settings.enabled !== undefined) $("enabled").checked = settings.enabled;
+  if (settings.enabled !== undefined) {
+    $("enabled").checked = settings.enabled;
+    $("enabled-state").textContent = settings.enabled ? "On" : "Off";
+  }
   if (settings.minSizeBytes !== undefined) {
     $("minSize").value = Math.round(settings.minSizeBytes / (1024 * 1024));
   }
@@ -57,6 +60,10 @@ function render({ state = {}, settings = {} }) {
 }
 
 $("enabled").addEventListener("change", async (event) => {
+  // The word follows the switch immediately, before the round trip to the
+  // background worker, so the control never says one thing while showing
+  // another.
+  $("enabled-state").textContent = event.target.checked ? "On" : "Off";
   await ask({ type: "setSettings", settings: { enabled: event.target.checked } });
 });
 

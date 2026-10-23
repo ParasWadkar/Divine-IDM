@@ -52,6 +52,16 @@
           "English"
         ]
       }
-    }
+    },
+    "fileAssociations": [
+      {
+        "ext": [
+          "torrent"
+        ],
+        "name": "DivineIDM.Torrent",
+        "description": "BitTorrent file",
+        "mimeType": "application/x-bittorrent"
+      }
+    ]
   }
 }
