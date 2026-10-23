@@ -30,7 +30,7 @@ windows = { version = "0.62", features = [
 ] }
 
 [build-dependencies]
-tauri-build = "2.6.3"
+tauri-build = { version = "2.6.3", features = [] }
 
 [lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
