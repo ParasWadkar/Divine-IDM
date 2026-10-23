@@ -103,6 +103,57 @@ pub enum ProbeOutcome {
     Restart(RestartReason),
 }
 
+impl ProbeOutcome {
+    /// What to tell the person looking at the download list.
+    ///
+    /// The variant names describe what the scheduler should do next, which is
+    /// the wrong half of the story for someone who only wants to know why
+    /// their file is not arriving. These say that instead, and deliberately
+    /// avoid status codes: "403" is not an explanation.
+    pub fn explain(self) -> String {
+        match self {
+            Self::Ranged { .. } | Self::NeedsSuffixProbe { .. } => {
+                "the server answered normally".into()
+            }
+            Self::SingleStreamFromZero { .. } => {
+                "the server ignored the range request, so this is being fetched in one stream".into()
+            }
+            Self::SingleStreamUnknownLength => {
+                "the server did not say how big the file is, so it cannot be split or resumed".into()
+            }
+            Self::Reprobe { .. } => "the size the server reported changed, so it is being checked again".into(),
+            Self::ReResolve => {
+ "the server refused the request. The link may have expired, or it may only be served to a browser that is signed in. Use the New link button to paste a fresh address."
+                    .into()
+            }
+            Self::NeedsNewUrl => {
+ "the file is no longer at that address. Use the New link button to paste a new one; what has already downloaded is kept."
+                    .into()
+            }
+            Self::Throttled => "the server asked us to slow down, so this is waiting before trying again".into(),
+            Self::Restart(reason) => reason.explain(),
+        }
+    }
+}
+
+impl RestartReason {
+    pub fn explain(self) -> String {
+        match self {
+            Self::ContentRangeUnparseable | Self::InconsistentTotal => {
+                "the server's answer about which part of the file it was sending did not make sense"
+                    .into()
+            }
+            Self::RangeStartMismatch { .. } => {
+ "the server sent a different part of the file than was asked for, which would corrupt the result, so it is being fetched in one stream instead"
+                    .into()
+            }
+            Self::UnexpectedStatus(code) => {
+                format!("the server refused the request (HTTP {code})")
+            }
+        }
+    }
+}
+
 /// Picks the strongest usable validator.
 ///
 /// A weak ETag permits byte-different-but-equivalent representations, so it is
@@ -498,5 +549,44 @@ mod tests {
             classify(PROBE, &facts(204)),
             ProbeOutcome::Restart(RestartReason::UnexpectedStatus(204))
         );
+    }
+
+    /// The wording is what the person reads when a download stops, so it is
+    /// pinned here: a variant renamed or added without a sentence of its own
+    /// would otherwise reach them as a debug dump.
+    #[test]
+    fn every_outcome_explains_itself_in_words() {
+        let all = [
+            ProbeOutcome::SingleStreamUnknownLength,
+            ProbeOutcome::Reprobe { total: None },
+            ProbeOutcome::ReResolve,
+            ProbeOutcome::NeedsNewUrl,
+            ProbeOutcome::Throttled,
+            ProbeOutcome::Restart(RestartReason::ContentRangeUnparseable),
+            ProbeOutcome::Restart(RestartReason::InconsistentTotal),
+            ProbeOutcome::Restart(RestartReason::RangeStartMismatch { expected: 0, got: 7 }),
+            ProbeOutcome::Restart(RestartReason::UnexpectedStatus(204)),
+        ];
+        for outcome in all {
+            let text = outcome.explain();
+            assert!(text.len() > 20, "{outcome:?} explains itself as {text:?}");
+            assert!(!text.contains('{'), "{outcome:?} leaked a debug format");
+        }
+    }
+
+    /// Both of these are things the user can act on, and the only way to act
+    /// on them is the button named here. If the button is ever renamed, this
+    /// fails rather than leaving the advice pointing at nothing.
+    #[test]
+    fn an_expired_link_names_the_button_that_fixes_it() {
+        for outcome in [ProbeOutcome::ReResolve, ProbeOutcome::NeedsNewUrl] {
+            assert!(outcome.explain().contains("New link"), "{outcome:?}");
+        }
+    }
+
+    #[test]
+    fn the_unexpected_status_is_named() {
+        let text = ProbeOutcome::Restart(RestartReason::UnexpectedStatus(418)).explain();
+        assert!(text.contains("418"), "{text}");
     }
 }

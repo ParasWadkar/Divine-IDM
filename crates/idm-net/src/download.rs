@@ -202,7 +202,7 @@ pub enum DownloadError {
     NoRangeSupport,
     #[error("the file has no known length, so it cannot be fetched in parallel")]
     UnknownLength,
-    #[error("the server's response could not be used: {0:?}")]
+    #[error("{}", .0.explain())]
     Unusable(ProbeOutcome),
     #[error("the file changed on the server mid-download; the partial file was kept")]
     RepresentationChanged,

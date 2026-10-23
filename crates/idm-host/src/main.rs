@@ -40,27 +40,121 @@ impl Bridge {
 
     /// Connects if needed, announcing the extension's id so the engine knows
     /// which client is asking.
-    async fn engine(&mut self) -> Result<&mut IpcClient, String> {
+    async fn engine(&mut self, wake: bool) -> Result<&mut IpcClient, String> {
         if self.engine.is_none() {
-            let connected = match &self.client_id {
-                Some(id) => IpcClient::connect_as(BROWSER_CLIENT, id).await,
-                None => IpcClient::connect(BROWSER_CLIENT).await,
+            let connected = match self.dial().await {
+                Ok(client) => client,
+                // Nothing is listening. For something the person just did,
+                // the app being closed is an ordinary state rather than an
+                // error, so start it and dial again. A background poll gets
+                // no such treatment: it must not resurrect an app they closed
+                // on purpose.
+                Err(_) if wake => {
+                    start_app()?;
+                    self.dial_until(START_TIMEOUT).await?
+                }
+                Err(error) => return Err(not_running(&error)),
             };
-            self.engine = Some(connected.map_err(|error| error.to_string())?);
+            self.engine = Some(connected);
         }
         Ok(self.engine.as_mut().expect("just connected"))
     }
 
+    async fn dial(&self) -> Result<IpcClient, idm_ipc::client::ClientError> {
+        match &self.client_id {
+            Some(id) => IpcClient::connect_as(BROWSER_CLIENT, id).await,
+            None => IpcClient::connect(BROWSER_CLIENT).await,
+        }
+    }
+
+    /// Dials repeatedly until the engine answers or the budget runs out.
+    ///
+    /// A freshly started app has to build its window and open its pipe before
+    /// anyone can connect, so the first few attempts are expected to fail.
+    async fn dial_until(&self, budget: std::time::Duration) -> Result<IpcClient, String> {
+        let deadline = std::time::Instant::now() + budget;
+        loop {
+            match self.dial().await {
+                Ok(client) => return Ok(client),
+                Err(error) => {
+                    if std::time::Instant::now() >= deadline {
+                        return Err(format!(
+                            "Divine IDM did not start in time ({error}). Open it yourself and try the download again."
+                        ));
+                    }
+                    tokio::time::sleep(DIAL_EVERY).await;
+                }
+            }
+        }
+    }
+}
+
+/// How long to wait for a just-started app to open its pipe.
+const START_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+const DIAL_EVERY: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Starts the app, minimised to the tray.
+///
+/// The executable is looked for next to this one rather than in a recorded
+/// path: the installer puts both in the same directory and so does a build, so
+/// the pair move together and there is nothing to go stale.
+fn start_app() -> Result<(), String> {
+    let exe = std::env::current_exe()
+        .ok()
+        .and_then(|host| host.parent().map(|dir| dir.join(APP_EXE)))
+        .filter(|path| path.is_file())
+        .ok_or_else(|| {
+            format!(
+                "Divine IDM is not running, and {APP_EXE} was not found next to the browser helper. Open Divine IDM yourself and try again."
+            )
+        })?;
+
+    std::process::Command::new(&exe)
+        .arg("--hidden")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|error| format!("Divine IDM could not be started: {error}"))?;
+    Ok(())
+}
+
+const APP_EXE: &str = "divine-idm.exe";
+
+/// What a background check is told when the app is simply closed.
+///
+/// The underlying error is "the system cannot find the file specified",
+/// meaning the endpoint file the app writes while it runs. True, and no use
+/// at all to someone reading it in a browser popup.
+fn not_running(error: &idm_ipc::client::ClientError) -> String {
+    tracing::debug!(%error, "engine not reachable");
+    "Divine IDM is not running. Open it, or just start a download and it will open itself."
+        .to_owned()
+}
+
+impl Bridge {
     /// Sends a request, retrying once through a fresh connection.
     ///
     /// A dropped pipe usually means the engine restarted, which should look
     /// like a brief hiccup to the extension rather than a hard failure.
     async fn ask(&mut self, request: Request) -> Result<Response, String> {
-        match self.engine().await?.request(request.clone()).await {
+        self.ask_maybe_waking(request, false).await
+    }
+
+    /// Asks, starting the app first if it is not running.
+    ///
+    /// Used only where the person is waiting on the answer -- a download they
+    /// just clicked, or pairing they just asked for.
+    async fn ask_waking(&mut self, request: Request) -> Result<Response, String> {
+        self.ask_maybe_waking(request, true).await
+    }
+
+    async fn ask_maybe_waking(&mut self, request: Request, wake: bool) -> Result<Response, String> {
+        match self.engine(wake).await?.request(request.clone()).await {
             Ok(response) => Ok(response),
             Err(_) => {
                 self.engine = None;
-                self.engine().await?.request(request).await.map_err(|e| e.to_string())
+                self.engine(wake).await?.request(request).await.map_err(|e| e.to_string())
             }
         }
     }
@@ -90,7 +184,7 @@ impl Bridge {
             }
 
             FromExtension::Pair { label } => {
-                match self.ask(Request::RequestPairing { label }).await {
+                match self.ask_waking(Request::RequestPairing { label }).await {
                     Ok(Response::PairingApproved) => ToExtension::PairingApproved,
                     Ok(Response::PairingPending { request_id }) => {
                         ToExtension::PairingPending { request_id }
@@ -122,7 +216,7 @@ impl Bridge {
                     size_hint,
                     mime,
                 };
-                match self.ask(Request::Enqueue(request)).await {
+                match self.ask_waking(Request::Enqueue(request)).await {
                     Ok(Response::Accepted { id }) => ToExtension::Accepted { id: id.0 },
                     Ok(Response::Rejected { reason }) => ToExtension::Declined { reason },
                     Ok(other) => ToExtension::Error { message: format!("unexpected: {other:?}") },
