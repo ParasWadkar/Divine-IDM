@@ -437,6 +437,43 @@ mod platform {
 mod tests {
     use super::*;
 
+    /// The installer must register the id the extension actually has.
+    ///
+    /// Two files have to agree: the keypair under `extension/keys/` fixes
+    /// the id Chromium derives, and `installer-hooks.nsh` passes an id to
+    /// `--install-host` during installation. Running `keygen.mjs --force`
+    /// changes the first and not the second.
+    ///
+    /// That drift fails silently in the worst way. The install succeeds, the
+    /// registry key is written, the manifest looks right -- and the browser
+    /// refuses to launch the host, because the extension presenting itself
+    /// is not the one `allowed_origins` names. Nothing logs it, and the only
+    /// symptom is that downloads quietly keep going to the browser.
+    ///
+    /// `make-installer.ps1` checks this too, but only when an installer is
+    /// being built. Here it is checked whenever anyone runs the tests.
+    #[test]
+    fn the_installer_registers_the_id_the_extension_actually_has() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+
+        let pinned = std::fs::read_to_string(root.join("extension/keys/chromium.pub.txt"))
+            .expect("extension/keys/chromium.pub.txt is missing; run node extension/keygen.mjs");
+        let pinned = pinned.lines().next().unwrap_or_default().trim().to_owned();
+        assert_eq!(pinned.len(), 32, "a Chromium id is 32 characters: {pinned:?}");
+
+        let hooks = std::fs::read_to_string(root.join("app/src-tauri/installer-hooks.nsh"))
+            .expect("app/src-tauri/installer-hooks.nsh is missing");
+        let declared = hooks
+            .split_once("!define IDM_EXTENSION_ID")
+            .and_then(|(_, rest)| rest.split('"').nth(1))
+            .expect("installer-hooks.nsh does not define IDM_EXTENSION_ID");
+
+        assert_eq!(
+            declared, pinned,
+            "the installer would register {declared}, but the extension's id is {pinned}.              Update IDM_EXTENSION_ID in app/src-tauri/installer-hooks.nsh."
+        );
+    }
+
     fn callers() -> AllowedCallers {
         AllowedCallers {
             chromium_ids: vec!["abcdefghijklmnopabcdefghijklmnop".into()],

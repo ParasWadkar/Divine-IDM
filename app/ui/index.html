@@ -180,6 +180,33 @@
           </select>
         </label>
 
+        <!-- Hidden unless the bundled copy is actually there, which is only
+             true in an installed build. -->
+        <section id="extension-setup" hidden>
+          <h2>Install the extension</h2>
+          <p class="note">
+            Divine IDM is already registered with your browsers. The extension
+            itself has to be added by hand, because it is not in any web store
+            and a browser will only load one from its own developer page.
+          </p>
+          <ol class="steps">
+            <li>
+              Open <code>chrome://extensions</code> — or
+              <code>about:debugging</code> in Firefox.
+            </li>
+            <li>Turn on <b>Developer mode</b>.</li>
+            <li>
+              Choose <b>Load unpacked</b> and pick the folder below. In Firefox
+              it is <b>Load Temporary Add-on</b>, and you pick
+              <code>manifest.json</code> inside it.
+            </li>
+          </ol>
+          <div class="row">
+            <code id="extension-path" class="path"></code>
+            <button id="show-extension" class="ghost">Show me</button>
+          </div>
+        </section>
+
         <h2>Paired extensions</h2>
         <div id="paired" class="paired"></div>
       </section>

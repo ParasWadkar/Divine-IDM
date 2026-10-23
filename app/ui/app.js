@@ -442,4 +442,15 @@ $("clear-history").addEventListener("click", async () => {
 listen("snapshot", (event) => render(event.payload));
 window.addEventListener("resize", drawGraph);
 
+// Asked once: the folder is part of the installation and cannot move while
+// the app is running.
+(async () => {
+  const setup = await invoke("browser_setup").catch(() => null);
+  if (!setup) return;
+  $("extension-path").textContent = setup.chromiumDir;
+  $("show-extension").onclick = () =>
+    invoke("reveal", { path: setup.chromiumDir }).catch((error) => toast(String(error), true));
+  $("extension-setup").hidden = false;
+})();
+
 refresh();

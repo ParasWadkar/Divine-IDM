@@ -124,6 +124,44 @@ fn reveal(path: String) -> Result<(), String> {
         .map_err(|error| error.to_string())
 }
 
+/// Where the bundled extension is, so the window can show it.
+///
+/// The installer registers the native messaging host, which is the half a
+/// user cannot do. It cannot install the extension: this is not in any web
+/// store, and a browser will only load an unpacked extension through its own
+/// developer-mode flow, by hand. So the remaining step is theirs, and the
+/// only way it does not become "ask the person who gave you this" is for the
+/// app to say where the folder is and open it.
+///
+/// Returns nothing when the folder is not there, which is the normal case in
+/// a development build -- the resource is copied in by the bundler, so it
+/// only exists in an installed copy. The window hides the section rather than
+/// showing a path that goes nowhere.
+#[tauri::command]
+fn browser_setup(app: AppHandle) -> Option<serde_json::Value> {
+    // The install directory, then beside the executable. Both are the same
+    // place in an installed copy; keeping the second means a portable
+    // unpacked build still finds it.
+    let roots = [
+        app.path().resource_dir().ok(),
+        std::env::current_exe().ok().and_then(|exe| exe.parent().map(|dir| dir.to_path_buf())),
+    ];
+
+    let chromium = roots
+        .iter()
+        .flatten()
+        .map(|root| root.join("extension").join("chromium"))
+        .find(|dir| dir.join("manifest.json").is_file())?;
+    // Firefox wants the manifest itself, not the folder, in its "load
+    // temporary add-on" dialog.
+    let firefox = chromium.with_file_name("firefox").join("manifest.json");
+
+    Some(serde_json::json!({
+        "chromiumDir": chromium.display().to_string(),
+        "firefoxManifest": firefox.is_file().then(|| firefox.display().to_string()),
+    }))
+}
+
 #[tauri::command]
 fn quit(app: AppHandle) {
     app.exit(0);
@@ -157,6 +195,7 @@ fn main() {
             history,
             clear_history,
             reveal,
+            browser_setup,
             quit,
         ])
         .setup(|app| {
