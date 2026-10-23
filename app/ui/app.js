@@ -14,6 +14,13 @@ const $ = (id) => document.getElementById(id);
 /** Last known snapshot, so a click can act without waiting for the next tick. */
 let latest = { jobs: [], settings: null, paired: [], pending: [] };
 
+// The chosen download folder, kept here rather than read from a control
+// because it is not one: it is picked in a system dialog. saveSettings sends
+// the whole object and the engine treats any missing field as its default, so
+// leaving this out of a save would reset the folder every time any other
+// setting was changed.
+let downloadDir = "";
+
 /** Rolling throughput samples for the graph. */
 const SAMPLES = 120;
 const history = [];
@@ -203,7 +210,15 @@ function renderJobs(jobs) {
   );
 }
 
+function showFolder() {
+  $("folder-path").textContent = downloadDir || "Your Downloads folder (default)";
+  $("reset-folder").hidden = !downloadDir;
+}
+
 function renderSettings(settings) {
+  // Always, even mid-interaction: this is the value the next save will
+  // carry, and a stale one would revert the folder.
+  downloadDir = settings?.download_dir ?? downloadDir;
   if (!settings || document.activeElement?.closest("#panel-settings")) {
     // Not while the user is in the middle of changing something: a tick
     // landing mid-interaction would reset the control under their cursor.
@@ -218,6 +233,7 @@ function renderSettings(settings) {
   $("resume-on-start").checked = settings.resume_on_start;
   $("post-action").value = settings.post_action;
   $("countdown").value = String(settings.post_action_countdown_secs);
+  showFolder();
 }
 
 function renderPaired(paired) {
@@ -327,8 +343,9 @@ async function refresh() {
   }
 }
 
-async function saveSettings() {
+async function saveSettings(overrides = {}) {
   const settings = {
+    download_dir: downloadDir,
     browser_integration: $("integration").checked,
     min_takeover_bytes: Number($("min-size").value),
     max_concurrent_downloads: Number($("max-concurrent").value),
@@ -338,9 +355,14 @@ async function saveSettings() {
     resume_on_start: $("resume-on-start").checked,
     post_action: $("post-action").value,
     post_action_countdown_secs: Number($("countdown").value),
+    ...overrides,
   };
   try {
     await invoke("save_settings", { settings });
+    // Only once the engine has accepted it. A folder it refused must not
+    // be shown as the current one.
+    downloadDir = settings.download_dir;
+    showFolder();
     toast("Settings saved");
   } catch (error) {
     toast(String(error), true);
@@ -428,8 +450,19 @@ for (const id of [
   "post-action",
   "countdown",
 ]) {
-  $(id).addEventListener("change", saveSettings);
+  // A fresh call, not the listener itself: addEventListener would pass the
+  // Event as `overrides`, whose properties would then be spread into the
+  // settings.
+  $(id).addEventListener("change", () => saveSettings());
 }
+
+$("choose-folder").addEventListener("click", async () => {
+  const picked = await invoke("choose_folder", { start: downloadDir || null }).catch(() => null);
+  // Cancelling is not an error, and changes nothing.
+  if (picked) await saveSettings({ download_dir: picked });
+});
+
+$("reset-folder").addEventListener("click", () => saveSettings({ download_dir: "" }));
 
 $("clear-history").addEventListener("click", async () => {
   await act("clear_history");

@@ -8,6 +8,7 @@
 
 pub mod batch;
 pub mod category;
+pub mod folder;
 pub mod pairing;
 pub mod serve;
 

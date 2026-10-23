@@ -220,6 +220,23 @@ pub struct Settings {
     /// how many *connections* a single download deserves; this decides how
     /// many downloads get to make that decision simultaneously.
     pub max_concurrent_downloads: u32,
+    /// Where new downloads go; empty means the user's Downloads folder.
+    ///
+    /// Empty rather than a resolved path so the default keeps following the
+    /// account: a settings file copied to another machine or profile should
+    /// not carry a hardcoded `C:\Users\someone\Downloads` that does not
+    /// exist there.
+    ///
+    /// Only the app and the CLI can set it -- the engine refuses settings
+    /// changes from the browser side. That matters more here than for any
+    /// other setting: a page that could choose the folder could choose the
+    /// Startup folder.
+    ///
+    /// Applies to downloads started afterwards. One already queued or
+    /// running keeps the folder it was given, because its part file and
+    /// journal are already there and moving them mid-transfer would only
+    /// lose them.
+    pub download_dir: String,
 }
 
 impl Default for Settings {
@@ -246,6 +263,7 @@ impl Default for Settings {
             // gone anyway, so nothing goes missing because of this.
             sort_into_folders: true,
             speed_limit_bytes_per_sec: 0,
+            download_dir: String::new(),
         }
     }
 }

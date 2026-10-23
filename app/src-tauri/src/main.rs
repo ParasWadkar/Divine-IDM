@@ -95,6 +95,36 @@ async fn save_settings(state: State<'_, AppState>, settings: Settings) -> Result
     autostart::apply(wanted)
 }
 
+/// Opens the system folder picker and returns the choice, or nothing if the
+/// person cancelled.
+///
+/// A command of our own rather than the dialog plugin's JavaScript API, so
+/// the page is not granted the plugin: a window that can open arbitrary
+/// dialogs is a larger permission than a window that can ask this one
+/// question. It also keeps the capability list to the single thing the page
+/// genuinely needs from the shell.
+#[tauri::command]
+async fn choose_folder(app: AppHandle, start: Option<String>) -> Option<String> {
+    use tauri_plugin_dialog::DialogExt;
+
+    let mut dialog = app.dialog().file().set_title("Choose the download folder");
+    // Opens where the current choice is, so changing it slightly -- the
+    // usual reason to open it -- does not mean navigating from the top.
+    if let Some(start) = start.filter(|path| std::path::Path::new(path).is_dir()) {
+        dialog = dialog.set_directory(start);
+    }
+    // Modal over the window, so it cannot be lost behind it.
+    if let Some(window) = app.get_webview_window("main") {
+        dialog = dialog.set_parent(&window);
+    }
+
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    dialog.pick_folder(move |picked| {
+        let _ = sender.send(picked);
+    });
+    receiver.await.ok().flatten().and_then(|path| path.into_path().ok()).map(|path| path.display().to_string())
+}
+
 #[tauri::command]
 async fn cancel_post_action(state: State<'_, AppState>) -> Result<(), String> {
     state.simple(Request::CancelPostAction).await
@@ -178,6 +208,7 @@ fn main() {
         // starting a second engine that opens the same database and loses a
         // race for the same named pipe. Double-clicking the icon while the
         // app sits in the tray is the ordinary way to hit this.
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             reveal_window(app);
         }))
@@ -195,6 +226,7 @@ fn main() {
             history,
             clear_history,
             reveal,
+            choose_folder,
             browser_setup,
             quit,
         ])

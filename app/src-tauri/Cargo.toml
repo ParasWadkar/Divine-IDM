@@ -20,6 +20,10 @@ serde = { workspace = true }
 serde_json.workspace = true
 tauri = { version = "2.11.6", features = ["tray-icon"] }
 tauri-plugin-single-instance = "2.4.5"
+# The native folder picker for the download-folder setting. The stable 2.x line:
+# the newest release on the index is a 3.0 alpha, which targets a Tauri this
+# app is not on.
+tauri-plugin-dialog = "2"
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "sync"] }
 tracing.workspace = true
 

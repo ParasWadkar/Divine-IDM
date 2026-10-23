@@ -297,9 +297,31 @@ impl Engine {
         // moving the file afterwards without racing whatever opened it.
         let category =
             settings.sort_into_folders.then(|| crate::category::category_for(&filename)).flatten();
+        // The chosen folder if there is one, else the default the engine was
+        // started with. Read now, so a change applies to what is queued next
+        // and never moves a download already under way.
+        let base_dir = if settings.download_dir.is_empty() {
+            self.inner.output_dir.clone()
+        } else {
+            let chosen = PathBuf::from(&settings.download_dir);
+            // Not silently the default: a drive that has been unplugged since
+            // the folder was chosen should be said out loud, because files
+            // appearing somewhere other than where the person was told would
+            // be worse than a refusal. From the browser it falls back to the
+            // browser's own downloader, which is the safe direction.
+            if let Err(error) = std::fs::create_dir_all(&chosen) {
+                return Response::Rejected {
+                    reason: format!(
+                        "the download folder {} is not available: {error}",
+                        chosen.display()
+                    ),
+                };
+            }
+            chosen
+        };
         let output_dir = match category {
-            Some(category) => self.inner.output_dir.join(category),
-            None => self.inner.output_dir.clone(),
+            Some(category) => base_dir.join(category),
+            None => base_dir,
         };
 
         // Settled before anything is written, and held until the job ends.
@@ -986,6 +1008,15 @@ impl Engine {
                 reason: "the browser integration cannot change settings".into(),
             };
         }
+        // Vetted before anything is stored, while the person is still at the
+        // screen: a folder that cannot be written to otherwise fails later,
+        // mid-transfer, on a file that may have taken an hour.
+        let mut settings = settings;
+        match crate::folder::vet_download_dir(&settings.download_dir) {
+            Ok(vetted) => settings.download_dir = vetted,
+            Err(reason) => return Response::Rejected { reason },
+        }
+
         let mut current = self.inner.settings.lock().await;
         let limit_changed = current.speed_limit_bytes_per_sec != settings.speed_limit_bytes_per_sec;
         *current = settings.clone();
@@ -1712,6 +1743,157 @@ mod tests {
 
         let directory = output_dir_of(&engine, id).await;
         assert!(directory.ends_with("Video"), "{directory}");
+    }
+
+    /// Sets the download folder through the same path the window uses.
+    async fn set_download_dir(engine: &Arc<Engine>, client: &ClientInfo, dir: &str) -> Response {
+        let mut settings = match engine.handle(&desktop(), Request::GetSettings).await {
+            Response::Settings(settings) => settings,
+            other => panic!("expected settings, got {other:?}"),
+        };
+        settings.download_dir = dir.to_owned();
+        engine.handle(client, Request::SetSettings(settings)).await
+    }
+
+    #[tokio::test]
+    async fn a_chosen_folder_is_where_the_next_download_goes() {
+        // The wiring, not the validator: folder.rs has its own tests, and
+        // they would all pass with nothing reading the setting.
+        let (dir, engine) = engine();
+        occupy_the_slot(&engine).await;
+        set_sorting(&engine, false).await;
+
+        let chosen = dir.path().join("elsewhere");
+        let outcome = set_download_dir(&engine, &desktop(), &chosen.display().to_string()).await;
+        assert!(matches!(outcome, Response::Settings(_)), "{outcome:?}");
+
+        let request = DownloadRequest {
+            url: "https://example.invalid/setup.bin".into(),
+            size_hint: Some(10 << 20),
+            ..Default::default()
+        };
+        let Response::Accepted { id } = engine.enqueue(&desktop(), request).await else {
+            panic!("expected the job to be accepted");
+        };
+
+        let directory = output_dir_of(&engine, id).await;
+        assert_eq!(directory, chosen.display().to_string());
+        assert!(!directory.contains("downloads"), "went to the default instead: {directory}");
+    }
+
+    #[tokio::test]
+    async fn sorting_still_applies_inside_a_chosen_folder() {
+        // Two settings that have to compose: the category is a subfolder of
+        // whichever folder was chosen, not of the default.
+        let (dir, engine) = engine();
+        occupy_the_slot(&engine).await;
+        set_sorting(&engine, true).await;
+        let chosen = dir.path().join("elsewhere");
+        set_download_dir(&engine, &desktop(), &chosen.display().to_string()).await;
+
+        let request = DownloadRequest {
+            url: "https://example.invalid/holiday.mp4".into(),
+            size_hint: Some(10 << 20),
+            ..Default::default()
+        };
+        let Response::Accepted { id } = engine.enqueue(&desktop(), request).await else {
+            panic!("expected the job to be accepted");
+        };
+        let directory = output_dir_of(&engine, id).await;
+        assert_eq!(directory, chosen.join("Video").display().to_string());
+    }
+
+    #[tokio::test]
+    async fn a_download_already_queued_keeps_the_folder_it_was_given() {
+        // Its part file and journal are already there; changing the setting
+        // must not strand them.
+        let (dir, engine) = engine();
+        occupy_the_slot(&engine).await;
+        set_sorting(&engine, false).await;
+
+        let request = DownloadRequest {
+            url: "https://example.invalid/first.bin".into(),
+            size_hint: Some(10 << 20),
+            ..Default::default()
+        };
+        let Response::Accepted { id } = engine.enqueue(&desktop(), request).await else {
+            panic!("expected the job to be accepted");
+        };
+        let before = output_dir_of(&engine, id).await;
+
+        set_download_dir(&engine, &desktop(), &dir.path().join("later").display().to_string())
+            .await;
+        assert_eq!(output_dir_of(&engine, id).await, before);
+    }
+
+    #[tokio::test]
+    async fn the_browser_cannot_choose_where_downloads_go() {
+        // The reason this setting is guarded at all: a page that could pick
+        // the folder could pick the Startup folder.
+        let (dir, engine) = engine();
+        let outcome =
+            set_download_dir(&engine, &browser(), &dir.path().join("x").display().to_string())
+                .await;
+        assert!(matches!(outcome, Response::Rejected { .. }), "{outcome:?}");
+        assert!(!dir.path().join("x").exists(), "refused, but the folder was created anyway");
+    }
+
+    #[tokio::test]
+    async fn an_unusable_folder_is_refused_and_not_stored() {
+        let (_dir, engine) = engine();
+        let outcome = set_download_dir(&engine, &desktop(), r"not\a\full\path").await;
+        let Response::Rejected { reason } = outcome else { panic!("expected a refusal") };
+        assert!(reason.contains("full path"), "{reason}");
+
+        // And the stored value is untouched, so one bad entry does not
+        // quietly redirect later downloads.
+        let Response::Settings(current) = engine.handle(&desktop(), Request::GetSettings).await
+        else {
+            panic!("expected settings");
+        };
+        assert_eq!(current.download_dir, "");
+    }
+
+    #[tokio::test]
+    async fn a_folder_that_has_gone_away_is_a_refusal_not_a_silent_fallback() {
+        // A drive unplugged since the folder was chosen. Files appearing
+        // somewhere other than where the person was told would be worse.
+        let (dir, engine) = engine();
+        let chosen = dir.path().join("usb");
+        set_download_dir(&engine, &desktop(), &chosen.display().to_string()).await;
+
+        // Replace the folder with a file, so it can neither be used nor
+        // recreated, on any platform.
+        std::fs::remove_dir_all(&chosen).unwrap();
+        std::fs::write(&chosen, b"gone").unwrap();
+
+        let request = DownloadRequest {
+            url: "https://example.invalid/a.bin".into(),
+            size_hint: Some(10 << 20),
+            ..Default::default()
+        };
+        let outcome = engine.enqueue(&desktop(), request).await;
+        let Response::Rejected { reason } = outcome else { panic!("expected a refusal") };
+        assert!(reason.contains("not available"), "{reason}");
+    }
+
+    #[tokio::test]
+    async fn an_old_settings_file_without_the_field_still_loads() {
+        // The bug this struct-level default exists for: a file written before
+        // a field existed must not be thrown away on every start.
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("settings.json");
+        std::fs::write(&file, r#"{"browser_integration":false,"max_concurrent_downloads":3}"#)
+            .unwrap();
+        let engine = Engine::with_settings_file(dir.path().join("downloads"), 8, file);
+
+        let Response::Settings(loaded) = engine.handle(&desktop(), Request::GetSettings).await
+        else {
+            panic!("expected settings");
+        };
+        assert!(!loaded.browser_integration, "an old choice was discarded");
+        assert_eq!(loaded.max_concurrent_downloads, 3);
+        assert_eq!(loaded.download_dir, "");
     }
 
     #[tokio::test]

@@ -497,3 +497,10 @@ code {
   overflow-wrap: anywhere;
   user-select: text;
 }
+
+/* A folder path is long and one the person may want to read in full, so it
+   wraps and stays selectable instead of being clipped with an ellipsis. */
+.path-small {
+  overflow-wrap: anywhere;
+  user-select: text;
+}
