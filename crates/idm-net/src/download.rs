@@ -220,6 +220,15 @@ pub struct Target {
     pub etag: Option<String>,
     pub filename: String,
     pub facts: OwnedFacts,
+    /// Round trip to this host, estimated from the probe.
+    ///
+    /// The connection controller refuses to probe faster than four round
+    /// trips, because a window shorter than that measures noise rather than
+    /// throughput. That guard was being fed a hardcoded 20 ms, which made it
+    /// inert: every host, satellite link or loopback, got the same floor.
+    /// This is the only round-trip measurement taken anywhere on the path,
+    /// so it is the one the guard gets.
+    pub probe_rtt: Duration,
 }
 
 /// Resolves and probes the URL with a single ranged GET.
@@ -239,7 +248,14 @@ pub async fn probe(config: &DownloadConfig) -> Result<Target, DownloadError> {
         request = request.header(reqwest::header::COOKIE, cookies);
     }
 
+    // Headers back means DNS, the TCP handshake and one request/response
+    // exchange have all completed: roughly two round trips for plain HTTP,
+    // and the handshake is what makes it two rather than one. Halving it is
+    // crude, but an order of magnitude is all the guard needs, and it is
+    // the difference between protecting a 600 ms link and not.
+    let sent_at = Instant::now();
     let response = request.send().await.map_err(DownloadError::Request)?;
+    let probe_rtt = sent_at.elapsed() / 2;
     let facts = OwnedFacts::from_response(&response);
     let outcome = classify(requested, &facts.as_facts());
 
@@ -259,6 +275,7 @@ pub async fn probe(config: &DownloadConfig) -> Result<Target, DownloadError> {
             etag: facts.etag.clone(),
             filename,
             facts,
+            probe_rtt,
         }),
         ProbeOutcome::SingleStreamFromZero { .. } => Err(DownloadError::NoRangeSupport),
         ProbeOutcome::SingleStreamUnknownLength | ProbeOutcome::NeedsSuffixProbe { .. } => {
@@ -686,9 +703,19 @@ pub async fn download_with_progress<F: FnMut(Progress)>(
         // The ramp runs on its own clock, measured from the writer's live
         // issued-byte counter rather than the journal, which only advances at
         // checkpoints and is far too coarse to steer by.
-        if config.fixed_connections.is_none()
-            && last_conn_tick.elapsed() >= config.conn_tick_interval
-        {
+        // `tuning_applies`, not just "no pinned count": a file small enough
+        // to be forced down a single connection must not then be ramped back
+        // up by the controller.
+        //
+        // It was. ConnController::new starts at policy.start regardless of
+        // what the caller worked out, so a 2 MiB file opened one connection,
+        // and 150 ms later the controller raised the target to the cap and
+        // the file was fetched sixteen ways in 128 KiB pieces -- measurably
+        // slower than the one connection it had decided on, which is the
+        // whole reason force_single_connection exists. The variable saying
+        // this download is not a tuning candidate was already here and only
+        // the profile lookup consulted it.
+        if tuning_applies && last_conn_tick.elapsed() >= config.conn_tick_interval {
             let now_ms = started.elapsed().as_millis() as u64;
             // Claim cursors advance as the network delivers, every 1 MiB or
             // 50 ms. The writer's issued-byte counter instead jumps in 4 MiB
@@ -709,7 +736,7 @@ pub async fn download_with_progress<F: FnMut(Progress)>(
                 throttled: false,
                 writer_backpressure: budget.available_bytes() == 0,
                 interarrival_p95_ratio: 1.0,
-                rtt: Duration::from_millis(20),
+                rtt: target.probe_rtt,
             };
             let decision = controller.observe(now_ms, &observation, 0);
             match decision {

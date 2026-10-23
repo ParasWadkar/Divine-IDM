@@ -110,7 +110,20 @@ pub struct ConnPolicy {
 impl Default for ConnPolicy {
     fn default() -> Self {
         Self {
-            start: 4,
+            // Eight, not four, because four costs a doubling and buys no
+            // politeness anyone else practises. A browser opens six
+            // concurrent connections per host without asking, and
+            // commercial IDM ships with eight segments as its factory
+            // default -- so eight is what the servers we talk to already
+            // expect from an ordinary client, and the thing this is
+            // measured against opens exactly that many.
+            //
+            // It is an opening bid, not a floor: a throttle still cuts it
+            // to 70%, the learned ceiling still caps it, and a file too
+            // small to be worth splitting still goes down a single
+            // connection. What it removes is one 150 ms climb step from
+            // every first download of a host, which was pure latency.
+            start: 8,
             step: 2,
             max_step_frac: 0.5,
             per_host_max: 16,
@@ -121,7 +134,14 @@ impl Default for ConnPolicy {
             low_variance_frac: 0.10,
             queueing_p95_multiple: 3.0,
             probe_interval: Duration::from_millis(1500),
-            fast_probe_interval: Duration::from_millis(250),
+            // Low, because `fast_probe_interval_ms` raises it to four round
+            // trips and that is now a measured number rather than a
+            // hardcoded 20 ms. On a nearby host this lets the opening climb
+            // finish in a few hundred milliseconds instead of a second; on a
+            // slow link the four-round-trip floor takes over and this value
+            // never applies. The whole cold-start cost was two windows at
+            // the old 250 ms, paid once per host on every first download.
+            fast_probe_interval: Duration::from_millis(120),
             fast_ramp_frac: 1.0,
             fast_ramp_steps: 4,
             throttle_backoff_frac: 0.7,
@@ -489,9 +509,14 @@ mod tests {
     #[test]
     fn it_starts_low_and_ramps_while_additions_pay() {
         let policy = ConnPolicy::default();
+        let (start, cap) = (policy.start, policy.per_host_max);
         let mut clock = 10_000;
         let mut controller = ConnController::new(policy, clock);
-        assert_eq!(controller.connections(), 4, "should start conservatively");
+        // The policy's opening count, whatever it has been tuned to. Pinning
+        // the literal here meant that raising it failed four tests that were
+        // not about the number at all.
+        assert_eq!(controller.connections(), start, "should open at the policy's count");
+        assert!(start < cap, "the opening count has to leave room to ramp");
 
         // Each addition roughly doubles throughput: a per-connection-shaped
         // origin, where more connections genuinely help.
@@ -507,8 +532,8 @@ mod tests {
             }
             rate *= 1.8;
         }
-        assert!(controller.connections() > 4, "should have ramped up, stayed at {counts:?}");
-        assert!(controller.connections() <= 16, "must respect the per-host cap");
+        assert!(controller.connections() > start, "should have ramped up, stayed at {counts:?}");
+        assert!(controller.connections() <= cap, "must respect the per-host cap");
     }
 
     #[test]
@@ -593,8 +618,11 @@ mod tests {
         let mut clock = 0;
         let mut controller = ConnController::new(policy, clock);
 
-        // Establish a baseline, then stop improving.
-        step(&mut controller, &mut clock, &Observation::healthy(100.0 * MBPS, 4));
+        // Establish a baseline, then stop improving. The observation has to
+        // describe the count the controller actually holds, or the
+        // per-connection arithmetic is fed a number it never had.
+        let opening = controller.connections();
+        step(&mut controller, &mut clock, &Observation::healthy(100.0 * MBPS, opening));
         let settled = loop {
             let mut observation = Observation::healthy(100.0 * MBPS, controller.connections());
             // Keep the spread high so this reads as diminishing returns rather
@@ -796,8 +824,9 @@ mod tests {
         };
         // Same host, different network: what was learned on a fibre link says
         // nothing about a tethered phone.
+        let start = policy.start;
         let controller = ConnController::from_profile(policy, &profile, now, now, 0x9999);
-        assert_eq!(controller.connections(), 4, "should ignore a foreign profile");
+        assert_eq!(controller.connections(), start, "should ignore a foreign profile");
     }
 
     #[test]
@@ -813,8 +842,9 @@ mod tests {
             updated_at_ms: now - PROFILE_MAX_AGE_MS - 1,
         };
         assert!(!profile.is_usable(now, FINGERPRINT));
+        let start = policy.start;
         let controller = ConnController::from_profile(policy, &profile, now, now, FINGERPRINT);
-        assert_eq!(controller.connections(), 4);
+        assert_eq!(controller.connections(), start);
     }
 
     #[test]
