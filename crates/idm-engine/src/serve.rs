@@ -290,6 +290,14 @@ impl Engine {
             Err(reason) => return Response::Rejected { reason },
         };
 
+        // A name the URL cannot supply is asked of the server before anything
+        // is decided. See `name_from_server`.
+        let filename = if request.filename.is_none() && !has_extension(&filename) {
+            name_from_server(&request).await.unwrap_or(filename)
+        } else {
+            filename
+        };
+
         let id = JobId(self.inner.next_id.fetch_add(1, Ordering::SeqCst));
 
         // Decided before the download starts, because the destination has
@@ -556,6 +564,47 @@ impl Engine {
             None => Response::Rejected { reason: format!("no such job: {id}") },
         }
     }
+}
+
+/// Whether a name ends in something that looks like a file extension.
+fn has_extension(name: &str) -> bool {
+    name.rsplit_once('.').is_some_and(|(stem, ext)| {
+        !stem.is_empty()
+            && !ext.is_empty()
+            && ext.len() <= 8
+            && ext.bytes().all(|b| b.is_ascii_alphanumeric())
+    })
+}
+
+/// Asks the server what a download is called, when the URL cannot say.
+///
+/// The destination -- folder and filename -- has to be settled before the
+/// first byte is written, so it is decided before the download starts, from
+/// the URL. That is fine until the URL's last segment is not a name. A CDN
+/// that redirects to a signed object ends in a GUID, and a browser hands over
+/// the *redirected* address: `c6451f46-4a95-....`, no extension. The file was
+/// then saved under that, outside the folder its type belongs in, while the
+/// server had said plainly in Content-Disposition that it was a `.zip`.
+///
+/// So only when the URL gives no usable name, one ranged request is made and
+/// its Content-Disposition read. A URL that already ends in `setup.exe` costs
+/// nothing and is trusted as before. Any failure -- a slow server, a refusal,
+/// no header -- falls back to the URL's own guess, so this can make a name
+/// better and cannot make a download fail.
+async fn name_from_server(request: &DownloadRequest) -> Option<String> {
+    let mut config = idm_net::download::DownloadConfig::new(request.url.clone(), PathBuf::new());
+    config.referrer = request.referrer.clone();
+    config.cookies = request.cookies.clone();
+
+    // Bounded: an unresponsive server must not hold up accepting the job.
+    let target =
+        tokio::time::timeout(std::time::Duration::from_secs(8), idm_net::download::probe(&config))
+            .await
+            .ok()?
+            .ok()?;
+    // The probe falls back to the URL's name and then to download.bin; only a
+    // name with an extension is better than what we already had.
+    has_extension(&target.filename).then_some(target.filename)
 }
 
 /// Gives up the destination a finished job was holding.

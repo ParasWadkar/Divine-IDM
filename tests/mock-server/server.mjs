@@ -294,6 +294,17 @@ const routes = {
     handler: (req, res, url) => serveHonestly(req, res, sizeFromQuery(url)),
   },
 
+  "/named": {
+    description:
+      "Honest, but the URL's last segment is opaque and the real name is only in " +
+      "Content-Disposition, as on a CDN that redirects to a signed GUID-named object. " +
+      "`?name=` sets it.",
+    handler: (req, res, url) =>
+      serveHonestly(req, res, sizeFromQuery(url), {
+        "Content-Disposition": `attachment; filename=${url.searchParams.get("name") ?? "named.bin"}`,
+      }),
+  },
+
   "/no-accept-ranges": {
     description: "Declares `Accept-Ranges: none` and only ever serves 200. Not resumable.",
     handler: (req, res, url) => {

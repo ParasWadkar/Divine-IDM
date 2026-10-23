@@ -7,8 +7,12 @@
 # registration made from there reports success and does nothing: Chrome says
 # "Specified native messaging host not found" about a key it cannot see.
 #
+# Add -Rebuild to rebuild the app first (it stops the running copy anyway).
+#
 # Anyone installing Divine IDM normally is not affected. This only matters while
 # developing it from inside Claude.
+
+param([switch]$Rebuild)
 
 $ErrorActionPreference = 'Stop'
 $repo  = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -23,6 +27,15 @@ if ($env:LOCALAPPDATA -like '*\Packages\*') { throw 'This looks like it is runni
 Write-Host '1. Stopping any copy started from inside Claude'
 Get-Process divine-idm -ErrorAction SilentlyContinue | Stop-Process -Force
 Start-Sleep 2
+
+if ($Rebuild) {
+  # The running app locks its own exe, so a rebuild has to come after it is
+  # stopped and before it is started again.
+  Write-Host '   Rebuilding the app and the command line'
+  Push-Location $repo
+  try { cargo build --release -p idm-app -p idm-cli; if ($LASTEXITCODE -ne 0) { throw 'cargo build failed' } }
+  finally { Pop-Location }
+}
 
 Write-Host '2. Bringing your settings, pairings and history over'
 New-Item -ItemType Directory -Force $real | Out-Null

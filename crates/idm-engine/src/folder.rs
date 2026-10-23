@@ -50,7 +50,8 @@ pub fn vet_download_dir(raw: &str) -> Result<String, String> {
 
     // Created if missing: choosing `D:\Downloads` before it exists is
     // ordinary, and refusing would send the person to Explorer and back.
-    std::fs::create_dir_all(path).map_err(|error| format!("could not create the folder: {error}"))?;
+    std::fs::create_dir_all(path)
+        .map_err(|error| format!("could not create the folder: {error}"))?;
 
     // The only reliable test of "can I write here" is writing. Metadata
     // reports a read-only flag that Windows ignores for directories, and
