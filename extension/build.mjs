@@ -101,10 +101,28 @@ for (const target of TARGETS) {
   }
 
   const out = join(HERE, "dist", target);
-  rmSync(out, { recursive: true, force: true });
+  // Updated in place, never deleted and recreated.
+  //
+  // Chrome loads this directory as an unpacked extension and keeps using
+  // that path. Removing it mid-session pulls the folder out from under a
+  // running browser: the extension stays listed and enabled, its service
+  // worker registration survives, and it quietly stops working until
+  // someone presses Reload -- with nothing in the app, the engine or the
+  // extension saying why, because the extension is no longer running to
+  // say anything. Rebuilding twice during an installer build is enough to
+  // do it.
+  //
+  // So the directory keeps its identity and only its contents change.
+  // Files the build no longer produces are removed individually, which is
+  // what the wholesale delete was for.
   mkdirSync(out, { recursive: true });
+  const written = new Set(["manifest.json"]);
   for (const file of readdirSync(join(HERE, "shared"))) {
     cpSync(join(HERE, "shared", file), join(out, file));
+    written.add(file);
+  }
+  for (const stale of readdirSync(out)) {
+    if (!written.has(stale)) rmSync(join(out, stale), { recursive: true, force: true });
   }
   if (target === "chromium") {
     // Pinning the public key fixes the extension ID. Without it Chromium
