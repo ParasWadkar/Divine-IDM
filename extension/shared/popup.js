@@ -13,8 +13,25 @@ function render({ state = {}, settings = {} }) {
   const box = $("status");
   if (state.unavailable) {
     box.className = "status bad";
-    // The common case by far: the app simply is not running.
-    box.textContent = "Divine IDM is not running. Start it, then reopen this.";
+    // Usually the app simply is not running, so that stays the headline.
+    // But the browser's own reason is shown underneath, because when the
+    // app IS running this message is actively wrong and sends people to
+    // check the one thing that is already fine.
+    //
+    // It cost hours once: the app was running the whole time, the engine,
+    // host, registry entry and manifest all checked out by hand, and this
+    // line still said "not running". The real reason -- the string Chrome
+    // puts in runtime.lastError, such as "Specified native messaging host
+    // not found" -- was known to the extension and shown to nobody.
+    box.textContent = "Divine IDM is not reachable.";
+    if (state.reason) {
+      const detail = document.createElement("div");
+      detail.className = "detail";
+      // textContent: this string comes from the browser, and the popup must
+      // not become a place where it can write markup.
+      detail.textContent = state.reason;
+      box.append(detail);
+    }
     $("pair").hidden = true;
   } else if (state.integrationEnabled === false) {
     box.className = "status warn";
