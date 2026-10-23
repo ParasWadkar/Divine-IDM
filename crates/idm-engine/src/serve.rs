@@ -32,12 +32,27 @@ struct JobRecord {
     abort: Option<tokio::task::AbortHandle>,
     /// The destination this job holds, released when it finishes.
     claimed: Option<PathBuf>,
-    /// Set while the job waits for a slot, taken when it starts.
+    /// Everything needed to start this download, kept for the job's whole
+    /// life rather than handed away when it starts.
+    ///
+    /// It used to be taken by the runner, which quietly made pausing
+    /// one-way: the Cancel button set the state to Paused and kept the
+    /// bytes, but Resume then refused with "that download cannot be
+    /// resumed" because the config it needed had been moved out. Keeping it
+    /// is what makes pause, reconnect and refresh-link all possible.
     ///
     /// Held in memory rather than rebuilt from the stored row because it
     /// carries the cookies the browser handed over, which are deliberately
     /// never written to the database and so could not be recovered from it.
-    pending: Option<Box<DownloadConfig>>,
+    config: Box<DownloadConfig>,
+    /// True while the job is queued and has not yet been handed a slot.
+    waiting: bool,
+    /// Consecutive failures that looked like the network rather than the
+    /// file. Drives how long to wait before trying again, and is cleared the
+    /// moment anything succeeds.
+    attempts: u32,
+    /// When bytes last reached the disk, for the stall watchdog.
+    last_progress: std::time::Instant,
 }
 
 /// Shared engine state.
@@ -111,7 +126,7 @@ impl Engine {
         store: Option<Arc<idm_store::Store>>,
     ) -> Arc<Self> {
         let starting_limit = load_settings(&settings_file).speed_limit_bytes_per_sec;
-        Arc::new(Self {
+        let engine = Arc::new(Self {
             inner: Arc::new(Inner {
                 output_dir,
                 max_connections,
@@ -128,7 +143,9 @@ impl Engine {
                 claimed: Mutex::new(std::collections::HashSet::new()),
                 armed: Mutex::new(None),
             }),
-        })
+        });
+        start_stall_watchdog(Arc::clone(&engine.inner));
+        engine
     }
 
     /// Decides whether to accept a request, and under what filename.
@@ -298,6 +315,15 @@ impl Engine {
             filename
         };
 
+        // Asking for something already here continues it rather than
+        // starting a second copy beside it. Without this, downloading the
+        // same file again -- the obvious thing to do when one stopped --
+        // produced "file (1)" next to a half-finished "file", and the work
+        // already done was abandoned rather than used.
+        if let Some(existing) = self.unfinished_job_for(&request.url).await {
+            return self.resume_or_report(existing).await;
+        }
+
         let id = JobId(self.inner.next_id.fetch_add(1, Ordering::SeqCst));
 
         // Decided before the download starts, because the destination has
@@ -380,6 +406,7 @@ impl Engine {
             bytes_per_sec: 0.0,
             connections: 0,
             error: None,
+            retry_in_secs: None,
         };
 
         self.inner.jobs.lock().await.insert(
@@ -388,7 +415,10 @@ impl Engine {
                 status,
                 abort: None,
                 claimed: Some(claimed_path),
-                pending: Some(Box::new(config)),
+                config: Box::new(config),
+                waiting: true,
+                attempts: 0,
+                last_progress: std::time::Instant::now(),
             },
         );
         pump(Arc::clone(&self.inner)).await;
@@ -407,15 +437,14 @@ impl Engine {
             .await
             .values()
             .filter(|job| {
-                job.pending.is_none()
-                    && matches!(job.status.state, JobState::Queued | JobState::Running)
+                !job.waiting && matches!(job.status.state, JobState::Queued | JobState::Running)
             })
             .count()
     }
 
     #[cfg(test)]
     async fn waiting(&self) -> usize {
-        self.inner.jobs.lock().await.values().filter(|job| job.pending.is_some()).count()
+        self.inner.jobs.lock().await.values().filter(|job| job.waiting).count()
     }
 
     /// Starts a paused download again.
@@ -424,21 +453,29 @@ impl Engine {
             let mut jobs = self.inner.jobs.lock().await;
             match jobs.get_mut(&id) {
                 None => return Response::Rejected { reason: "no such download".into() },
-                Some(job) if job.pending.is_none() => {
+                Some(job)
+                    if matches!(
+                        job.status.state,
+                        JobState::Running | JobState::Queued | JobState::Completed
+                    ) =>
+                {
                     return Response::Rejected {
                         reason: match job.status.state {
-                            JobState::Running | JobState::Queued => {
-                                "that download is already going"
-                            }
                             JobState::Completed => "that download has already finished",
-                            _ => "that download cannot be resumed; start it again",
+                            _ => "that download is already going",
                         }
                         .into(),
                     };
                 }
                 Some(job) => {
+                    // Asking for it by hand clears the backoff: the user
+                    // plainly believes the connection is back, and making
+                    // them wait out a timer they cannot see would be rude.
+                    job.attempts = 0;
+                    job.status.retry_in_secs = None;
                     job.status.state = JobState::Queued;
                     job.status.error = None;
+                    job.waiting = true;
                     true
                 }
             }
@@ -511,6 +548,7 @@ impl Engine {
                 error: blocked.then(|| {
                     "this download was authorised by your browser; start it there again".to_owned()
                 }),
+                retry_in_secs: None,
             };
 
             // The destination it was already using, so a new download
@@ -527,7 +565,10 @@ impl Engine {
                     status,
                     abort: None,
                     claimed: Some(PathBuf::from(&row.output_dir).join(&row.filename)),
-                    pending: Some(Box::new(config)),
+                    config: Box::new(config),
+                    waiting: true,
+                    attempts: 0,
+                    last_progress: std::time::Instant::now(),
                 },
             );
             restored += 1;
@@ -549,21 +590,335 @@ impl Engine {
         Response::Status { jobs: listed }
     }
 
-    async fn cancel(&self, id: JobId) -> Response {
-        let mut jobs = self.inner.jobs.lock().await;
-        match jobs.get_mut(&id) {
-            Some(record) => {
-                if let Some(abort) = record.abort.take() {
-                    abort.abort();
-                }
-                // Paused, not Failed: the part file and journal survive, so
-                // the same URL resumes rather than starting over.
-                record.status.state = JobState::Paused;
-                Response::Accepted { id }
-            }
-            None => Response::Rejected { reason: format!("no such job: {id}") },
+    /// An unfinished job already fetching this address, if there is one.
+    ///
+    /// Matched on the address asked for, not the one redirects landed on: a
+    /// signed CDN link is different every time, so comparing those would
+    /// never match. A finished download is not a match -- asking again for
+    /// something already on disk is a request for another copy, not a
+    /// resume.
+    async fn unfinished_job_for(&self, url: &str) -> Option<JobId> {
+        self.inner
+            .jobs
+            .lock()
+            .await
+            .iter()
+            .filter(|(_, job)| job.status.state != JobState::Completed)
+            .filter(|(_, job)| job.config.url == url || job.status.url == url)
+            .map(|(id, _)| *id)
+            .max_by_key(|id| id.0)
+    }
+
+    /// Continues an existing job, or reports it if it needs no help.
+    ///
+    /// Either way the answer is the same id, so a caller that asked twice is
+    /// pointed at the one download rather than told off.
+    async fn resume_or_report(&self, id: JobId) -> Response {
+        let already_going = {
+            let jobs = self.inner.jobs.lock().await;
+            jobs.get(&id)
+                .is_some_and(|job| matches!(job.status.state, JobState::Running | JobState::Queued))
+        };
+        if already_going {
+            return Response::Accepted { id };
+        }
+        match self.resume(id).await {
+            // A refusal here means it did not need resuming after all.
+            Response::Rejected { .. } => Response::Accepted { id },
+            other => other,
         }
     }
+
+    /// Stops a download and keeps everything it has.
+    ///
+    /// The difference from [`cancel`](Self::cancel) is what happens to the
+    /// bytes: pausing keeps the part file and the journal, so resuming
+    /// carries on from where it stopped rather than starting again.
+    async fn pause(&self, id: JobId) -> Response {
+        let outcome = {
+            let mut jobs = self.inner.jobs.lock().await;
+            match jobs.get_mut(&id) {
+                None => return Response::Rejected { reason: format!("no such job: {id}") },
+                Some(job) if job.status.state == JobState::Completed => {
+                    return Response::Rejected { reason: "that download has finished".into() };
+                }
+                Some(job) => {
+                    if let Some(abort) = job.abort.take() {
+                        abort.abort();
+                    }
+                    job.status.state = JobState::Paused;
+                    job.status.bytes_per_sec = 0.0;
+                    job.status.connections = 0;
+                    job.status.retry_in_secs = None;
+                    job.status.error = None;
+                    // Stopped by hand, so it is not waiting for a slot; it
+                    // waits for the user instead.
+                    job.waiting = false;
+                    job.attempts = 0;
+                    Response::Accepted { id }
+                }
+            }
+        };
+        write_state(&self.inner, id, JobState::Paused, None).await;
+        // A slot has just come free.
+        pump(Arc::clone(&self.inner)).await;
+        outcome
+    }
+
+    /// Points a download at a new address, keeping the bytes it already has.
+    ///
+    /// The case this exists for is an expired link. A signed CDN URL stops
+    /// working after a few hours, so a download paused overnight cannot be
+    /// resumed from the address it was started with -- but the bytes on disk
+    /// are still perfectly good, and the engine checks on resume that the new
+    /// address serves the same file before appending to them.
+    async fn refresh_url(&self, id: JobId, url: String) -> Response {
+        // Vetted exactly as a new download would be. A refreshed address is
+        // no more trustworthy than the first one.
+        let probe = DownloadRequest { url: url.clone(), ..Default::default() };
+        if let Err(reason) = probe.validate_with(true) {
+            return Response::Rejected { reason };
+        }
+
+        {
+            let mut jobs = self.inner.jobs.lock().await;
+            match jobs.get_mut(&id) {
+                None => return Response::Rejected { reason: format!("no such job: {id}") },
+                Some(job) if job.status.state == JobState::Completed => {
+                    return Response::Rejected { reason: "that download has finished".into() };
+                }
+                Some(job) => {
+                    if let Some(abort) = job.abort.take() {
+                        abort.abort();
+                    }
+                    job.config.url = url.clone();
+                    job.status.url = url;
+                    job.status.state = JobState::Queued;
+                    job.status.error = None;
+                    job.status.retry_in_secs = None;
+                    job.waiting = true;
+                    job.attempts = 0;
+                }
+            }
+        }
+
+        write_state(&self.inner, id, JobState::Queued, None).await;
+        pump(Arc::clone(&self.inner)).await;
+        Response::Accepted { id }
+    }
+
+    /// Stops a download and throws away what it had.
+    ///
+    /// Only the working files go: the part file and its journal, both named
+    /// after the destination and written by us. A finished file is never
+    /// touched, because cancelling something already on disk would be
+    /// deleting the user's download rather than abandoning a transfer.
+    async fn cancel(&self, id: JobId) -> Response {
+        let claimed = {
+            let mut jobs = self.inner.jobs.lock().await;
+            match jobs.get_mut(&id) {
+                None => return Response::Rejected { reason: format!("no such job: {id}") },
+                Some(record) => {
+                    if let Some(abort) = record.abort.take() {
+                        abort.abort();
+                    }
+                    record.status.state = JobState::Failed;
+                    record.status.error = Some("cancelled".into());
+                    record.waiting = false;
+                    record.claimed.clone()
+                }
+            }
+        };
+
+        // After the abort, so the writer is not still holding them.
+        if let Some(path) = claimed {
+            for suffix in ["idmpart", "idmjrn"] {
+                let mut working = path.clone().into_os_string();
+                working.push(".");
+                working.push(suffix);
+                let _ = std::fs::remove_file(PathBuf::from(working));
+            }
+        }
+
+        write_state(&self.inner, id, JobState::Failed, Some("cancelled")).await;
+        release_claim(&self.inner, id).await;
+        pump(Arc::clone(&self.inner)).await;
+        Response::Accepted { id }
+    }
+}
+
+/// How long a running download may move no bytes before it is treated as
+/// disconnected.
+///
+/// Generous, because durable progress advances at checkpoints rather than
+/// continuously, and a genuinely slow link can go a while between them. Short
+/// enough that a user watching a dead download is told within half a minute
+/// instead of staring at "running" at 0 B/s indefinitely.
+const STALL_AFTER: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Watches running downloads for ones that have quietly stopped moving.
+///
+/// Killing the server mid-download does not raise an error in the scheduler:
+/// claims are still available, workers take them, fail against a closed port
+/// in milliseconds, release them and go round again. The loop is never idle,
+/// so the stall detector inside the download never fires, and the job sits in
+/// `Running` at 0 B/s for as long as the outage lasts. Correct, in that it
+/// recovers the moment the server returns -- but it tells the user nothing
+/// and retries without pause.
+///
+/// So progress is watched from out here, where "no bytes for a while" is
+/// visible, and a download that has stopped moving is pushed down the same
+/// path as an outright failure: stop, say so, wait, try again.
+fn start_stall_watchdog(inner: Arc<Inner>) {
+    // An engine can be built outside a runtime -- the synchronous tests do
+    // exactly that to check how a request is vetted, which needs no tasks at
+    // all. Spawning unconditionally panics there, so a missing runtime is
+    // treated as "nothing to watch" rather than an error.
+    if tokio::runtime::Handle::try_current().is_err() {
+        return;
+    }
+
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(5));
+        loop {
+            tick.tick().await;
+
+            let stalled: Vec<JobId> = {
+                let jobs = inner.jobs.lock().await;
+                jobs.iter()
+                    .filter(|(_, job)| job.status.state == JobState::Running)
+                    // Bytes reaching the disk, and nothing else. The reported
+                    // rate is a decaying average, so a download that stopped
+                    // dead still shows tens of KB/s a minute later -- which
+                    // is both why this cannot test the rate, and why the
+                    // window shows a speed for a download that is not moving
+                    // until the retry zeroes it.
+                    .filter(|(_, job)| job.last_progress.elapsed() >= STALL_AFTER)
+                    .map(|(id, _)| *id)
+                    .collect()
+            };
+
+            for id in stalled {
+                // Stop the spinning task before anything else; it is the
+                // thing that would otherwise keep re-dialling a dead host.
+                if let Some(job) = inner.jobs.lock().await.get_mut(&id)
+                    && let Some(abort) = job.abort.take()
+                {
+                    abort.abort();
+                }
+                schedule_retry(&inner, id, "the connection went away".to_owned()).await;
+            }
+        }
+    });
+}
+
+/// Puts a download into `Reconnecting` and arranges for it to try again.
+///
+/// This is what makes the network going out a pause rather than a failure.
+/// The bytes and the journal are untouched, so when the attempt comes round
+/// the download carries on from where it stopped; nothing is re-fetched
+/// beyond whatever had not reached the disk.
+///
+/// The waiting is a task per job rather than one timer over all of them,
+/// because there are only ever a handful of downloads and a sleeping task
+/// costs nothing. It checks the state again on waking: the user may have
+/// paused or cancelled in the meantime, and neither should be overridden by
+/// a timer that was already running.
+async fn schedule_retry(inner: &Arc<Inner>, id: JobId, message: String) {
+    let delay = {
+        let mut jobs = inner.jobs.lock().await;
+        let Some(job) = jobs.get_mut(&id) else { return };
+        job.attempts = job.attempts.saturating_add(1);
+        // Reset so the watchdog does not fire again the instant this one
+        // starts running, before any bytes have had a chance to arrive.
+        job.last_progress = std::time::Instant::now();
+        let delay = retry_delay(job.attempts);
+        job.status.state = JobState::Reconnecting;
+        job.status.bytes_per_sec = 0.0;
+        job.status.connections = 0;
+        job.status.retry_in_secs = Some(delay.as_secs());
+        job.status.error = Some(message.clone());
+        job.waiting = false;
+        job.abort = None;
+        delay
+    };
+
+    write_state(inner, id, JobState::Reconnecting, Some(&message)).await;
+    // A slot is free while this one waits, so anything queued behind it can
+    // get on rather than being held up by a connection that is not there.
+    pump(Arc::clone(inner)).await;
+
+    let inner = Arc::clone(inner);
+    tokio::spawn(async move {
+        let deadline = tokio::time::Instant::now() + delay;
+        // Ticks so the window can count down rather than showing a number
+        // that sits still for fifteen seconds.
+        loop {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            let mut jobs = inner.jobs.lock().await;
+            let Some(job) = jobs.get_mut(&id) else { return };
+            if job.status.state != JobState::Reconnecting {
+                // Paused, cancelled or resumed by hand while we waited.
+                return;
+            }
+            let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if left.is_zero() {
+                job.status.state = JobState::Queued;
+                job.status.retry_in_secs = None;
+                job.waiting = true;
+                break;
+            }
+            job.status.retry_in_secs = Some(left.as_secs().max(1));
+        }
+        pump(inner).await;
+    });
+}
+
+/// Why a download stopped, and whether waiting could fix it.
+///
+/// The run functions used to flatten every error to a string, which threw
+/// away the one thing the engine most needs to know: a 404 and a dropped
+/// Wi-Fi look identical once they are both `String`.
+struct RunFailure {
+    message: String,
+    /// True when the network went away rather than the download being
+    /// impossible. See [`idm_net::download::DownloadError::is_transient`].
+    transient: bool,
+}
+
+impl RunFailure {
+    /// For the transports whose errors are not `DownloadError`.
+    ///
+    /// FTP, SFTP and the stream fetcher each have their own error type, and
+    /// all three run over a network that can go away. Treating their failures
+    /// as worth another try is the same bet as for HTTP; a genuinely
+    /// impossible transfer fails again straight away and the attempt costs a
+    /// few seconds.
+    fn from_transport(error: impl std::fmt::Display) -> Self {
+        Self { message: error.to_string(), transient: true }
+    }
+}
+
+impl From<idm_net::download::DownloadError> for RunFailure {
+    fn from(error: idm_net::download::DownloadError) -> Self {
+        Self { transient: error.is_transient(), message: error.to_string() }
+    }
+}
+
+/// How long to wait before trying again, by consecutive failure.
+///
+/// Backs off so a server refusing everyone is not hammered, but stops at
+/// fifteen seconds: this is waiting for a connection to come back, and a
+/// laptop rejoining the Wi-Fi should not sit idle for minutes because the
+/// failures piled up while it was asleep.
+fn retry_delay(attempts: u32) -> std::time::Duration {
+    let secs = match attempts {
+        0 | 1 => 3,
+        2 => 6,
+        3 => 10,
+        _ => 15,
+    };
+    std::time::Duration::from_secs(secs)
 }
 
 /// Whether a name ends in something that looks like a file extension.
@@ -640,6 +995,13 @@ fn record_progress(inner: &Inner, id: JobId, progress: &Progress) {
     if let Ok(mut jobs) = inner.jobs.try_lock()
         && let Some(record) = jobs.get_mut(&id)
     {
+        // Bytes arriving means the connection is back, whatever the recent
+        // history. Without this a download that drops once an hour on a long
+        // transfer would creep up to the longest backoff and stay there.
+        if progress.durable > record.status.downloaded {
+            record.attempts = 0;
+            record.last_progress = std::time::Instant::now();
+        }
         record.status.downloaded = progress.durable;
         record.status.total = Some(progress.total);
         record.status.bytes_per_sec = progress.rate_bps;
@@ -656,13 +1018,12 @@ async fn run_file(
     inner: &Arc<Inner>,
     id: JobId,
     config: &DownloadConfig,
-) -> std::result::Result<Option<u64>, String> {
+) -> std::result::Result<Option<u64>, RunFailure> {
     let progress_inner = Arc::clone(inner);
     let report = download_with_progress(config, move |progress: Progress| {
         record_progress(&progress_inner, id, &progress);
     })
-    .await
-    .map_err(|error| error.to_string())?;
+    .await?;
 
     if report.resumed_bytes > 0 {
         // Worth saying out loud: it is the difference between picking a
@@ -697,7 +1058,7 @@ async fn run_ftp(
     inner: &Arc<Inner>,
     id: JobId,
     config: &DownloadConfig,
-) -> std::result::Result<Option<u64>, String> {
+) -> std::result::Result<Option<u64>, RunFailure> {
     let mut options = idm_net::ftp::FtpOptions::new(config.output_dir.clone());
     options.filename = config.filename.clone();
     options.limiter = config.fetch.limiter.clone();
@@ -707,7 +1068,7 @@ async fn run_ftp(
         record_transfer(&progress_inner, id, done, total);
     })
     .await
-    .map_err(|error| error.to_string())?;
+    .map_err(RunFailure::from_transport)?;
     Ok(Some(report.bytes))
 }
 
@@ -718,7 +1079,7 @@ async fn run_sftp(
     inner: &Arc<Inner>,
     id: JobId,
     config: &DownloadConfig,
-) -> std::result::Result<Option<u64>, String> {
+) -> std::result::Result<Option<u64>, RunFailure> {
     let mut options = idm_net::sftp::SftpOptions::new(config.output_dir.clone());
     options.filename = config.filename.clone();
     options.limiter = config.fetch.limiter.clone();
@@ -729,7 +1090,7 @@ async fn run_sftp(
         record_transfer(&progress_inner, id, done, total);
     })
     .await
-    .map_err(|error| error.to_string())?;
+    .map_err(RunFailure::from_transport)?;
     Ok(Some(report.bytes))
 }
 
@@ -743,7 +1104,7 @@ async fn run_stream(
     inner: &Arc<Inner>,
     id: JobId,
     config: &DownloadConfig,
-) -> std::result::Result<Option<u64>, String> {
+) -> std::result::Result<Option<u64>, RunFailure> {
     let mut options = idm_net::stream::StreamOptions::new(config.output_dir.clone());
     options.filename = config.filename.clone();
     options.referrer = config.referrer.clone();
@@ -765,7 +1126,7 @@ async fn run_stream(
         }
     })
     .await
-    .map_err(|error| error.to_string())?;
+    .map_err(RunFailure::from_transport)?;
 
     if let Some(note) = &report.note {
         eprintln!("note: {note}");
@@ -814,7 +1175,7 @@ async fn pump_inner(inner: Arc<Inner>) {
             let outstanding = jobs
                 .values()
                 .filter(|job| {
-                    job.pending.is_none()
+                    !job.waiting
                         && matches!(job.status.state, JobState::Queued | JobState::Running)
                 })
                 .count() as u32;
@@ -826,7 +1187,7 @@ async fn pump_inner(inner: Arc<Inner>) {
             // order they were asked for in.
             let mut waiting: Vec<JobId> = jobs
                 .iter()
-                .filter(|(_, job)| job.pending.is_some() && job.status.state == JobState::Queued)
+                .filter(|(_, job)| job.waiting && job.status.state == JobState::Queued)
                 .map(|(id, _)| *id)
                 .collect();
             waiting.sort_by_key(|id| id.0);
@@ -834,9 +1195,10 @@ async fn pump_inner(inner: Arc<Inner>) {
             match waiting.first().copied() {
                 // Taken under the same lock that chose it, so two pumps
                 // running at once cannot both start the same job.
-                Some(id) => {
-                    jobs.get_mut(&id).and_then(|job| job.pending.take()).map(|config| (id, config))
-                }
+                Some(id) => jobs.get_mut(&id).map(|job| {
+                    job.waiting = false;
+                    (id, job.config.clone())
+                }),
                 None => None,
             }
         };
@@ -877,10 +1239,14 @@ async fn start(inner: &Arc<Inner>, id: JobId, config: DownloadConfig) {
                 Ok(total) => {
                     finish(&inner, id, JobState::Completed, total, None).await;
                 }
-                Err(error) => {
+                Err(failure) => {
                     // The partial file and journal are deliberately left in
                     // place, so a retry resumes rather than restarts.
-                    finish(&inner, id, JobState::Failed, None, Some(error)).await;
+                    if failure.transient {
+                        schedule_retry(&inner, id, failure.message).await;
+                    } else {
+                        finish(&inner, id, JobState::Failed, None, Some(failure.message)).await;
+                    }
                 }
             }
             forget_row(&inner, id).await;
@@ -924,7 +1290,10 @@ async fn write_state(inner: &Inner, id: JobId, state: JobState, error: Option<&s
     let stored = match state {
         JobState::Queued => idm_store::JobState::Queued,
         JobState::Running => idm_store::JobState::Running,
-        JobState::Paused => idm_store::JobState::Paused,
+        // Stored as paused: to anything reading this later -- a restart, the
+        // history -- a download waiting for the network and one the user
+        // held are the same thing, bytes on disk and nothing running.
+        JobState::Paused | JobState::Reconnecting => idm_store::JobState::Paused,
         JobState::Completed => idm_store::JobState::Completed,
         JobState::Failed => idm_store::JobState::Failed,
     };
@@ -1209,6 +1578,8 @@ impl Handler for Engine {
             Request::Status { id } => self.status(id).await,
             Request::Cancel { id } => self.cancel(id).await,
             Request::Resume { id } => self.resume(id).await,
+            Request::Pause { id } => self.pause(id).await,
+            Request::RefreshUrl { id, url } => self.refresh_url(id, url).await,
             Request::RequestPairing { label } => self.request_pairing(client, label).await,
             Request::ListPairings => self.list_pairings(client).await,
             Request::ApprovePairing { request_id } => {
@@ -1308,12 +1679,7 @@ mod tests {
     async fn output_dir_of(engine: &Arc<Engine>, id: JobId) -> String {
         let jobs = engine.inner.jobs.lock().await;
         let job = jobs.get(&id).expect("the job should exist");
-        job.pending
-            .as_ref()
-            .expect("a queued job keeps its config")
-            .output_dir
-            .display()
-            .to_string()
+        job.config.output_dir.display().to_string()
     }
 
     fn browser() -> ClientInfo {
@@ -1596,8 +1962,11 @@ mod tests {
         let (_dir, engine) = engine();
         set_limit(&engine, 2).await;
 
-        for _ in 0..5 {
-            engine.enqueue(&desktop(), request("http://127.0.0.1:9/big.bin")).await;
+        // A distinct address each: asking for the same one twice now
+        // continues the first rather than starting a second, which is right
+        // for a user and wrong for counting slots.
+        for n in 0..5 {
+            engine.enqueue(&desktop(), request(&format!("http://127.0.0.1:9/big-{n}.bin"))).await;
         }
 
         assert_eq!(engine.outstanding().await, 2, "only two may hold a slot");
@@ -1609,8 +1978,8 @@ mod tests {
         let (_dir, engine) = engine();
         set_limit(&engine, 1).await;
 
-        for _ in 0..3 {
-            engine.enqueue(&desktop(), request("http://127.0.0.1:9/big.bin")).await;
+        for n in 0..3 {
+            engine.enqueue(&desktop(), request(&format!("http://127.0.0.1:9/big-{n}.bin"))).await;
         }
         assert_eq!(engine.outstanding().await, 1);
         assert_eq!(engine.waiting().await, 2);
@@ -1642,8 +2011,8 @@ mod tests {
         // than vanish until its turn comes.
         let (_dir, engine) = engine();
         set_limit(&engine, 1).await;
-        for _ in 0..3 {
-            engine.enqueue(&desktop(), request("http://127.0.0.1:9/big.bin")).await;
+        for n in 0..3 {
+            engine.enqueue(&desktop(), request(&format!("http://127.0.0.1:9/big-{n}.bin"))).await;
         }
 
         let Response::Status { jobs } = engine.status(None).await else {
@@ -2047,6 +2416,161 @@ mod tests {
         assert!(jobs.is_empty(), "a refused batch should queue nothing");
     }
 
+    /// Reads a job's state without going through the status listing.
+    async fn state_of(engine: &Arc<Engine>, id: JobId) -> JobState {
+        engine.inner.jobs.lock().await.get(&id).expect("the job should exist").status.state
+    }
+
+    #[tokio::test]
+    async fn a_paused_download_can_be_resumed() {
+        // The bug this guards: `pump` used to take the config out of the
+        // record when a job started, so pausing left nothing to start again
+        // and Resume answered "that download cannot be resumed". The button
+        // was there, the bytes were there, and the two could not be joined.
+        let (_dir, engine) = engine();
+        let Response::Accepted { id } =
+            engine.enqueue(&desktop(), request("http://127.0.0.1:9/held.bin")).await
+        else {
+            panic!("expected the job to be accepted");
+        };
+
+        assert!(matches!(engine.pause(id).await, Response::Accepted { .. }), "pause");
+        assert_eq!(state_of(&engine, id).await, JobState::Paused);
+
+        let resumed = engine.resume(id).await;
+        assert!(matches!(resumed, Response::Accepted { .. }), "resume refused: {resumed:?}");
+        assert_ne!(
+            state_of(&engine, id).await,
+            JobState::Paused,
+            "resuming should take it out of paused"
+        );
+    }
+
+    #[tokio::test]
+    async fn pausing_keeps_the_bytes_and_cancelling_throws_them_away() {
+        // The whole difference between the two buttons. Pause has to leave
+        // the part file so resuming continues; cancel has to remove it so a
+        // later download of the same thing starts clean rather than
+        // appending to an abandoned stub.
+        let (dir, engine) = engine();
+        let downloads = dir.path().join("downloads");
+        std::fs::create_dir_all(&downloads).unwrap();
+
+        for (label, cancel_it) in [("kept", false), ("gone", true)] {
+            let url = format!("http://127.0.0.1:9/{label}.bin");
+            let Response::Accepted { id } = engine.enqueue(&desktop(), request(&url)).await else {
+                panic!("expected the job to be accepted");
+            };
+            // Stand in for the writer having started: the engine must not
+            // depend on whether bytes happened to land before the click.
+            let part = downloads.join(format!("{label}.bin.idmpart"));
+            std::fs::write(&part, b"partial").unwrap();
+
+            if cancel_it {
+                engine.cancel(id).await;
+                assert!(!part.exists(), "cancel should remove the part file");
+            } else {
+                engine.pause(id).await;
+                assert!(part.exists(), "pause must keep the part file");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn asking_for_the_same_download_again_continues_it() {
+        // What a user does when a download stops: go back to the page and
+        // click it again. That used to produce "file (1)" beside a
+        // half-finished "file" and abandon the work already done.
+        let (_dir, engine) = engine();
+        let url = "https://example.invalid/big-file.zip";
+
+        let Response::Accepted { id: first } = engine.enqueue(&desktop(), request(url)).await
+        else {
+            panic!("expected the job to be accepted");
+        };
+        engine.pause(first).await;
+        assert_eq!(state_of(&engine, first).await, JobState::Paused);
+
+        let Response::Accepted { id: again } = engine.enqueue(&desktop(), request(url)).await
+        else {
+            panic!("the repeat request should be accepted");
+        };
+
+        assert_eq!(again, first, "it should be the same download, not a second one");
+        assert_eq!(engine.inner.jobs.lock().await.len(), 1, "no second job");
+        assert_ne!(state_of(&engine, first).await, JobState::Paused, "and it should be going");
+    }
+
+    #[tokio::test]
+    async fn a_finished_download_is_not_resumed_by_asking_again() {
+        // The other half of the rule: asking for something already on disk
+        // is a request for another copy, not a resume of a finished job.
+        let (_dir, engine) = engine();
+        let url = "https://example.invalid/done.bin";
+        let Response::Accepted { id } = engine.enqueue(&desktop(), request(url)).await else {
+            panic!("expected the job to be accepted");
+        };
+        engine.inner.jobs.lock().await.get_mut(&id).unwrap().status.state = JobState::Completed;
+
+        let Response::Accepted { id: second } = engine.enqueue(&desktop(), request(url)).await
+        else {
+            panic!("expected a fresh job");
+        };
+        assert_ne!(second, id, "a finished download should not be reopened");
+    }
+
+    #[tokio::test]
+    async fn refreshing_the_link_keeps_the_download_and_changes_its_address() {
+        // For an expired signed URL: the bytes are still good, only the way
+        // back to the rest of them has gone stale.
+        let (_dir, engine) = engine();
+        let Response::Accepted { id } =
+            engine.enqueue(&desktop(), request("https://old.invalid/f.bin")).await
+        else {
+            panic!("expected the job to be accepted");
+        };
+        engine.pause(id).await;
+
+        let fresh = "https://new.invalid/f.bin?sig=abc";
+        assert!(
+            matches!(engine.refresh_url(id, fresh.into()).await, Response::Accepted { .. }),
+            "refresh"
+        );
+
+        let jobs = engine.inner.jobs.lock().await;
+        let job = jobs.get(&id).expect("still there");
+        assert_eq!(job.config.url, fresh, "the engine should fetch from the new address");
+        assert_eq!(job.status.url, fresh, "and the window should show it");
+        assert_eq!(job.status.filename, "f.bin", "the destination must not move");
+    }
+
+    #[tokio::test]
+    async fn a_refreshed_link_is_vetted_like_any_other() {
+        // A refreshed address is no more trustworthy than the first one.
+        let (_dir, engine) = engine();
+        let Response::Accepted { id } =
+            engine.enqueue(&desktop(), request("https://ok.invalid/f.bin")).await
+        else {
+            panic!("expected the job to be accepted");
+        };
+        for hostile in ["file:///C:/Windows/system.ini", "javascript:alert(1)", "not a url"] {
+            assert!(
+                matches!(engine.refresh_url(id, hostile.into()).await, Response::Rejected { .. }),
+                "{hostile} should be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn the_wait_before_reconnecting_grows_but_stays_short() {
+        // Long enough not to hammer a server, short enough that a laptop
+        // rejoining the Wi-Fi picks up in seconds rather than minutes.
+        let delays: Vec<u64> = (1..=6).map(|n| retry_delay(n).as_secs()).collect();
+        assert!(delays.windows(2).all(|w| w[1] >= w[0]), "should not go backwards: {delays:?}");
+        assert!(delays.iter().all(|d| *d <= 15), "none should be long: {delays:?}");
+        assert!(delays[0] <= 5, "the first retry should be quick: {delays:?}");
+    }
+
     #[tokio::test]
     async fn two_downloads_of_the_same_name_do_not_fight_over_it() {
         // Not exotic: setup.exe from two different sites. Before this, both
@@ -2055,9 +2579,12 @@ mod tests {
         occupy_the_slot(&engine).await;
 
         let mut names = Vec::new();
-        for _ in 0..3 {
+        for site in ["a", "b", "c"] {
             let request = DownloadRequest {
-                url: "https://example.invalid/setup.exe".into(),
+                // Different sites, same filename -- which is what the
+                // comment above always described. One address three times
+                // is a repeat request, and now continues the first.
+                url: format!("https://{site}.invalid/setup.exe"),
                 size_hint: Some(10 << 20),
                 ..Default::default()
             };

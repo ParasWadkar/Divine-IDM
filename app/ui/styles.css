@@ -504,3 +504,35 @@ code {
   overflow-wrap: anywhere;
   user-select: text;
 }
+
+/* ------------------------------------------------ pause / resume control */
+
+/* The status and its one control, together: the button answers the word
+   next to it, so they travel as a pair. */
+.job-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+button.icon {
+  padding: 2px 7px;
+  min-width: 26px;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--text);
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+button.icon:hover {
+  border-color: var(--accent-dim);
+  color: var(--accent);
+}
+
+/* Waiting for the network is not a failure, and must not look like one. */
+.job-state.reconnecting {
+  color: var(--warn);
+}

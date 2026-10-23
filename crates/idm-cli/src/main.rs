@@ -79,6 +79,21 @@ struct Args {
     #[arg(long)]
     revoke: Option<String>,
 
+    /// Print what the running engine is doing, as JSON.
+    ///
+    /// One object per download, so progress can be watched from a script
+    /// without the app open.
+    #[arg(long)]
+    jobs: bool,
+
+    /// Hold a running download, keeping the bytes it already has.
+    #[arg(long, value_name = "ID")]
+    pause: Option<u64>,
+
+    /// Start a paused or interrupted download again.
+    #[arg(long, value_name = "ID")]
+    resume: Option<u64>,
+
     /// Hand a URL to the running engine instead of downloading it here.
     ///
     /// The download then shows in the app's list, follows its queue and
@@ -288,6 +303,9 @@ async fn main() -> std::process::ExitCode {
     if let Some(url) = args.send.clone() {
         return run_send_command(url, args.name.clone()).await;
     }
+    if args.jobs || args.pause.is_some() || args.resume.is_some() {
+        return run_job_command(&args).await;
+    }
     if args.pairings || args.approve.is_some() || args.deny.is_some() || args.revoke.is_some() {
         return run_pairing_command(&args).await;
     }
@@ -453,6 +471,58 @@ fn run_install(args: &Args) -> std::process::ExitCode {
     }
 }
 /// Queues a URL in the running engine.
+/// Lists downloads, or pauses and resumes one.
+///
+/// The listing is JSON because its reader is a script. A person wanting to
+/// look at downloads has the window; what has no other way in is anything
+/// automated, and that wants a shape it can parse rather than a table.
+async fn run_job_command(args: &Args) -> std::process::ExitCode {
+    use idm_ipc::{IpcClient, JobId, Request, Response};
+
+    let mut client = match IpcClient::connect("cli").await {
+        Ok(client) => client,
+        Err(error) => {
+            eprintln!("error: no running engine ({error}). Start the app, or: idm --serve");
+            return std::process::ExitCode::FAILURE;
+        }
+    };
+
+    let request = match (args.pause, args.resume) {
+        (Some(id), _) => Request::Pause { id: JobId(id) },
+        (_, Some(id)) => Request::Resume { id: JobId(id) },
+        _ => Request::Status { id: None },
+    };
+
+    match client.request(request).await {
+        Ok(Response::Status { jobs }) => {
+            match serde_json::to_string_pretty(&jobs) {
+                Ok(text) => println!("{text}"),
+                Err(error) => {
+                    eprintln!("error: could not render the job list: {error}");
+                    return std::process::ExitCode::FAILURE;
+                }
+            }
+            std::process::ExitCode::SUCCESS
+        }
+        Ok(Response::Accepted { id }) => {
+            eprintln!("download {} updated", id.0);
+            std::process::ExitCode::SUCCESS
+        }
+        Ok(Response::Rejected { reason }) => {
+            eprintln!("refused: {reason}");
+            std::process::ExitCode::FAILURE
+        }
+        Ok(other) => {
+            eprintln!("unexpected reply: {other:?}");
+            std::process::ExitCode::FAILURE
+        }
+        Err(error) => {
+            eprintln!("error: {error}");
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
 async fn run_send_command(url: String, filename: Option<String>) -> std::process::ExitCode {
     use idm_ipc::{DownloadRequest, IpcClient, Request, Response};
 

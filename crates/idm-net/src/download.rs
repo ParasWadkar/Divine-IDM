@@ -210,6 +210,74 @@ pub enum DownloadError {
     Stalled { attempts: u32 },
 }
 
+impl DownloadError {
+    /// Whether waiting and trying again could plausibly succeed.
+    ///
+    /// The question this answers is "is the download dead, or is the network
+    /// away?" A dropped Wi-Fi, a laptop lid, a tunnel, a server dropping a
+    /// connection mid-body: those come back, and the partial file and journal
+    /// are still valid, so the right response is to wait rather than to fail
+    /// and make the user start again.
+    ///
+    /// The opposite answers matter just as much. A 404, a server that will
+    /// not do ranges, a file that changed underneath us: retrying those
+    /// forever would be a download that never finishes and never admits it.
+    pub fn is_transient(&self) -> bool {
+        match self {
+            // Connecting, timing out, or a body that stopped arriving: the
+            // connection went away. `is_request` covers a send that never
+            // got off the ground.
+            Self::Request(error) => {
+                error.is_connect() || error.is_timeout() || error.is_request()
+            }
+            Self::Fetch(crate::fetch::FetchError::Request(error)) => {
+                error.is_connect() || error.is_timeout() || error.is_request()
+            }
+            // A body that failed partway is the commonest shape of "the
+            // network went out mid-download".
+            Self::Fetch(crate::fetch::FetchError::Body { .. }) => true,
+            Self::Fetch(crate::fetch::FetchError::Write(error)) => is_transient_io(error),
+            Self::Io(error) => is_transient_io(error),
+            // Every worker retired without finishing. On a flaky link this is
+            // what a stall looks like from the inside.
+            Self::Stalled { .. } => true,
+
+            // Nothing about waiting changes these.
+            Self::Client(_)
+            | Self::Fetch(crate::fetch::FetchError::Range(_))
+            | Self::Prealloc(_)
+            | Self::Journal(_)
+            | Self::Extent(_)
+            | Self::NoRangeSupport
+            | Self::UnknownLength
+            | Self::Unusable(_)
+            | Self::RepresentationChanged => false,
+        }
+    }
+}
+
+/// I/O kinds that mean the network rather than the disk.
+///
+/// A disk that is full or a path that cannot be written is not going to fix
+/// itself, and retrying would hide a real problem behind an endless wait.
+fn is_transient_io(error: &std::io::Error) -> bool {
+    use std::io::ErrorKind;
+    matches!(
+        error.kind(),
+        ErrorKind::ConnectionReset
+            | ErrorKind::ConnectionAborted
+            | ErrorKind::ConnectionRefused
+            | ErrorKind::NotConnected
+            | ErrorKind::BrokenPipe
+            | ErrorKind::TimedOut
+            | ErrorKind::Interrupted
+            | ErrorKind::UnexpectedEof
+            | ErrorKind::HostUnreachable
+            | ErrorKind::NetworkUnreachable
+            | ErrorKind::NetworkDown
+    )
+}
+
 /// What the probe learned about the target.
 #[derive(Debug, Clone)]
 pub struct Target {

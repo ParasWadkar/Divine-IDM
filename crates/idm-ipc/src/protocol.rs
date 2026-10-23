@@ -297,6 +297,19 @@ pub enum Request {
     Resume {
         id: JobId,
     },
+    /// Stops a running download, keeping its bytes so it can go on later.
+    Pause {
+        id: JobId,
+    },
+    /// Points an existing download at a new address, keeping what it has.
+    ///
+    /// For a link that has expired, which is the commonest reason a resume
+    /// cannot proceed: the bytes on disk are still good, only the way back
+    /// to the rest of them has gone stale.
+    RefreshUrl {
+        id: JobId,
+        url: String,
+    },
     /// Asks the user to approve this client. Never self-approving: the reply
     /// is only ever "pending" until a human says otherwise in the app.
     RequestPairing {
@@ -328,6 +341,13 @@ pub enum JobState {
     Queued,
     Running,
     Paused,
+    /// The connection went away and the engine is waiting to try again.
+    ///
+    /// Distinct from `Paused`, which the user chose, and from `Failed`,
+    /// which is final. The bytes and the journal are intact and the engine
+    /// will pick it up again by itself, so the window can say so instead of
+    /// showing a failure the user is expected to act on.
+    Reconnecting,
     Completed,
     Failed,
 }
@@ -345,6 +365,11 @@ pub struct JobStatus {
     pub connections: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Seconds until the next reconnection attempt, while `Reconnecting`.
+    ///
+    /// Shown so a wait looks like a wait rather than a stall.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_in_secs: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

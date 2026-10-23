@@ -151,10 +151,33 @@ function renderJobs(jobs) {
       name.className = "job-name";
       name.textContent = job.filename;
       name.title = job.url;
+      // The state, and the one control that belongs with it: pause while
+      // it runs, play while it does not. Beside the word rather than down
+      // in the row of buttons, because it is the answer to the word.
       const state = document.createElement("div");
       state.className = `job-state ${job.state}`;
-      state.textContent = job.state;
-      top.append(name, state);
+      state.textContent =
+        job.state === "reconnecting"
+          ? typeof job.retry_in_secs === "number"
+            ? `reconnecting in ${job.retry_in_secs}s`
+            : "reconnecting"
+          : job.state;
+
+      const going = job.state === "running" || job.state === "queued";
+      const toggle = document.createElement("button");
+      toggle.className = "icon";
+      // Symbols rather than words: they sit inline with the status and mean
+      // the same thing in any language.
+      toggle.textContent = going ? "⏸" : "▶";
+      toggle.title = going ? "Pause" : "Resume";
+      toggle.setAttribute("aria-label", toggle.title);
+      toggle.onclick = () => act(going ? "pause_job" : "resume_job", { id: job.id });
+
+      const controls = document.createElement("div");
+      controls.className = "job-controls";
+      if (job.state !== "completed") controls.append(toggle);
+      controls.append(state);
+      top.append(name, controls);
 
       // An unknown total means the server never told us; a moving
       // indeterminate bar is honest where a percentage would be invented.
@@ -188,15 +211,26 @@ function renderJobs(jobs) {
       const cancel = document.createElement("button");
       cancel.className = "ghost";
       cancel.textContent = "Cancel";
+      // Said plainly: this one does not keep the bytes, and the pause button
+      // beside the status is the one that does.
+      cancel.title = "Stop and delete what has been downloaded";
       cancel.onclick = () => act("cancel_job", { id: job.id });
 
-      const resume = document.createElement("button");
-      resume.textContent = "Resume";
-      resume.onclick = () => act("resume_job", { id: job.id });
+      // For a link that expired while the download sat waiting. The bytes are
+      // still good; only the way back to the rest of them is stale, so this
+      // changes the address and keeps the file.
+      const refresh = document.createElement("button");
+      refresh.className = "ghost";
+      refresh.textContent = "New link";
+      refresh.title = "Paste a fresh address and carry on from here";
+      refresh.onclick = async () => {
+        const url = window.prompt(`A fresh address for ${job.filename}:`, job.url);
+        if (url && url.trim()) await act("refresh_link", { id: job.id, url: url.trim() });
+      };
 
       foot.append(size, speed, conns, eta, spacer);
-      if (job.state === "paused" || job.state === "failed") foot.append(resume);
-      if (job.state === "running" || job.state === "queued") foot.append(cancel);
+      if (!going) foot.append(refresh);
+      foot.append(cancel);
 
       card.append(top, bar, foot);
       if (job.error) {

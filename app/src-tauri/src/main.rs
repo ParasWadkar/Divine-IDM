@@ -61,6 +61,18 @@ async fn resume_job(state: State<'_, AppState>, id: u64) -> Result<(), String> {
     state.simple(Request::Resume { id: JobId(id) }).await
 }
 
+/// Holds a download where it is, keeping every byte it already has.
+#[tauri::command]
+async fn pause_job(state: State<'_, AppState>, id: u64) -> Result<(), String> {
+    state.simple(Request::Pause { id: JobId(id) }).await
+}
+
+/// Points a download at a new address without losing what it has.
+#[tauri::command]
+async fn refresh_link(state: State<'_, AppState>, id: u64, url: String) -> Result<(), String> {
+    state.simple(Request::RefreshUrl { id: JobId(id), url }).await
+}
+
 #[tauri::command]
 async fn cancel_job(state: State<'_, AppState>, id: u64) -> Result<(), String> {
     match state.request(Request::Cancel { id: JobId(id) }).await {
@@ -218,6 +230,8 @@ fn main() {
             add_download,
             cancel_job,
             resume_job,
+            pause_job,
+            refresh_link,
             approve_pairing,
             deny_pairing,
             revoke_pairing,
