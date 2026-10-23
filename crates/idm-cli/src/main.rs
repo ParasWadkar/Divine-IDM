@@ -51,6 +51,18 @@ struct Args {
     #[arg(long)]
     all_browsers: bool,
 
+    /// A browser the built-in table does not list, as `family:root`.
+    ///
+    /// For example `--extra-root chromium:Thorium` registers under
+    /// `Software\Thorium\NativeMessagingHosts`. The family is `chromium` or
+    /// `gecko`, and decides which manifest dialect that browser is handed;
+    /// nothing else about a browser matters here. Repeatable.
+    ///
+    /// A root named this way is registered whether or not the browser looks
+    /// installed -- naming it is the instruction.
+    #[arg(long = "extra-root", value_name = "FAMILY:ROOT")]
+    extra_roots: Vec<install::ExtraRoot>,
+
     /// Show pairing requests and paired extensions.
     #[arg(long)]
     pairings: bool,
@@ -416,7 +428,7 @@ fn run_install(args: &Args) -> std::process::ExitCode {
         return std::process::ExitCode::FAILURE;
     }
 
-    match install::install(&host_path, &callers, args.all_browsers, &[]) {
+    match install::install(&host_path, &callers, args.all_browsers, &args.extra_roots) {
         Ok(report) => {
             for entry in &report.registered {
                 let note = if entry.detected { "installed" } else { "pre-registered" };
