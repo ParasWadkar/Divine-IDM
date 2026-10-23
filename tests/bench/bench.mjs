@@ -117,8 +117,22 @@ async function timeIdm(url, dir, name) {
   });
   if (launch.error) return { elapsed: 0, status: 1, stderr: String(launch.error) };
 
+  // A licensed IDM starts writing within a second or two. An unlicensed or
+  // expired one accepts /d, returns success, and does nothing at all -- no
+  // window, no process, no file -- so waiting out the full deadline means a
+  // ten minute hang for a tool that was never going to run. If nothing has
+  // appeared by the time a healthy IDM would have finished the whole file,
+  // treat it as unavailable rather than slow.
+  const startupGrace = Date.now() + 20_000;
   const deadline = Date.now() + 600_000;
   for (;;) {
+    if (!existsSync(target) && Date.now() > startupGrace) {
+      return {
+        elapsed: 0,
+        status: 1,
+        stderr: "IDM wrote nothing in 20s — not running, unlicensed, or a dialog is open",
+      };
+    }
     if (existsSync(target)) {
       try {
         if (statSync(target).size === SIZE) {

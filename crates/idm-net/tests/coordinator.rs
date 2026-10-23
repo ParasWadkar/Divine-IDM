@@ -61,9 +61,22 @@ async fn it_resumes_a_partially_downloaded_file() {
     // Interrupt a trickled download partway through, which is what a crash or
     // a cancelled transfer actually looks like: a .part file plus a journal
     // recording whatever the last checkpoint committed.
+    //
+    // The parallelism is pinned so the interruption does not depend on how
+    // fast the scheduler happens to be. /slow trickles at `bps` *per
+    // connection*, so this once read 6 MB/s over the 4 connections a cold
+    // start used to be stuck at -- 1.75s for the file, interrupted at 1.5s
+    // by a margin of a quarter second. Fixing the ramp so it reaches 16
+    // connections made the same download finish in under half a second, and
+    // the test failed with "a partial file should remain" because there was
+    // nothing partial left: it had been measuring the engine's slowness.
+    // Four connections at 3 MB/s is 3.5s of work stopped at 1.5s, which
+    // leaves a comfortable margin and still fragments the extent set across
+    // several connections, which is the interesting thing to resume from.
     let mut interrupted =
-        DownloadConfig::new(server.url(&format!("/slow?size={total}&bps=6000000")), dir.path());
+        DownloadConfig::new(server.url(&format!("/slow?size={total}&bps=3000000")), dir.path());
     interrupted.pin_edges = false;
+    interrupted.fixed_connections = Some(4);
     interrupted.filename = Some("payload.bin".into());
     interrupted.checkpoint_interval = Duration::from_millis(100);
     let _ = tokio::time::timeout(Duration::from_millis(1500), download(&interrupted)).await;

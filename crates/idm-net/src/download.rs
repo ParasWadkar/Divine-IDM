@@ -444,7 +444,31 @@ pub async fn download_with_progress<F: FnMut(Progress)>(
             "starting from a learned profile instead of ramping"
         );
     }
-    let (lane_count, streams) = lane_topology(initial);
+    // Lanes are sized for where the controller may get to, not where it
+    // starts, because the pool is built once and cannot grow afterwards.
+    //
+    // Sizing from `initial` meant a cold start got 2 lanes and kept them
+    // after the controller had ramped to 16 connections -- so the sixteen
+    // shared two lanes' worth of independent congestion control for the
+    // rest of the transfer, which is exactly the "N streams on one h2
+    // connection is not N connections" trap.
+    //
+    // Honest about the evidence: this is reasoning, not a measured win.
+    // The local benchmark server is HTTP/1.1, where reqwest opens extra
+    // sockets per client on demand, so lane count barely shows there and
+    // fixing it changed nothing measurable. It should matter against a
+    // real h2 CDN, where a lane really is one connection. It is kept
+    // because the pool cannot grow later, not because a number moved.
+    //
+    // A lane is a reqwest Client, and one that is never used opens no
+    // sockets, so sizing for the ceiling costs nothing when the controller
+    // stays low. A pinned count is left alone: it was asked for exactly.
+    let lane_basis = if config.fixed_connections.is_some() || forced_single {
+        initial
+    } else {
+        initial.max(config.conn.per_host_max)
+    };
+    let (lane_count, streams) = lane_topology(lane_basis);
     let mut http = config.http.clone();
     http.streams_per_lane = streams;
 
@@ -490,7 +514,26 @@ pub async fn download_with_progress<F: FnMut(Progress)>(
             let now_ms = started.elapsed().as_millis() as u64;
             let snapshots: Vec<ClaimSnapshot> =
                 tracked.values().map(|t| t.snapshot(now_ms)).collect();
-            let free = ledger.next_claim(target_connections, write_mode.claim_window());
+            // Claims are sized for the count the controller may reach, not
+            // the one in use, because a connection it adds can only start
+            // if unclaimed bytes are left for it to take.
+            //
+            // This is what made the adaptive ramp cosmetic. claim_size
+            // floors at 8 MiB, shrinking that floor only by the *current*
+            // count, so a 32 MiB file at the opening 4 connections handed
+            // out four 8 MiB claims -- the whole file. The controller then
+            // raised its target to 16 on schedule and nothing happened:
+            // every byte was already spoken for, and stealing is gated on
+            // saving two seconds, which a download this short can never
+            // offer. Measured at exactly the -n 4 time while reporting "16
+            // connections", because the target moved and the workers did
+            // not. Sizing by the ceiling leaves gaps for them to claim.
+            let claim_basis = if config.fixed_connections.is_some() || forced_single {
+                target_connections
+            } else {
+                target_connections.max(config.conn.per_host_max)
+            };
+            let free = ledger.next_claim(claim_basis, write_mode.claim_window());
 
             let median_rate = median_rate(&snapshots);
             let action = next_action(
