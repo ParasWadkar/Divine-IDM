@@ -318,6 +318,18 @@ pub enum Request {
     Resume {
         id: JobId,
     },
+    /// Starts a failed download again from its History row, after the
+    /// engine itself no longer remembers it.
+    ///
+    /// `Resume` only ever finds a job in `Failed` while the process that
+    /// failed it is still running: nothing failed survives a restart into
+    /// the in-memory job list, because only unfinished jobs are restored.
+    /// The bytes and journal on disk outlive that restart just as well as a
+    /// paused download's do, so History needs its own way back to them,
+    /// keyed by the store row rather than a session-local job id.
+    ResumeFromHistory {
+        row_id: i64,
+    },
     /// Stops a running download, keeping its bytes so it can go on later.
     Pause {
         id: JobId,

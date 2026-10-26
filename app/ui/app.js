@@ -26,6 +26,9 @@ let downloadDir = "";
 // one would un-hide everything whenever any other setting was changed.
 let hiddenBrowsers = [];
 
+// Display speed in bits/s (Mbps) instead of bytes/s (MB/s)
+let showSpeedInBits = false;
+
 // What the browser list was last built from, so it is rebuilt only when that
 // changes.
 let browserSignature = "";
@@ -48,7 +51,16 @@ function bytes(value) {
   return `${scaled >= 100 || power === 0 ? Math.round(scaled) : scaled.toFixed(1)} ${units[power]}`;
 }
 
-const rate = (value) => `${bytes(value)}/s`;
+function bits(value) {
+  if (!Number.isFinite(value) || value <= 0) return "0 bps";
+  const bitValue = value * 8;
+  const units = ["bps", "Kbps", "Mbps", "Gbps", "Tbps"];
+  const power = Math.min(Math.floor(Math.log(bitValue) / Math.log(1000)), units.length - 1);
+  const scaled = bitValue / 1000 ** power;
+  return `${scaled >= 100 || power === 0 ? Math.round(scaled) : scaled.toFixed(1)} ${units[power]}`;
+}
+
+const rate = (value) => showSpeedInBits ? `${bits(value)}/s` : `${bytes(value)}/s`;
 
 function duration(seconds) {
   if (!Number.isFinite(seconds) || seconds <= 0) return "\u2014";
@@ -338,6 +350,7 @@ function renderSettings(settings) {
   $("max-concurrent").value = String(settings.max_concurrent_downloads);
   $("speed-limit").value = String(settings.speed_limit_bytes_per_sec ?? 0);
   $("sort-into-folders").checked = settings.sort_into_folders ?? true;
+  // Don't reset speed-in-bits: it's UI-only state, not persisted
   $("start-with-windows").checked = settings.start_with_windows;
   $("resume-on-start").checked = settings.resume_on_start;
   $("post-action").value = settings.post_action;
@@ -445,6 +458,7 @@ async function saveSettings(overrides = {}) {
     post_action_countdown_secs: Number($("countdown").value),
     ...overrides,
   };
+  showSpeedInBits = $("speed-in-bits").getAttribute("aria-pressed") === "true";
   try {
     await invoke("save_settings", { settings });
     // Only once the engine has accepted it. A folder it refused must not
@@ -492,6 +506,30 @@ async function showHistory() {
 
         row.append(name, meta);
         if (job.state === "completed") row.append(open);
+        if (job.state === "failed") {
+          if (job.error) {
+            const reason = document.createElement("div");
+            reason.className = "meta";
+            reason.textContent = job.error;
+            row.append(reason);
+          }
+
+          const resume = document.createElement("button");
+          resume.className = "icon";
+          resume.append(icon("play"));
+          resume.title = "Resume — carries on from the bytes already on disk";
+          resume.setAttribute("aria-label", "Resume this download");
+          resume.onclick = async () => {
+            try {
+              await invoke("resume_from_history", { id: job.id });
+              toast("Resuming — check the Downloads tab");
+              showHistory();
+            } catch (error) {
+              toast(String(error), true);
+            }
+          };
+          row.append(resume);
+        }
         return row;
       }),
     );
@@ -556,6 +594,15 @@ $("choose-folder").addEventListener("click", async () => {
 });
 
 $("reset-folder").addEventListener("click", () => saveSettings({ download_dir: "" }));
+
+$("speed-in-bits").addEventListener("click", () => {
+  const btn = $("speed-in-bits");
+  const isPressed = btn.getAttribute("aria-pressed") === "true";
+  btn.setAttribute("aria-pressed", !isPressed);
+  btn.querySelector(".toggle-label").textContent = isPressed ? "MB/s" : "Mbps";
+  showSpeedInBits = !isPressed;
+  saveSettings();
+});
 
 $("clear-history").addEventListener("click", async () => {
   await act("clear_history");

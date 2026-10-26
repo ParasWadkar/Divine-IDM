@@ -500,6 +500,97 @@ impl Engine {
         Response::Accepted { id }
     }
 
+    /// Starts a failed download again from its History row.
+    ///
+    /// `resume` above only ever finds the job in `self.inner.jobs`, which is
+    /// rebuilt empty on every start from `unfinished_jobs()` alone -- a
+    /// `Failed` job is deliberately excluded from that list, so once the
+    /// engine that failed it has restarted, there is nothing left in memory
+    /// for `resume` to find. The `.idmpart` and its journal are still on
+    /// disk regardless, exactly as they are for a paused download, so this
+    /// rebuilds the same in-memory record `restore_interrupted` would have
+    /// built, directly from the row, and hands it a fresh id.
+    async fn resume_history(&self, row_id: i64) -> Response {
+        let Some(store) = self.inner.store.clone() else {
+            return Response::Rejected { reason: "there is no download history".into() };
+        };
+
+        // Already live under some id -- the ordinary Resume covers that
+        // case, and starting a second copy from the same row would race it
+        // for the same bytes.
+        if self.inner.rows.lock().await.values().any(|&existing| existing == row_id) {
+            return Response::Rejected { reason: "that download is already going".into() };
+        }
+
+        let row = match store.job(row_id) {
+            Ok(Some(row)) => row,
+            Ok(None) => return Response::Rejected { reason: "no such download".into() },
+            Err(error) => return Response::Error { message: error.to_string() },
+        };
+
+        match row.state {
+            idm_store::JobState::Completed => {
+                return Response::Rejected { reason: "that download has already finished".into() };
+            }
+            idm_store::JobState::Failed => {}
+            // Queued, Running or Paused: still live, or the row is stale
+            // because the engine has not caught up with it yet either way.
+            _ => return Response::Rejected { reason: "that download is already going".into() },
+        }
+
+        // The cookies that authorised it, if any, were never written to the
+        // database -- see the crate documentation -- so there is nothing to
+        // resume with here. Saying so is more useful than a 403.
+        if row.needs_browser_auth {
+            return Response::Rejected {
+                reason: "this download was authorised by your browser; start it there again"
+                    .into(),
+            };
+        }
+
+        let id = JobId(self.inner.next_id.fetch_add(1, Ordering::SeqCst));
+        let mut config = DownloadConfig::new(row.url.clone(), PathBuf::from(&row.output_dir));
+        config.filename = Some(row.filename.clone());
+        config.conn.per_host_max = self.inner.max_connections;
+        config.referrer = row.referrer.clone();
+        config.fetch.limiter = Some(Arc::clone(&self.inner.limiter));
+        config.profiles =
+            self.inner.store.clone().map(|store| store as Arc<dyn idm_core::sched::ProfileStore>);
+
+        let destination = PathBuf::from(&row.output_dir).join(&row.filename);
+        let status = JobStatus {
+            id,
+            url: row.url.clone(),
+            filename: row.filename.clone(),
+            state: JobState::Queued,
+            downloaded: row.downloaded,
+            total: row.total,
+            bytes_per_sec: 0.0,
+            connections: 0,
+            error: None,
+            retry_in_secs: None,
+        };
+
+        self.inner.claimed.lock().await.insert(destination.clone());
+        self.inner.rows.lock().await.insert(id, row.id);
+        self.inner.jobs.lock().await.insert(
+            id,
+            JobRecord {
+                status,
+                abort: None,
+                claimed: Some(destination),
+                config: Box::new(config),
+                waiting: true,
+                attempts: 0,
+                last_progress: std::time::Instant::now(),
+            },
+        );
+
+        write_state(&self.inner, id, JobState::Queued, None).await;
+        pump(Arc::clone(&self.inner)).await;
+        Response::Accepted { id }
+    }
+
     /// Brings interrupted downloads back after a restart.
     ///
     /// The bytes and the journal beside them already survive a crash; this
@@ -1623,6 +1714,7 @@ impl Handler for Engine {
             Request::Status { id } => self.status(id).await,
             Request::Cancel { id } => self.cancel(id).await,
             Request::Resume { id } => self.resume(id).await,
+            Request::ResumeFromHistory { row_id } => self.resume_history(row_id).await,
             Request::Pause { id } => self.pause(id).await,
             Request::RefreshUrl { id, url } => self.refresh_url(id, url).await,
             Request::RequestPairing { label } => self.request_pairing(client, label).await,

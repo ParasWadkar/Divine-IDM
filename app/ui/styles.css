@@ -114,6 +114,29 @@ button.ghost:hover {
   border-color: var(--accent-dim);
 }
 
+.toggle-btn {
+  padding: 6px 14px;
+  color: var(--text);
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 20px;
+  font-weight: 500;
+  font-size: 13px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.toggle-btn:hover {
+  border-color: var(--accent-dim);
+  background: var(--panel);
+}
+
+.toggle-btn[aria-pressed="true"] {
+  color: #0b1018;
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
 button.danger {
   color: #1a0d0d;
   background: var(--bad);

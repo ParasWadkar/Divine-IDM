@@ -62,6 +62,16 @@ async fn resume_job(state: State<'_, AppState>, id: u64) -> Result<(), String> {
     state.simple(Request::Resume { id: JobId(id) }).await
 }
 
+/// Starts a failed download again from the History tab.
+///
+/// `id` here is the History row's own id, not the session-local job id
+/// `resume_job` takes — History outlives any single run of the engine, so
+/// it has to be addressed by something that does too.
+#[tauri::command]
+async fn resume_from_history(state: State<'_, AppState>, id: i64) -> Result<(), String> {
+    state.simple(Request::ResumeFromHistory { row_id: id }).await
+}
+
 /// Holds a download where it is, keeping every byte it already has.
 #[tauri::command]
 async fn pause_job(state: State<'_, AppState>, id: u64) -> Result<(), String> {
@@ -335,6 +345,7 @@ fn main() {
             add_download,
             cancel_job,
             resume_job,
+            resume_from_history,
             pause_job,
             refresh_link,
             approve_pairing,
