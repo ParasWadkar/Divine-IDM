@@ -399,6 +399,9 @@ pub struct JobStatus {
     pub id: JobId,
     pub url: String,
     pub filename: String,
+    /// Where the file is, or is going -- so a client can reveal it once the
+    /// job completes without a second round trip to ask.
+    pub output_dir: String,
     pub state: JobState,
     pub downloaded: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]

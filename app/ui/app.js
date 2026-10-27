@@ -128,6 +128,21 @@ const ICONS = {
     ["rect", { x: "14", y: "5", width: "4", height: "14", rx: "1", fill: "currentColor" }],
   ],
   play: [["path", { d: "M8 5v14l11-7z", fill: "currentColor" }]],
+  folder: [
+    [
+      "path",
+      {
+        d: "M3 6.5A1.5 1.5 0 0 1 4.5 5h4.3a1.5 1.5 0 0 1 1.1.48L11 7h8.5A1.5 1.5 0 0 1 21 8.5v10a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 18.5z",
+      },
+    ],
+  ],
+  trash: [
+    ["path", { d: "M4 7h16" }],
+    ["path", { d: "M9 7V4.5A1.5 1.5 0 0 1 10.5 3h3A1.5 1.5 0 0 1 15 4.5V7" }],
+    ["path", { d: "M18.5 7 17.6 19.2a2 2 0 0 1-2 1.8H8.4a2 2 0 0 1-2-1.8L5.5 7" }],
+    ["path", { d: "M10 11v6" }],
+    ["path", { d: "M14 11v6" }],
+  ],
 };
 
 function icon(name) {
@@ -178,9 +193,9 @@ function render(snapshot) {
   drawGraph();
 
   $("engine-dot").className = "dot good";
-  $("engine-text").textContent = running.length
-    ? `${running.length} downloading`
-    : "idle";
+  $("engine-text").textContent = running.length ? `${running.length} downloading` : "";
+
+  notifyOnStateChange(snapshot.jobs ?? []);
 }
 
 function renderPairing(pending) {
@@ -219,7 +234,10 @@ function renderPairing(pending) {
 
 function renderJobs(jobs) {
   const list = $("jobs");
-  const live = jobs.filter((job) => job.state !== "completed");
+  // A cancelled or failed download has nothing left to show moving: showing
+  // it here any longer is how a stale progress bar is left looking alive.
+  // It belongs in History now, with the Resume and Remove it offers there.
+  const live = jobs.filter((job) => job.state !== "failed");
 
   if (!live.length) {
     list.replaceChildren(empty("Nothing downloading. Paste a URL above, or start one in your browser."));
@@ -247,9 +265,12 @@ function renderJobs(jobs) {
           ? typeof job.retry_in_secs === "number"
             ? `reconnecting in ${job.retry_in_secs}s`
             : "reconnecting"
-          : job.state;
+          : job.state === "completed"
+            ? "Complete"
+            : job.state;
 
       const going = job.state === "running" || job.state === "queued";
+      const finished = job.state === "completed";
       const toggle = document.createElement("button");
       toggle.className = "icon";
       // Symbols rather than words: they sit inline with the status and mean
@@ -259,9 +280,21 @@ function renderJobs(jobs) {
       toggle.setAttribute("aria-label", toggle.title);
       toggle.onclick = () => act(going ? "pause_job" : "resume_job", { id: job.id });
 
+      // Nothing left to pause or resume once it has finished; the one
+      // control that still means something is finding the file again.
+      const reveal = document.createElement("button");
+      reveal.className = "icon";
+      reveal.append(icon("folder"));
+      reveal.title = "Show in folder";
+      reveal.setAttribute("aria-label", reveal.title);
+      reveal.onclick = () =>
+        invoke("reveal", { path: `${job.output_dir}\\${job.filename}` }).catch((error) =>
+          toast(String(error), true),
+        );
+
       const controls = document.createElement("div");
       controls.className = "job-controls";
-      if (job.state !== "completed") controls.append(toggle);
+      controls.append(finished ? reveal : toggle);
       controls.append(state);
       top.append(name, controls);
 
@@ -315,8 +348,10 @@ function renderJobs(jobs) {
       };
 
       foot.append(size, speed, conns, eta, spacer);
-      if (!going) foot.append(refresh);
-      foot.append(cancel);
+      if (!finished) {
+        if (!going) foot.append(refresh);
+        foot.append(cancel);
+      }
 
       card.append(top, bar, foot);
       if (job.error) {
@@ -420,6 +455,82 @@ function drawGraph() {
   context.stroke(line);
 }
 
+/** Shows the instant speed at the sample nearest the cursor, as in Steam's graph. */
+function showGraphTip(event) {
+  const canvas = $("graph");
+  if (!history.length) return;
+
+  const width = canvas.clientWidth;
+  const height = canvas.clientHeight;
+  const step = width / (SAMPLES - 1);
+  // The same right-aligned mapping drawGraph uses, so the tooltip always
+  // lands on the point it looks like it is pointing at.
+  const left = width - (history.length - 1) * step;
+
+  const rect = canvas.getBoundingClientRect();
+  const mouseX = event.clientX - rect.left;
+  const index = Math.max(0, Math.min(history.length - 1, Math.round((mouseX - left) / step)));
+  const value = history[index];
+
+  const peak = Math.max(...history, 1);
+  const x = left + index * step;
+  const y = height - 2 - (value / peak) * (height - 8);
+
+  const tip = $("graph-tip");
+  tip.textContent = rate(value);
+  tip.style.left = `${canvas.offsetLeft + x}px`;
+  tip.style.top = `${canvas.offsetTop + y}px`;
+  tip.hidden = false;
+}
+
+function hideGraphTip() {
+  $("graph-tip").hidden = true;
+}
+
+// ---------------------------------------------------------------------------
+// Desktop notifications
+// ---------------------------------------------------------------------------
+
+// What each job's state was on the previous snapshot, so a transition can be
+// told apart from "still finished from before" on every tick -- otherwise a
+// download that was already finished when the window opened would fire a
+// notification for something that happened before anyone was watching.
+const lastJobState = new Map();
+
+function requestNotificationPermission() {
+  if (typeof Notification === "undefined") return;
+  if (Notification.permission === "default") Notification.requestPermission();
+}
+
+function notifyOnStateChange(jobs) {
+  const canNotify = typeof Notification !== "undefined" && Notification.permission === "granted";
+
+  const seen = new Set();
+  for (const job of jobs) {
+    seen.add(job.id);
+    const was = lastJobState.get(job.id);
+    lastJobState.set(job.id, job.state);
+    if (!canNotify || was === undefined || was === job.state) continue;
+
+    if (job.state === "completed") {
+      new Notification("Download finished", {
+        body: `${job.filename} — ${bytes(job.total ?? job.downloaded)}`,
+      });
+    } else if (job.state === "failed" && job.error !== "cancelled") {
+      // Cancelling is something the person just chose to do; it is not news.
+      new Notification("Download stopped", {
+        body: `${job.filename} — ${job.error ?? "stopped unexpectedly"}`,
+      });
+    }
+  }
+
+  // A job the engine no longer mentions at all should not haunt this map
+  // forever.
+  for (const id of lastJobState.keys()) {
+    if (!seen.has(id)) lastJobState.delete(id);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Actions
 // ---------------------------------------------------------------------------
@@ -494,19 +605,23 @@ async function showHistory() {
         meta.className = "meta";
         meta.textContent = `${bytes(job.downloaded)} · ${when(job.finished_at_ms)}`;
 
-        const open = document.createElement("button");
-        open.className = "icon";
-        open.append(icon("eye"));
-        open.title = "Show in folder";
-        open.setAttribute("aria-label", "Show in folder");
-        open.onclick = () =>
-          invoke("reveal", { path: `${job.output_dir}\\${job.filename}` }).catch((error) =>
-            toast(String(error), true),
-          );
-
         row.append(name, meta);
-        if (job.state === "completed") row.append(open);
-        if (job.state === "failed") {
+
+        if (job.state === "completed") {
+          // Finished: the only thing left to do with it is find it again.
+          const open = document.createElement("button");
+          open.className = "icon";
+          open.append(icon("folder"));
+          open.title = "Show in folder";
+          open.setAttribute("aria-label", "Show in folder");
+          open.onclick = () =>
+            invoke("reveal", { path: `${job.output_dir}\\${job.filename}` }).catch((error) =>
+              toast(String(error), true),
+            );
+          row.append(open);
+        } else {
+          // Incomplete — cancelled or genuinely failed. Either way the bytes
+          // on disk are still there to carry on from, or to simply forget.
           if (job.error) {
             const reason = document.createElement("div");
             reason.className = "meta";
@@ -528,7 +643,22 @@ async function showHistory() {
               toast(String(error), true);
             }
           };
-          row.append(resume);
+
+          const remove = document.createElement("button");
+          remove.className = "icon quiet";
+          remove.append(icon("trash"));
+          remove.title = "Remove from history";
+          remove.setAttribute("aria-label", "Remove this entry from history");
+          remove.onclick = async () => {
+            try {
+              await invoke("remove_history_row", { id: job.id });
+              showHistory();
+            } catch (error) {
+              toast(String(error), true);
+            }
+          };
+
+          row.append(resume, remove);
         }
         return row;
       }),
@@ -604,8 +734,66 @@ $("speed-in-bits").addEventListener("click", () => {
   saveSettings();
 });
 
+// ---------------------------------------------------------------------------
+// Confirmation
+// ---------------------------------------------------------------------------
+
+/**
+ * Shows the shared confirmation modal; resolves to whether the person
+ * confirmed. Skipped entirely once they have ticked "Remember my choice"
+ * for this `rememberKey`, kept in localStorage since it is a preference
+ * about this window, not a setting the engine needs to know.
+ */
+function confirmDialog(message, rememberKey) {
+  try {
+    if (rememberKey && localStorage.getItem(rememberKey) === "1") return Promise.resolve(true);
+  } catch {
+    // A locked-down profile can refuse storage; falling through just means
+    // asking every time instead of skipping a destructive action unseen.
+  }
+
+  return new Promise((resolve) => {
+    const overlay = $("confirm-modal");
+    const remember = $("confirm-remember");
+    const cancelBtn = $("confirm-cancel");
+    const okBtn = $("confirm-ok");
+
+    $("confirm-message").textContent = message;
+    remember.checked = false;
+    overlay.hidden = false;
+
+    const finish = (confirmed) => {
+      overlay.hidden = true;
+      cancelBtn.removeEventListener("click", onCancel);
+      okBtn.removeEventListener("click", onOk);
+      if (confirmed && rememberKey && remember.checked) {
+        try {
+          localStorage.setItem(rememberKey, "1");
+        } catch {
+          // Nothing to do about it; it only means asking again next time.
+        }
+      }
+      resolve(confirmed);
+    };
+    const onCancel = () => finish(false);
+    const onOk = () => finish(true);
+    cancelBtn.addEventListener("click", onCancel);
+    okBtn.addEventListener("click", onOk);
+  });
+}
+
 $("clear-history").addEventListener("click", async () => {
+  const sure = await confirmDialog(
+    "Clear the whole history? Finished downloads will no longer show in this list — the files on disk are untouched.",
+    "skip-clear-all-history-confirm",
+  );
+  if (!sure) return;
   await act("clear_history");
+  showHistory();
+});
+
+$("clear-incomplete").addEventListener("click", async () => {
+  await act("clear_incomplete_history");
   showHistory();
 });
 
@@ -614,6 +802,8 @@ $("clear-history").addEventListener("click", async () => {
 // JavaScript timer rather than the side that knows when something changed.
 listen("snapshot", (event) => render(event.payload));
 window.addEventListener("resize", drawGraph);
+$("graph").addEventListener("mousemove", showGraphTip);
+$("graph").addEventListener("mouseleave", hideGraphTip);
 
 // ---------------------------------------------------------------------------
 // Browser integration
@@ -838,11 +1028,21 @@ function renderInstructionPaths() {
     const code = document.createElement("code");
     code.className = "path";
     code.textContent = path;
-    const open = document.createElement("button");
-    open.className = "ghost";
-    open.textContent = "Open folder";
-    open.onclick = () => invoke("reveal", { path }).catch((e) => toast(String(e), true));
-    row.append(code, open);
+    const copy = document.createElement("button");
+    copy.className = "ghost";
+    copy.textContent = "Copy";
+    // A browser's "Load unpacked" dialog opens to a folder picker, not a
+    // file explorer the path can be pasted into from Explorer -- so the
+    // path itself, ready to paste there, is more useful than opening it.
+    copy.onclick = async () => {
+      try {
+        await navigator.clipboard.writeText(path);
+        toast("Path copied");
+      } catch (error) {
+        toast(String(error), true);
+      }
+    };
+    row.append(code, copy);
     box.append(caption, row);
   }
 }
@@ -908,4 +1108,5 @@ collectOpenedFiles();
   renderBrowsers();
 })();
 
+requestNotificationPermission();
 refresh();

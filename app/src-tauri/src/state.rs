@@ -133,6 +133,30 @@ impl AppState {
         };
         store.clear_history().map(|_| ()).map_err(|error| error.to_string())
     }
+
+    /// Forgets the cancelled and failed rows, leaving finished downloads in
+    /// the list.
+    pub fn clear_incomplete_history(&self) -> Result<(), String> {
+        let Some(store) = &self.store else {
+            return Ok(());
+        };
+        store.clear_incomplete_history().map(|_| ()).map_err(|error| error.to_string())
+    }
+
+    /// Forgets one history row. Refused for a job the engine still has live,
+    /// so a running download cannot be made to vanish from the Downloads tab
+    /// by a stale History-tab click.
+    pub fn remove_history_row(&self, row_id: i64) -> Result<(), String> {
+        let Some(store) = &self.store else {
+            return Ok(());
+        };
+        match store.job(row_id).map_err(|error| error.to_string())? {
+            Some(job) if job.state.is_finished() => {}
+            Some(_) => return Err("that download is still going".into()),
+            None => return Ok(()),
+        }
+        store.remove_job(row_id).map(|_| ()).map_err(|error| error.to_string())
+    }
 }
 
 /// `%USERPROFILE%\Downloads`, which is where a download manager should put

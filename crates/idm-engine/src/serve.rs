@@ -412,6 +412,7 @@ impl Engine {
             id,
             url: request.url.clone(),
             filename,
+            output_dir: output_dir.display().to_string(),
             state: JobState::Queued,
             downloaded: 0,
             total: None,
@@ -562,6 +563,7 @@ impl Engine {
             id,
             url: row.url.clone(),
             filename: row.filename.clone(),
+            output_dir: row.output_dir.clone(),
             state: JobState::Queued,
             downloaded: row.downloaded,
             total: row.total,
@@ -641,6 +643,7 @@ impl Engine {
                 id,
                 url: row.url.clone(),
                 filename: row.filename.clone(),
+                output_dir: row.output_dir.clone(),
                 // Queued only when it is actually going to start; otherwise
                 // paused, which is what it is.
                 state: if auto && !blocked { JobState::Queued } else { JobState::Paused },

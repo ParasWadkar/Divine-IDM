@@ -199,6 +199,16 @@ async fn clear_history(state: State<'_, AppState>) -> Result<(), String> {
     state.clear_history()
 }
 
+#[tauri::command]
+async fn clear_incomplete_history(state: State<'_, AppState>) -> Result<(), String> {
+    state.clear_incomplete_history()
+}
+
+#[tauri::command]
+async fn remove_history_row(state: State<'_, AppState>, id: i64) -> Result<(), String> {
+    state.remove_history_row(id)
+}
+
 /// Shows a finished file in Explorer, selected.
 #[tauri::command]
 fn reveal(path: String) -> Result<(), String> {
@@ -356,6 +366,8 @@ fn main() {
             cancel_post_action,
             history,
             clear_history,
+            clear_incomplete_history,
+            remove_history_row,
             reveal,
             choose_folder,
             browser_setup,

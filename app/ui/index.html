@@ -60,29 +60,30 @@
             <div id="speed-peak" class="speed-peak"></div>
           </div>
           <canvas id="graph" height="72"></canvas>
+          <div id="graph-tip" class="graph-tip" hidden></div>
         </div>
         <div id="jobs" class="jobs"></div>
       </section>
 
       <section id="panel-history" class="panel" hidden>
         <div class="panel-head">
-          <h2>Finished</h2>
-          <button id="clear-history" class="ghost">Clear</button>
+          <h2>History</h2>
+          <div class="panel-actions">
+            <button id="clear-incomplete" class="ghost">Clear incomplete</button>
+            <button id="clear-history" class="ghost">Clear all</button>
+          </div>
         </div>
         <div id="history" class="history"></div>
       </section>
 
       <section id="panel-settings" class="panel" hidden>
         <h2>Downloads</h2>
-        <label class="row switch">
+        <label
+          class="row switch"
+          title="Enforced by the engine, not the extension, so it holds even if an extension is out of date or compromised."
+        >
           <input type="checkbox" id="integration" />
-          <span>
-            Take over downloads from the browser
-            <small>
-              Enforced by the engine, not the extension, so it holds even if an
-              extension is out of date or compromised.
-            </small>
-          </span>
+          <span>Take over downloads from the browser</span>
         </label>
 
         <label class="row">
@@ -96,14 +97,11 @@
           </select>
         </label>
 
-        <label class="row">
-          <span>
-            Download at most
-            <small>
-              Each download opens its own fan of connections, so more at once
-              is the same bandwidth split more ways, not more speed.
-            </small>
-          </span>
+        <label
+          class="row"
+          title="Each download opens its own fan of connections, so more at once is the same bandwidth split more ways, not more speed."
+        >
+          <span>Download at most</span>
           <select id="max-concurrent">
             <option value="1">1 at a time</option>
             <option value="2">2 at a time</option>
@@ -123,25 +121,19 @@
           <button id="reset-folder" class="ghost" title="Go back to your Downloads folder">Default</button>
         </div>
 
-        <label class="row switch">
+        <label
+          class="row switch"
+          title="Video, Audio, Documents, Programs, Archives and Images. Anything else stays in the download folder."
+        >
           <input type="checkbox" id="sort-into-folders" />
-          <span>
-            Sort downloads into folders by type
-            <small>
-              Video, Audio, Documents, Programs, Archives and Images. Anything
-              else stays in the download folder.
-            </small>
-          </span>
+          <span>Sort downloads into folders by type</span>
         </label>
 
-        <label class="row">
-          <span>
-            Limit the total download speed to
-            <small>
-              Shared by every download, and applied to downloads already
-              running, so the connection stays usable for everything else.
-            </small>
-          </span>
+        <label
+          class="row"
+          title="Shared by every download, and applied to downloads already running, so the connection stays usable for everything else."
+        >
+          <span>Limit the total download speed to</span>
           <select id="speed-limit">
             <option value="0">no limit</option>
             <option value="524288">512 KB/s</option>
@@ -154,33 +146,24 @@
           </select>
         </label>
 
-        <div class="row">
-          <span>
-            Display speed as
-            <small>Toggle between bits per second (Mbps) and bytes per second (MB/s).</small>
-          </span>
+        <div class="row" title="Toggle between bits per second (Mbps) and bytes per second (MB/s).">
+          <span>Display speed as</span>
           <button type="button" id="speed-in-bits" class="toggle-btn" aria-pressed="false">
             <span class="toggle-label">MB/s</span>
           </button>
         </div>
 
         <h2>Starting up</h2>
-        <label class="row switch">
+        <label class="row switch" title="Comes up in the tray, not as a window.">
           <input type="checkbox" id="start-with-windows" />
-          <span>
-            Start Divine IDM when I sign in
-            <small>Comes up in the tray, not as a window.</small>
-          </span>
+          <span>Start Divine IDM when I sign in</span>
         </label>
-        <label class="row switch">
+        <label
+          class="row switch"
+          title="Anything authorised by your browser is listed but not restarted, because its cookies were never stored."
+        >
           <input type="checkbox" id="resume-on-start" />
-          <span>
-            Pick up interrupted downloads
-            <small>
-              Anything authorised by your browser is listed but not restarted,
-              because its cookies were never stored.
-            </small>
-          </span>
+          <span>Pick up interrupted downloads</span>
         </label>
 
         <h2>When the queue finishes</h2>
@@ -250,6 +233,23 @@
     </main>
 
     <div id="toast" class="toast" hidden></div>
+
+    <!-- A single reusable confirmation, built once and filled in by whatever
+         asks for it, rather than one dialog per destructive action. -->
+    <div id="confirm-modal" class="modal-overlay" hidden>
+      <div class="modal">
+        <p id="confirm-message"></p>
+        <label class="modal-remember">
+          <input type="checkbox" id="confirm-remember" />
+          Remember my choice
+        </label>
+        <div class="modal-actions">
+          <button id="confirm-cancel" class="ghost">Cancel</button>
+          <button id="confirm-ok" class="danger">Clear</button>
+        </div>
+      </div>
+    </div>
+
     <script type="module" src="app.js"></script>
   </body>
 </html>

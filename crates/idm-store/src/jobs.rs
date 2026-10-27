@@ -249,6 +249,17 @@ impl Store {
         let conn = self.conn();
         Ok(conn.execute("DELETE FROM jobs WHERE finished_at_ms IS NOT NULL", [])?)
     }
+
+    /// Forgets only the finished jobs that did not complete — cancelled and
+    /// failed downloads, never a finished one, so a bulk clear here cannot
+    /// lose a file the user can still find.
+    pub fn clear_incomplete_history(&self) -> Result<usize> {
+        let conn = self.conn();
+        Ok(conn.execute(
+            "DELETE FROM jobs WHERE finished_at_ms IS NOT NULL AND state = 'failed'",
+            [],
+        )?)
+    }
 }
 
 #[cfg(test)]
@@ -356,6 +367,22 @@ mod tests {
         assert_eq!(store.clear_history().unwrap(), 1);
         assert!(store.job(done).unwrap().is_none());
         assert!(store.job(going).unwrap().is_some());
+    }
+
+    #[test]
+    fn clearing_incomplete_history_leaves_finished_downloads_alone() {
+        let store = Store::in_memory().unwrap();
+        let done = store.add_job(&a_job()).unwrap();
+        let cancelled = store.add_job(&a_job()).unwrap();
+        let going = store.add_job(&a_job()).unwrap();
+        store.set_job_state(done, JobState::Completed, None).unwrap();
+        store.set_job_state(cancelled, JobState::Failed, Some("cancelled")).unwrap();
+        store.set_job_state(going, JobState::Running, None).unwrap();
+
+        assert_eq!(store.clear_incomplete_history().unwrap(), 1);
+        assert!(store.job(done).unwrap().is_some(), "a finished download must survive");
+        assert!(store.job(cancelled).unwrap().is_none());
+        assert!(store.job(going).unwrap().is_some(), "a running download must survive");
     }
 
     #[test]
