@@ -98,6 +98,9 @@ function toast(message, bad = false) {
   const element = $("toast");
   element.textContent = message;
   element.classList.toggle("bad", bad);
+  // A problem interrupts a screen reader's queue; a confirmation waits its
+  // turn. Both are still spoken without anyone having to be looking at it.
+  element.setAttribute("aria-live", bad ? "assertive" : "polite");
   element.hidden = false;
   clearTimeout(toast.timer);
   toast.timer = setTimeout(() => (element.hidden = true), 4200);
@@ -119,10 +122,6 @@ const SVG_NS = "http://www.w3.org/2000/svg";
 // button's text colour, and are built with DOM calls instead of markup so
 // nothing here is ever parsed as HTML.
 const ICONS = {
-  eye: [
-    ["path", { d: "M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12z" }],
-    ["circle", { cx: "12", cy: "12", r: "3" }],
-  ],
   pause: [
     ["rect", { x: "6", y: "5", width: "4", height: "14", rx: "1", fill: "currentColor" }],
     ["rect", { x: "14", y: "5", width: "4", height: "14", rx: "1", fill: "currentColor" }],
@@ -162,6 +161,20 @@ function icon(name) {
     svg.append(part);
   }
   return svg;
+}
+
+/**
+ * A button with an icon and its own visible label, never the icon alone:
+ * the same symbol can be read differently by different people, and a title
+ * tooltip is invisible until a mouse happens to sit still over it.
+ */
+function iconButton(iconName, label, { quiet = false } = {}) {
+  const button = document.createElement("button");
+  button.className = quiet ? "icon quiet" : "icon";
+  button.append(icon(iconName), document.createElement("span"));
+  button.lastChild.textContent = label;
+  button.title = label;
+  return button;
 }
 
 function render(snapshot) {
@@ -271,22 +284,12 @@ function renderJobs(jobs) {
 
       const going = job.state === "running" || job.state === "queued";
       const finished = job.state === "completed";
-      const toggle = document.createElement("button");
-      toggle.className = "icon";
-      // Symbols rather than words: they sit inline with the status and mean
-      // the same thing in any language.
-      toggle.append(icon(going ? "pause" : "play"));
-      toggle.title = going ? "Pause" : "Resume";
-      toggle.setAttribute("aria-label", toggle.title);
+      const toggle = iconButton(going ? "pause" : "play", going ? "Pause" : "Resume");
       toggle.onclick = () => act(going ? "pause_job" : "resume_job", { id: job.id });
 
       // Nothing left to pause or resume once it has finished; the one
       // control that still means something is finding the file again.
-      const reveal = document.createElement("button");
-      reveal.className = "icon";
-      reveal.append(icon("folder"));
-      reveal.title = "Show in folder";
-      reveal.setAttribute("aria-label", reveal.title);
+      const reveal = iconButton("folder", "Open folder");
       reveal.onclick = () =>
         invoke("reveal", { path: `${job.output_dir}\\${job.filename}` }).catch((error) =>
           toast(String(error), true),
@@ -605,15 +608,19 @@ async function showHistory() {
         meta.className = "meta";
         meta.textContent = `${bytes(job.downloaded)} · ${when(job.finished_at_ms)}`;
 
-        row.append(name, meta);
+        // The word, not just the colour: a badge that says what happened,
+        // so telling two rows apart never depends on being able to see red
+        // from green.
+        const finished = job.state === "completed";
+        const badge = document.createElement("span");
+        badge.className = `hrow-badge ${job.state}`;
+        badge.textContent = finished ? "Finished" : "Incomplete";
 
-        if (job.state === "completed") {
+        row.append(name, badge, meta);
+
+        if (finished) {
           // Finished: the only thing left to do with it is find it again.
-          const open = document.createElement("button");
-          open.className = "icon";
-          open.append(icon("folder"));
-          open.title = "Show in folder";
-          open.setAttribute("aria-label", "Show in folder");
+          const open = iconButton("folder", "Open folder");
           open.onclick = () =>
             invoke("reveal", { path: `${job.output_dir}\\${job.filename}` }).catch((error) =>
               toast(String(error), true),
@@ -629,11 +636,8 @@ async function showHistory() {
             row.append(reason);
           }
 
-          const resume = document.createElement("button");
-          resume.className = "icon";
-          resume.append(icon("play"));
+          const resume = iconButton("play", "Resume");
           resume.title = "Resume — carries on from the bytes already on disk";
-          resume.setAttribute("aria-label", "Resume this download");
           resume.onclick = async () => {
             try {
               await invoke("resume_from_history", { id: job.id });
@@ -644,11 +648,8 @@ async function showHistory() {
             }
           };
 
-          const remove = document.createElement("button");
-          remove.className = "icon quiet";
-          remove.append(icon("trash"));
+          const remove = iconButton("trash", "Remove", { quiet: true });
           remove.title = "Remove from history";
-          remove.setAttribute("aria-label", "Remove this entry from history");
           remove.onclick = async () => {
             try {
               await invoke("remove_history_row", { id: job.id });
@@ -686,17 +687,33 @@ $("add").addEventListener("submit", async (event) => {
   }
 });
 
-for (const tab of document.querySelectorAll(".tab")) {
-  tab.addEventListener("click", () => {
-    for (const other of document.querySelectorAll(".tab")) {
-      other.classList.toggle("is-active", other === tab);
-    }
-    for (const name of ["active", "history", "settings"]) {
-      $(`panel-${name}`).hidden = name !== tab.dataset.tab;
-    }
-    if (tab.dataset.tab === "history") showHistory();
-    // A browser may have been installed or paired since this was last looked at.
-    if (tab.dataset.tab === "settings") refreshBrowsers();
+const tabs = [...document.querySelectorAll(".tab")];
+
+function selectTab(tab, giveFocus = false) {
+  for (const other of tabs) {
+    const active = other === tab;
+    other.classList.toggle("is-active", active);
+    // The state a screen reader announces, not only the one shown in paint.
+    other.setAttribute("aria-selected", String(active));
+  }
+  for (const name of ["active", "history", "settings"]) {
+    $(`panel-${name}`).hidden = name !== tab.dataset.tab;
+  }
+  if (tab.dataset.tab === "history") showHistory();
+  // A browser may have been installed or paired since this was last looked at.
+  if (tab.dataset.tab === "settings") refreshBrowsers();
+  if (giveFocus) tab.focus();
+}
+
+for (const tab of tabs) {
+  tab.addEventListener("click", () => selectTab(tab));
+  // Left/Right move the selection too, as the standard tab widget does —
+  // Tab alone would still work, but an arrow key is the shortcut people who
+  // use tabs every day already reach for.
+  tab.addEventListener("keydown", (event) => {
+    const index = tabs.indexOf(tab);
+    if (event.key === "ArrowRight") selectTab(tabs[(index + 1) % tabs.length], true);
+    else if (event.key === "ArrowLeft") selectTab(tabs[(index - 1 + tabs.length) % tabs.length], true);
   });
 }
 
@@ -919,9 +936,9 @@ function browserRow(row) {
   // means to connect is exactly the one with nothing else on its row to click.
   const hide = document.createElement("button");
   hide.className = "icon quiet";
-  hide.textContent = "\u2715";
+  hide.append("\u2715", document.createElement("span"));
+  hide.lastChild.textContent = "Hide";
   hide.title = `Hide ${row.name} from this list`;
-  hide.setAttribute("aria-label", hide.title);
   hide.onclick = () => {
     saveSettings({ hidden_browsers: [...hiddenBrowsers, row.name] });
   };

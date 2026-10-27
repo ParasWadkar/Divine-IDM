@@ -44,13 +44,40 @@
     <section id="notices" class="notices" hidden></section>
 
     <nav class="tabs" role="tablist">
-      <button class="tab is-active" data-tab="active" role="tab">Downloads</button>
-      <button class="tab" data-tab="history" role="tab">History</button>
-      <button class="tab" data-tab="settings" role="tab">Settings</button>
+      <button
+        id="tab-active"
+        class="tab is-active"
+        data-tab="active"
+        role="tab"
+        aria-selected="true"
+        aria-controls="panel-active"
+      >
+        Downloads
+      </button>
+      <button
+        id="tab-history"
+        class="tab"
+        data-tab="history"
+        role="tab"
+        aria-selected="false"
+        aria-controls="panel-history"
+      >
+        History
+      </button>
+      <button
+        id="tab-settings"
+        class="tab"
+        data-tab="settings"
+        role="tab"
+        aria-selected="false"
+        aria-controls="panel-settings"
+      >
+        Settings
+      </button>
     </nav>
 
     <main>
-      <section id="panel-active" class="panel">
+      <section id="panel-active" class="panel" role="tabpanel" aria-labelledby="tab-active">
         <div class="speed">
           <div class="speed-head">
             <div>
@@ -65,7 +92,13 @@
         <div id="jobs" class="jobs"></div>
       </section>
 
-      <section id="panel-history" class="panel" hidden>
+      <section
+        id="panel-history"
+        class="panel"
+        role="tabpanel"
+        aria-labelledby="tab-history"
+        hidden
+      >
         <div class="panel-head">
           <h2>History</h2>
           <div class="panel-actions">
@@ -76,7 +109,13 @@
         <div id="history" class="history"></div>
       </section>
 
-      <section id="panel-settings" class="panel" hidden>
+      <section
+        id="panel-settings"
+        class="panel"
+        role="tabpanel"
+        aria-labelledby="tab-settings"
+        hidden
+      >
         <h2>Downloads</h2>
         <label
           class="row switch"
@@ -232,7 +271,7 @@
       </section>
     </main>
 
-    <div id="toast" class="toast" hidden></div>
+    <div id="toast" class="toast" role="status" aria-live="polite" aria-atomic="true" hidden></div>
 
     <!-- A single reusable confirmation, built once and filled in by whatever
          asks for it, rather than one dialog per destructive action. -->

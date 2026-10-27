@@ -20,6 +20,15 @@
   box-sizing: border-box;
 }
 
+/* One visible focus ring for every control a keyboard can land on, so
+   tabbing through the window never leaves the current control a guess.
+   `:focus-visible` rather than `:focus` so a mouse click does not paint a
+   ring nobody asked to see. */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
 html,
 body {
   margin: 0;
@@ -472,6 +481,31 @@ canvas {
   color: var(--good);
 }
 
+/* The word carries the meaning; colour only repeats it for someone who can
+   use colour to tell the two apart faster. Telling them apart never depends
+   on being able to. */
+.hrow-badge {
+  flex: none;
+  padding: 2px 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+
+.hrow-badge.completed {
+  color: var(--good);
+  border-color: var(--good);
+}
+
+.hrow-badge.failed {
+  color: var(--bad);
+  border-color: var(--bad);
+}
+
 /* -------------------------------------------------------------- settings */
 
 .row {
@@ -591,8 +625,8 @@ code {
 }
 
 button.icon {
-  padding: 2px 7px;
-  min-width: 26px;
+  padding: 5px 10px;
+  min-height: 26px;
   font-size: 12px;
   line-height: 1.4;
   color: var(--text);
@@ -887,13 +921,16 @@ button.icon.quiet:hover {
   min-width: 96px;
 }
 
-/* The icons are inline SVG, so the button only has to centre them. */
+/* Icon and label travel together: the icon alone cannot carry a meaning
+   that holds up across people, languages or a glance that misses it. */
 button.icon {
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  gap: 6px;
 }
 
 button.icon svg {
   display: block;
+  flex: none;
 }
