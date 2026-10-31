@@ -470,6 +470,12 @@ canvas {
 
 .hrow .name {
   flex: 1;
+  /* The filename is what tells one row from another, so it is the last
+     thing on the row that may give up space. `flex: 1` bases it at zero,
+     which left it at no width at all beside a long failure reason: the
+     rows that had most to say about themselves were the ones that ended up
+     unnamed. */
+  min-width: 12ch;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -479,6 +485,17 @@ canvas {
   color: var(--muted);
   font-size: 12px;
   font-variant-numeric: tabular-nums;
+}
+
+/* Why a download stopped is worth a line where there is room for one and
+   worth losing where there is not. `min-width: 0` is what lets it shrink at
+   all -- a flex item will not go below its longest word without it -- and
+   its title keeps the full sentence. */
+.hrow .reason {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .hrow.failed .name {

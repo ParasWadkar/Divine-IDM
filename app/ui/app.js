@@ -631,8 +631,11 @@ async function showHistory() {
           // on disk are still there to carry on from, or to simply forget.
           if (job.error) {
             const reason = document.createElement("div");
-            reason.className = "meta";
+            reason.className = "meta reason";
             reason.textContent = job.error;
+            // It is the first thing cut short when the window is narrow, so
+            // the whole sentence has to stay reachable somewhere.
+            reason.title = job.error;
             row.append(reason);
           }
 
