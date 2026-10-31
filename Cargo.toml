@@ -13,7 +13,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 # Let-chains, which this code uses throughout, stabilised in 1.88. The
 # declared 1.85 was never true: the workspace would not build on it.
