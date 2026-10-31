@@ -117,12 +117,37 @@ pub struct Preallocation {
     pub max_writer_shards: u8,
 }
 
+/// Bytes as the window says them, so one number reads the same wherever it
+/// is shown: 1024-based, one decimal until the figure reaches three digits.
+///
+/// This one ends up in front of someone who is being told to go and free
+/// up disk space, and `190950628030 bytes` leaves them to work out for
+/// themselves how much that is and how far short they are.
+fn human(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    let mut value = bytes as f64;
+    let mut power = 0;
+    while value >= 1024.0 && power < UNITS.len() - 1 {
+        value /= 1024.0;
+        power += 1;
+    }
+    if power == 0 || value >= 100.0 {
+        format!("{} {}", value.round() as u64, UNITS[power])
+    } else {
+        format!("{value:.1} {}", UNITS[power])
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum PreallocError {
     #[error("preallocation I/O failed: {0}")]
     Io(#[from] io::Error),
     #[error(
-        "not enough space on {volume}: need {needed} bytes (file plus {headroom} headroom), {available} available"
+        "not enough space on {volume}: needs {} (the file plus {} to work in) and {} is free — free up {} or save it somewhere else",
+        human(*needed),
+        human(*headroom),
+        human(*available),
+        human(needed.saturating_sub(*available)),
     )]
     InsufficientSpace { volume: String, needed: u64, available: u64, headroom: u64 },
 }
@@ -451,6 +476,26 @@ mod tests {
     use crate::pio;
 
     const TOTAL: u64 = 64 << 20;
+
+    #[test]
+    fn running_out_of_room_says_how_much_in_words_a_person_reads() {
+        // The person reading this is about to go and clear disk space, so
+        // the number they need is how far short they are -- not three
+        // twelve-digit byte counts to subtract from each other.
+        let error = PreallocError::InsufficientSpace {
+            volume: "D:\\".into(),
+            needed: 190_950_628_030,
+            available: 180_735_242_240,
+            headroom: 64 << 20,
+        };
+        let said = error.to_string();
+
+        assert!(said.contains("178 GB"), "the size wanted, in words: {said}");
+        assert!(said.contains("168 GB"), "the space there is, in words: {said}");
+        assert!(said.contains("9.5 GB"), "how far short, so nobody has to subtract: {said}");
+        assert!(said.contains("save it somewhere else"), "and a way out: {said}");
+        assert!(!said.contains("190950628030"), "no raw byte counts: {said}");
+    }
 
     fn fresh_part(dir: &Path) -> (std::path::PathBuf, File) {
         let path = dir.join("download.bin.idmpart");

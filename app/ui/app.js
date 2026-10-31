@@ -245,6 +245,29 @@ function renderPairing(pending) {
   );
 }
 
+/**
+ * What a download's state is called.
+ *
+ * One state, one name: History calls a finished download "Finished", so
+ * calling the same thing "Complete" over here left two words for one state
+ * and no way to tell they meant it. The rest were the enum as the engine
+ * spells it, which is why they alone were lower case.
+ */
+function stateLabel(job) {
+  if (job.state === "reconnecting") {
+    return typeof job.retry_in_secs === "number"
+      ? `Reconnecting in ${job.retry_in_secs}s`
+      : "Reconnecting";
+  }
+  const names = {
+    completed: "Finished",
+    running: "Running",
+    queued: "Queued",
+    paused: "Paused",
+  };
+  return names[job.state] ?? job.state;
+}
+
 function renderJobs(jobs) {
   const list = $("jobs");
   // A cancelled or failed download has nothing left to show moving: showing
@@ -273,14 +296,7 @@ function renderJobs(jobs) {
       // in the row of buttons, because it is the answer to the word.
       const state = document.createElement("div");
       state.className = `job-state ${job.state}`;
-      state.textContent =
-        job.state === "reconnecting"
-          ? typeof job.retry_in_secs === "number"
-            ? `reconnecting in ${job.retry_in_secs}s`
-            : "reconnecting"
-          : job.state === "completed"
-            ? "Complete"
-            : job.state;
+      state.textContent = stateLabel(job);
 
       const going = job.state === "running" || job.state === "queued";
       const finished = job.state === "completed";
@@ -314,9 +330,12 @@ function renderJobs(jobs) {
       const foot = document.createElement("div");
       foot.className = "job-foot";
       const size = document.createElement("span");
-      size.textContent = known
-        ? `${bytes(job.downloaded)} of ${bytes(job.total)}`
-        : bytes(job.downloaded);
+      // "45.1 MB of 45.1 MB" is one number said twice. Once it has finished
+      // the total is simply the size, which is all there is left to say.
+      size.textContent =
+        known && !finished
+          ? `${bytes(job.downloaded)} of ${bytes(job.total)}`
+          : bytes(job.downloaded);
       const speed = document.createElement("span");
       speed.textContent = job.state === "running" ? rate(job.bytes_per_sec) : "";
       const conns = document.createElement("span");
@@ -336,7 +355,17 @@ function renderJobs(jobs) {
       // Said plainly: this one does not keep the bytes, and the pause button
       // beside the status is the one that does.
       cancel.title = "Stop and delete what has been downloaded";
-      cancel.onclick = () => act("cancel_job", { id: job.id });
+      // It cannot be undone, and the tooltip saying so is invisible until a
+      // mouse happens to rest on it -- while clearing history, which deletes
+      // no file at all, has always asked first. "Remember my choice" is
+      // there for anyone who would rather it stopped asking.
+      cancel.onclick = async () => {
+        const sure = await confirmDialog(
+          `Stop ${job.filename} and delete the ${bytes(job.downloaded)} downloaded so far? Pausing keeps it.`,
+          { confirm: "Stop and delete", rememberKey: "skip-cancel-download-confirm" },
+        );
+        if (sure) act("cancel_job", { id: job.id });
+      };
 
       // For a link that expired while the download sat waiting. The bytes are
       // still good; only the way back to the rest of them is stale, so this
@@ -356,7 +385,12 @@ function renderJobs(jobs) {
         foot.append(cancel);
       }
 
-      card.append(top, bar, foot);
+      // A finished download has no progress left to report. A bar sitting
+      // full says only what the word beside it already says, and takes a
+      // row of the window to say it.
+      card.append(top);
+      if (!finished) card.append(bar);
+      card.append(foot);
       if (job.error) {
         const error = document.createElement("div");
         error.className = "job-error";
@@ -763,8 +797,12 @@ $("speed-in-bits").addEventListener("click", () => {
  * confirmed. Skipped entirely once they have ticked "Remember my choice"
  * for this `rememberKey`, kept in localStorage since it is a preference
  * about this window, not a setting the engine needs to know.
+ *
+ * `confirm` names the action on the button that performs it. Someone who
+ * reads nothing but the button they are about to press should still know
+ * what it does, which a dialog with one fixed word on it cannot tell them.
  */
-function confirmDialog(message, rememberKey) {
+function confirmDialog(message, { confirm = "Confirm", rememberKey } = {}) {
   try {
     if (rememberKey && localStorage.getItem(rememberKey) === "1") return Promise.resolve(true);
   } catch {
@@ -779,6 +817,7 @@ function confirmDialog(message, rememberKey) {
     const okBtn = $("confirm-ok");
 
     $("confirm-message").textContent = message;
+    okBtn.textContent = confirm;
     remember.checked = false;
     overlay.hidden = false;
 
@@ -805,7 +844,7 @@ function confirmDialog(message, rememberKey) {
 $("clear-history").addEventListener("click", async () => {
   const sure = await confirmDialog(
     "Clear the whole history? Finished downloads will no longer show in this list — the files on disk are untouched.",
-    "skip-clear-all-history-confirm",
+    { confirm: "Clear all", rememberKey: "skip-clear-all-history-confirm" },
   );
   if (!sure) return;
   await act("clear_history");
@@ -815,7 +854,7 @@ $("clear-history").addEventListener("click", async () => {
 $("clear-incomplete").addEventListener("click", async () => {
   const sure = await confirmDialog(
     "Clear incomplete downloads from history? The files on disk are untouched.",
-    "skip-clear-incomplete-history-confirm",
+    { confirm: "Clear incomplete", rememberKey: "skip-clear-incomplete-history-confirm" },
   );
   if (!sure) return;
   await act("clear_incomplete_history");
