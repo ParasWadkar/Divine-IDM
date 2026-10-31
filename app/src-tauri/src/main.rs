@@ -23,6 +23,7 @@ use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent}
 use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
 
 mod autostart;
+mod batch;
 mod fileicon;
 mod opened;
 mod state;
@@ -54,8 +55,28 @@ async fn add_download(
     state: State<'_, AppState>,
     url: String,
     filename: Option<String>,
-) -> Result<u64, String> {
-    state.add_download(url, filename).await
+) -> Result<usize, String> {
+    let addresses = batch::expand(url.trim())?;
+
+    // A name was chosen for one file, so it cannot be given to all of
+    // them; past the first the server's own name is the only one left.
+    let mut queued = 0;
+    let mut failed: Option<String> = None;
+    for (index, address) in addresses.iter().enumerate() {
+        let name = if index == 0 { filename.clone() } else { None };
+        match state.add_download(address.clone(), name).await {
+            Ok(_) => queued += 1,
+            Err(error) => failed = failed.or(Some(error)),
+        }
+    }
+
+    // One address that failed is the whole request failing. Several, and
+    // what matters is how many started, so the rest are not silently lost
+    // behind the first one's reason.
+    match failed {
+        Some(error) if queued == 0 => Err(error),
+        _ => Ok(queued),
+    }
 }
 
 #[tauri::command]

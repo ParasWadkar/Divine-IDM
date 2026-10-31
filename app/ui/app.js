@@ -887,8 +887,11 @@ $("add").addEventListener("submit", async (event) => {
   const url = field.value.trim();
   if (!url) return;
   try {
-    await invoke("add_download", { url, filename: null });
+    const queued = await invoke("add_download", { url, filename: null });
     field.value = "";
+    // Said only when one address stood for several, since otherwise the
+    // download appearing in the list below says it already.
+    if (queued > 1) toast(`Queued ${queued} downloads`);
     refresh();
   } catch (error) {
     toast(String(error), true);
