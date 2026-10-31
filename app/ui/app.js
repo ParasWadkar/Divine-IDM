@@ -810,6 +810,11 @@ $("clear-history").addEventListener("click", async () => {
 });
 
 $("clear-incomplete").addEventListener("click", async () => {
+  const sure = await confirmDialog(
+    "Clear incomplete downloads from history? The files on disk are untouched.",
+    "skip-clear-incomplete-history-confirm",
+  );
+  if (!sure) return;
   await act("clear_incomplete_history");
   showHistory();
 });

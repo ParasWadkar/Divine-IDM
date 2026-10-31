@@ -20,6 +20,14 @@
   box-sizing: border-box;
 }
 
+/* The `hidden` attribute has to beat whatever `display` a class sets. It
+   comes from the UA stylesheet, so any author `display` silently wins and
+   leaves the element on screen — which is how a dismissed modal stayed up
+   with no way left to close it. */
+[hidden] {
+  display: none !important;
+}
+
 /* One visible focus ring for every control a keyboard can land on, so
    tabbing through the window never leaves the current control a guess.
    `:focus-visible` rather than `:focus` so a mouse click does not paint a
@@ -458,7 +466,6 @@ canvas {
   gap: 12px;
   padding: 9px 12px;
   background: var(--panel);
-  flex-wrap: wrap;
 }
 
 .hrow .name {
