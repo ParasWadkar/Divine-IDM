@@ -87,6 +87,19 @@ struct Inner {
     pairings: Mutex<PairingStore>,
     /// Cancels an armed post-download action, if one is counting down.
     armed: Mutex<Option<Canceller>>,
+    /// The BitTorrent session, started the first time one is needed.
+    ///
+    /// Lazy on purpose. A session listens on a port, joins the DHT and
+    /// announces itself; somebody who never opens a torrent should have this
+    /// app doing none of that. One for the whole engine, not one per job:
+    /// see `idm_torrent::Torrents`.
+    torrents: tokio::sync::OnceCell<Arc<idm_torrent::Torrents>>,
+    /// The torrents currently in that session, by job.
+    ///
+    /// Needed because cancelling aborts the job's task, and a torrent is not
+    /// the task -- it lives in the session and would keep running, and keep
+    /// talking to peers, with nothing left watching it.
+    live_torrents: Mutex<HashMap<JobId, Arc<idm_torrent::Torrent>>>,
 }
 
 /// Runs downloads on behalf of IPC clients.
@@ -159,6 +172,8 @@ impl Engine {
                 limiter: Arc::new(idm_net::limiter::RateLimiter::new(starting_limit)),
                 claimed: Mutex::new(std::collections::HashSet::new()),
                 armed: Mutex::new(None),
+                torrents: tokio::sync::OnceCell::new(),
+                live_torrents: Mutex::new(HashMap::new()),
             }),
         });
         start_stall_watchdog(Arc::clone(&engine.inner));
@@ -180,15 +195,32 @@ impl Engine {
         // The threshold is about whether a download is big enough to be
         // worth taking over. A stream manifest is a few hundred bytes and
         // stands for a video of gigabytes, so its own size says nothing —
-        // measuring it would refuse every stream there is.
+        // measuring it would refuse every stream there is. A `.torrent` is
+        // the same trick in a different wrapper: thirty kilobytes of bencode
+        // standing for however large the swarm's files are.
         let manifest = idm_net::stream::looks_like_manifest(&request.url);
+        let torrent = idm_torrent::Source::parse(&request.url);
         if let Some(size) = request.size_hint
             && !manifest
+            && torrent.is_none()
             && size < min_takeover_bytes
         {
             return Err(format!(
                 "{size} bytes is below the {min_takeover_bytes} byte takeover threshold"
             ));
+        }
+
+        // A torrent names itself. Taking the leaf of the address would give
+        // `download.bin` for every magnet there is, since a magnet has no
+        // path to take a leaf from.
+        if let Some(source) = &torrent {
+            let name = request
+                .filename
+                .as_deref()
+                .and_then(sanitise_filename)
+                .or_else(|| sanitise_filename(&source.provisional_name()))
+                .unwrap_or_else(|| "torrent".to_owned());
+            return Ok(name);
         }
 
         // A suggested name goes through the same sanitiser as a
@@ -336,9 +368,18 @@ impl Engine {
             Err(reason) => return Response::Rejected { reason },
         };
 
+        // Settled once, because three later decisions turn on it and
+        // re-parsing in each place is how they come to disagree.
+        let torrent = idm_torrent::Source::parse(&request.url);
+
         // A name the URL cannot supply is asked of the server before anything
-        // is decided. See `name_from_server`.
-        let filename = if request.filename.is_none() && !has_extension(&filename) {
+        // is decided. See `name_from_server`. Never for a torrent: there is
+        // no server to ask, and a magnet would be sent as an HTTP address.
+        // The real name comes from the metadata, once the swarm supplies it.
+        let filename = if torrent.is_none()
+            && request.filename.is_none()
+            && !has_extension(&filename)
+        {
             name_from_server(&request).await.unwrap_or(filename)
         } else {
             filename
@@ -388,7 +429,18 @@ impl Engine {
         };
 
         // Settled before anything is written, and held until the job ends.
-        let (filename, claimed_path) = self.claim_destination(&output_dir, &filename).await;
+        //
+        // Not for a torrent. A claim reserves one file path and sidesteps a
+        // collision by downloading to `name (1)`; a torrent writes a whole
+        // folder of files whose names come from the metadata, and librqbit
+        // places them itself. Reserving a path here would reserve one nothing
+        // is ever written to.
+        let (filename, claimed_path) = if torrent.is_some() {
+            (filename, None)
+        } else {
+            let (filename, claimed) = self.claim_destination(&output_dir, &filename).await;
+            (filename, Some(claimed))
+        };
 
         let mut config = DownloadConfig::new(request.url.clone(), output_dir.clone());
         config.filename = Some(filename.clone());
@@ -444,7 +496,7 @@ impl Engine {
             JobRecord {
                 status,
                 abort: None,
-                claimed: Some(claimed_path),
+                claimed: claimed_path,
                 config: Box::new(config),
                 waiting: true,
                 attempts: 0,
@@ -782,6 +834,17 @@ impl Engine {
                 }
             }
         };
+        // Aborting the task is enough to stop every other kind of download,
+        // because the task *is* the download. A torrent is not: it lives in
+        // the session and would carry on talking to peers at full speed
+        // behind a list that says Paused. Paused rather than removed, so
+        // librqbit keeps its record of which pieces are verified.
+        if let Some(torrent) = self.inner.live_torrents.lock().await.get(&id).cloned()
+            && let Err(error) = torrent.pause().await
+        {
+            tracing::warn!(%error, "could not pause a torrent");
+        }
+
         write_state(&self.inner, id, JobState::Paused, None).await;
         // A slot has just come free.
         pump(Arc::clone(&self.inner)).await;
@@ -861,6 +924,23 @@ impl Engine {
                 working.push(suffix);
                 let _ = std::fs::remove_file(PathBuf::from(working));
             }
+        }
+
+        // Out of the session altogether, so it stops talking to peers and
+        // stops being resumed by anything later.
+        //
+        // The files are kept, which is where this parts company with
+        // cancelling any other download: above, the part file and journal are
+        // deleted, because they are scratch work nothing else could want. A
+        // torrent writes its real files in their real place, under names that
+        // came from the metadata -- and, because resuming requires writing
+        // into files that already exist, some of those files may have been
+        // there before this job and belong to somebody else. Deleting them on
+        // a cancel is not a risk worth taking to save some disk.
+        if let Some(torrent) = self.inner.live_torrents.lock().await.remove(&id)
+            && let Err(error) = torrent.remove(false).await
+        {
+            tracing::warn!(%error, "could not remove a cancelled torrent from the session");
         }
 
         write_state(&self.inner, id, JobState::Failed, Some("cancelled")).await;
@@ -1181,6 +1261,147 @@ fn record_transfer(inner: &Inner, id: JobId, done: u64, total: Option<u64>) {
     }
 }
 
+/// The BitTorrent session, started on first use.
+///
+/// `OnceCell` rather than a field set at construction, so that an app nobody
+/// torrents with never opens a listening socket or joins the DHT.
+async fn torrent_session(
+    inner: &Arc<Inner>,
+) -> std::result::Result<Arc<idm_torrent::Torrents>, RunFailure> {
+    // Read before the session starts and not re-read afterwards: librqbit
+    // takes its rate limit when the session is built. A limit changed later
+    // applies to the next run of the app, which is worth saying out loud
+    // rather than pretending otherwise.
+    let limit = inner.settings.lock().await.speed_limit_bytes_per_sec;
+    let download_dir = inner.output_dir.clone();
+
+    inner
+        .torrents
+        .get_or_try_init(|| async {
+            idm_torrent::Torrents::start(&idm_ipc::state_dir(), download_dir, limit)
+                .await
+                .map(Arc::new)
+                .map_err(RunFailure::from_transport)
+        })
+        .await
+        .cloned()
+}
+
+/// How often a running torrent's statistics are read.
+///
+/// Slower than the window's own refresh. There is nothing here to interpolate
+/// and a torrent's rate is already an average over seconds, so polling faster
+/// would only cost locks.
+const TORRENT_POLL: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// A torrent, from a magnet link or a `.torrent`.
+///
+/// Unlike every other driver here this one does not fetch anything itself: it
+/// hands the address to librqbit's session and then watches. The loop exists
+/// for progress, not for transfer.
+async fn run_torrent(
+    inner: &Arc<Inner>,
+    id: JobId,
+    config: &DownloadConfig,
+    source: idm_torrent::Source,
+) -> std::result::Result<Option<u64>, RunFailure> {
+    // A torrent this job already has is one that was paused: librqbit kept
+    // it, along with the record of which pieces are verified, so resuming is
+    // unpausing rather than adding it again. Adding again would throw that
+    // record away and re-check the files on disk.
+    let existing = inner.live_torrents.lock().await.get(&id).cloned();
+    let torrent = match existing {
+        Some(torrent) => {
+            torrent.resume().await.map_err(RunFailure::from_transport)?;
+            torrent
+        }
+        None => {
+            let session = torrent_session(inner).await?;
+            let torrent = Arc::new(
+                session
+                    .add(&source, &config.output_dir)
+                    .await
+                    .map_err(RunFailure::from_transport)?,
+            );
+            inner.live_torrents.lock().await.insert(id, Arc::clone(&torrent));
+            torrent
+        }
+    };
+
+    // A magnet starts with a placeholder: the real name is in the metadata,
+    // which arrives from the swarm after the job is already on screen. Taken
+    // once, the first time it is there.
+    let mut named = false;
+    let mut ticker = tokio::time::interval(TORRENT_POLL);
+
+    loop {
+        ticker.tick().await;
+
+        if !named && let Some(name) = torrent.name() {
+            adopt_torrent_name(inner, id, &name).await;
+            named = true;
+        }
+
+        let progress = torrent.progress();
+        record_torrent(inner, id, &progress);
+
+        match &progress.phase {
+            idm_torrent::Phase::Finished => {
+                // Stops talking to peers. See `stop_seeding` for why this app
+                // does not keep seeding on somebody's connection unasked.
+                torrent.stop_seeding().await;
+                inner.live_torrents.lock().await.remove(&id);
+                return Ok(progress.total);
+            }
+            idm_torrent::Phase::Failed(reason) => {
+                inner.live_torrents.lock().await.remove(&id);
+                return Err(RunFailure::from_transport(reason));
+            }
+            // `Preparing` is fetching metadata or checking files on disk,
+            // `Paused` can only be seen here if something outside this loop
+            // paused it, and neither is a reason to stop watching.
+            _ => {}
+        }
+    }
+}
+
+/// Takes the torrent's real name once the metadata supplies it.
+///
+/// Both in the list and in the stored row, or the history would keep the
+/// placeholder -- an info hash -- for good.
+async fn adopt_torrent_name(inner: &Arc<Inner>, id: JobId, name: &str) {
+    let Some(name) = sanitise_filename(name) else { return };
+
+    if let Some(record) = inner.jobs.lock().await.get_mut(&id) {
+        if record.status.filename == name {
+            return;
+        }
+        record.status.filename = name.clone();
+    }
+
+    if let Some((store, row)) = row_of(inner, id).await
+        && let Err(error) = store.set_job_filename(row, &name)
+    {
+        tracing::warn!(%error, "could not record a torrent's name");
+    }
+}
+
+/// A torrent's statistics, in the fields the window already draws.
+fn record_torrent(inner: &Inner, id: JobId, progress: &idm_torrent::Progress) {
+    if let Ok(mut jobs) = inner.jobs.try_lock()
+        && let Some(record) = jobs.get_mut(&id)
+    {
+        record.status.downloaded = progress.downloaded;
+        if progress.total.is_some() {
+            record.status.total = progress.total;
+        }
+        record.status.bytes_per_sec = progress.bytes_per_sec;
+        // Peers, which is not the same quantity as everywhere else on this
+        // field: nothing here chose the number. The swarm did.
+        record.status.connections = progress.peers;
+    }
+}
+
 /// FTP or FTPS. Credentials, if any, come from the address; otherwise the
 /// login is anonymous, which is what a bare ftp:// means.
 async fn run_ftp(
@@ -1353,7 +1574,9 @@ async fn start(inner: &Arc<Inner>, id: JobId, config: DownloadConfig) {
             // the HTTP path accepts the download and fails it with a message
             // about a "builder error" — which is exactly what happened when
             // the schemes were allowed in and this was not updated.
-            let outcome = if idm_net::stream::looks_like_manifest(&config.url) {
+            let outcome = if let Some(source) = idm_torrent::Source::parse(&config.url) {
+                run_torrent(&inner, id, &config, source).await
+            } else if idm_net::stream::looks_like_manifest(&config.url) {
                 run_stream(&inner, id, &config).await
             } else if idm_net::ftp::handles(&config.url) {
                 run_ftp(&inner, id, &config).await
@@ -1941,6 +2164,55 @@ mod tests {
                 "{hostile} should be refused"
             );
         }
+    }
+
+    #[test]
+    fn a_magnet_link_is_named_after_itself_and_not_after_its_address() {
+        // Taking the leaf of the address, which is what every other download
+        // does, gives `download.bin` for every magnet there is: a magnet has
+        // no path to take a leaf from.
+        let (_dir, engine) = engine();
+        let link = "magnet:?xt=urn:btih:c9e15763f722f23e98a29decdfae341b98d53056\
+                    &dn=Ubuntu+24.04.1+Desktop";
+        assert_eq!(engine.vet(&request(link), 0, true).unwrap(), "Ubuntu 24.04.1 Desktop");
+    }
+
+    #[test]
+    fn a_torrent_is_never_too_small_to_be_worth_taking_over() {
+        // The takeover threshold measures the thing being fetched. A
+        // `.torrent` is thirty kilobytes of bencode standing for however
+        // large the swarm's files are, so measuring it refuses every torrent
+        // a browser ever hands over -- the same trap a stream manifest sets.
+        let (_dir, engine) = engine();
+        let threshold = 10 << 20;
+
+        for address in [
+            "magnet:?xt=urn:btih:c9e15763f722f23e98a29decdfae341b98d53056",
+            "https://releases.example.org/ubuntu.iso.torrent",
+        ] {
+            let mut small = request(address);
+            small.size_hint = Some(30 << 10);
+            assert!(
+                engine.vet(&small, threshold, true).is_ok(),
+                "{address} should not be refused for being small"
+            );
+        }
+
+        // And the threshold still does its job on an ordinary download.
+        let mut small = request("https://example.invalid/tiny.bin");
+        small.size_hint = Some(30 << 10);
+        assert!(engine.vet(&small, threshold, true).is_err());
+    }
+
+    #[test]
+    fn a_torrent_file_on_this_machine_is_only_for_the_app_to_name() {
+        // `vet` is where the browser/app distinction is enforced for every
+        // other local-ish address, and a path to a file is the one a page
+        // must never be able to choose.
+        let (_dir, engine) = engine();
+        let path = r"D:\downloads\ubuntu.torrent";
+        assert!(engine.vet(&request(path), 0, true).is_ok());
+        assert!(engine.vet(&request(path), 0, false).is_err());
     }
 
     #[tokio::test]

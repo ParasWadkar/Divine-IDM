@@ -12,6 +12,7 @@ idm-core = { path = "../idm-core" }
 idm-ipc = { path = "../idm-ipc" }
 idm-net = { path = "../idm-net" }
 idm-store = { path = "../idm-store" }
+idm-torrent = { path = "../idm-torrent" }
 serde = { workspace = true }
 serde_json.workspace = true
 thiserror.workspace = true

@@ -22,6 +22,19 @@ const MOST: usize = 1000;
 /// A plain address stands only for itself, so the common case returns a
 /// list of one and nothing about it changes.
 pub fn expand(input: &str) -> Result<Vec<String>, String> {
+    // A torrent address is never a range. A magnet's `dn=` is a title
+    // somebody else wrote, and titles contain things like `Series[1-12]`,
+    // which would become twelve jobs pointed at info hashes nobody has.
+    //
+    // Asked of `Source::parse` rather than restated, so this and the engine's
+    // own expander cannot come to disagree about what a torrent is. That
+    // there are two expanders at all is a wart: this one runs for the window,
+    // because the window shows how many jobs were queued and the engine's
+    // reply does not carry a count.
+    if idm_torrent::Source::parse(input).is_some() {
+        return Ok(vec![input.to_owned()]);
+    }
+
     let Some((head, body, tail)) = split(input) else {
         return Ok(vec![input.to_owned()]);
     };
@@ -72,6 +85,20 @@ fn split(input: &str) -> Option<(&str, &str, &str)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_torrent_address_is_never_a_range() {
+        // The window's own path into the engine, so the guard has to be here
+        // too: without it a magnet whose title contains `[1-12]` is twelve
+        // jobs before the engine ever sees it.
+        const LINK: &str = concat!(
+            "magnet:?xt=urn:btih:c9e15763f722f23e98a29decdfae341b98d53056",
+            "&dn=Some.Series[1-12].1080p"
+        );
+        assert_eq!(expand(LINK).unwrap(), vec![LINK.to_owned()]);
+        let path = r"D:\dl\pack[1-9].torrent";
+        assert_eq!(expand(path).unwrap(), vec![path.to_owned()]);
+    }
 
     #[test]
     fn an_ordinary_address_stands_only_for_itself() {

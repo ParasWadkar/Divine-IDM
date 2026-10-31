@@ -16,6 +16,7 @@ idm-core = { path = "../../crates/idm-core" }
 idm-engine = { path = "../../crates/idm-engine" }
 idm-ipc = { path = "../../crates/idm-ipc" }
 idm-store = { path = "../../crates/idm-store" }
+idm-torrent = { path = "../../crates/idm-torrent" }
 serde = { workspace = true }
 serde_json.workspace = true
 tauri = { version = "2.11.6", features = ["tray-icon"] }

@@ -7,9 +7,10 @@
 //! the single-instance plugin forwards and then discards. Both go through
 //! [`torrent_files`] so they cannot disagree about what counts.
 //!
-//! The paths are only ever reported, never opened. There is no torrent engine
-//! behind them yet, and a path taken from a command line is not something to
-//! start reading files from without a reason.
+//! The paths are only ever vetted here, never opened: a path taken from a
+//! command line is not something to start reading files from on the strength
+//! of its name alone. The window asks for them and hands each to the engine,
+//! which reads the file and starts the torrent.
 
 use std::path::Path;
 

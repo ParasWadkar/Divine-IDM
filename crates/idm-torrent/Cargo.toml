@@ -1,0 +1,34 @@
+[package]
+name = "idm-torrent"
+description = "BitTorrent downloads, on librqbit's engine rather than this workspace's scheduler."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+# A torrent is a second engine, not another transport for ours: librqbit
+# brings its own piece picker, peer wire, storage and resume. That is why
+# this is its own crate rather than an adapter in `idm-net`, whose job is
+# feeding bytes to `idm-core`'s scheduler and journal.
+# `rust-tls` rather than the default `default-tls`: it keeps this on the same
+# TLS stack as the HTTP side instead of linking a second one, and carries the
+# sha1 backend librqbit refuses to build without.
+#
+# `disable-upload` exists and is deliberately not used. BitTorrent's choking
+# algorithm is reciprocal -- peers hand bytes to whoever hands them bytes --
+# so a client that only takes gets throttled by the swarm and banned by many
+# trackers. Uploading while fetching is what makes the download fast. What
+# this does not do is keep seeding afterwards; that stops at completion,
+# because this is a download manager.
+librqbit = { version = "9.1", default-features = false, features = ["rust-tls"] }
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time"] }
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"

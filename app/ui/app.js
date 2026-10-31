@@ -453,7 +453,13 @@ function jobCard(job) {
       const left = (job.total - job.downloaded) / job.bytes_per_sec;
       foot.append(fact("clock", `${duration(left)} remaining`));
     }
-    if (job.connections) foot.append(fact("link", `${job.connections} connections`));
+    if (job.connections) {
+      // The same field, but not the same quantity: for a torrent nothing on
+      // this side chose the number, the swarm did, and "connections" would
+      // suggest a setting that governs it.
+      const unit = isTorrent(job.url) ? "peers" : "connections";
+      foot.append(fact("link", `${job.connections} ${unit}`));
+    }
   } else {
     const state = document.createElement("span");
     state.className = `job-state ${job.state}`;
@@ -971,6 +977,17 @@ $("sidebar-folder").addEventListener("click", () => {
   $("choose-folder").focus();
 });
 
+// Whether an address is a torrent, which changes a couple of words in the
+// list. Deliberately a rough test: the engine makes the real decision, and
+// the worst a wrong guess does here is label a row "connections" instead of
+// "peers".
+function isTorrent(url) {
+  if (!url) return false;
+  const address = url.trim();
+  if (/^magnet:/i.test(address)) return true;
+  return /\.torrent$/i.test(address.split(/[?#]/)[0]);
+}
+
 // ---------------------------------------------------------- dropped files
 
 // A .torrent or a shortcut dropped on the window, rather than its address
@@ -1454,35 +1471,40 @@ async function collectOpenedFiles() {
   }
   if (!files.length) return;
 
+  // Started, not announced. This used to raise a notice saying BitTorrent
+  // was not supported; now the only reason a double-clicked `.torrent` does
+  // not simply begin is that something went wrong, and that is what the
+  // notice is for.
   const box = $("notices");
   for (const path of files) {
     const name = path.split(/[\\/]/).pop();
+    try {
+      await invoke("add_download", { url: path, filename: null });
+      continue;
+    } catch (error) {
+      const note = document.createElement("div");
+      note.className = "notice";
 
-    const note = document.createElement("div");
-    note.className = "notice";
+      const text = document.createElement("p");
+      const strong = document.createElement("strong");
+      // textContent: a file name is chosen by whoever made the file.
+      strong.textContent = name;
+      text.append(strong, ` could not be started: ${error}`);
 
-    const text = document.createElement("p");
-    // textContent: a file name is chosen by whoever made the file.
-    const strong = document.createElement("strong");
-    strong.textContent = name;
-    text.append(
-      strong,
-      " was opened with DivinePulse, but nothing was started. DivinePulse downloads over HTTP, " +
-        "FTP and SFTP; BitTorrent is not supported yet, so it cannot download this.",
-    );
+      const dismiss = document.createElement("button");
+      dismiss.className = "ghost";
+      dismiss.textContent = "Dismiss";
+      dismiss.onclick = () => {
+        note.remove();
+        box.hidden = box.childElementCount === 0;
+      };
 
-    const dismiss = document.createElement("button");
-    dismiss.className = "ghost";
-    dismiss.textContent = "Dismiss";
-    dismiss.onclick = () => {
-      note.remove();
-      box.hidden = box.childElementCount === 0;
-    };
-
-    note.append(text, dismiss);
-    box.append(note);
+      note.append(text, dismiss);
+      box.append(note);
+      box.hidden = false;
+    }
   }
-  box.hidden = false;
+  refresh();
 }
 
 listen("opened-file", () => collectOpenedFiles());

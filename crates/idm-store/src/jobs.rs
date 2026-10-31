@@ -179,6 +179,20 @@ impl Store {
     }
 
     /// Moves a job to a new state, stamping the finish time when it stops.
+    /// Renames a row.
+    ///
+    /// For the one case where a download does not know its own name when it
+    /// starts: a magnet link carries an info hash, and the name the files are
+    /// written under arrives later, from the swarm. Without this the history
+    /// would keep the placeholder for good.
+    pub fn set_job_filename(&self, id: i64, filename: &str) -> Result<()> {
+        self.conn().execute(
+            "UPDATE jobs SET filename = ?1 WHERE id = ?2",
+            rusqlite::params![filename, id],
+        )?;
+        Ok(())
+    }
+
     pub fn set_job_state(&self, id: i64, state: JobState, error: Option<&str>) -> Result<()> {
         let now = now_ms();
         let conn = self.conn();

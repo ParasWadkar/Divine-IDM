@@ -55,6 +55,14 @@ pub fn is_pattern(url: &str) -> bool {
 /// product or the pairs, people disagree about which, and a guess here
 /// either queues the wrong thing or queues far too much of it.
 pub fn expand(url: &str) -> Result<Vec<String>, BatchError> {
+    // A torrent address is never a range. A magnet's `dn=` is a title
+    // somebody else wrote, and titles contain things like `Series[1-12]` --
+    // which would silently become twelve jobs, eleven of them pointed at
+    // info hashes that do not exist.
+    if idm_torrent::Source::parse(url).is_some() {
+        return Ok(vec![url.to_owned()]);
+    }
+
     let Some(range) = find_range(url) else {
         return Ok(vec![url.to_owned()]);
     };
@@ -112,6 +120,26 @@ fn find_range(url: &str) -> Option<Range> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn a_magnet_whose_title_looks_like_a_range_stays_one_job() {
+        // The title belongs to whoever wrote the link, and titles really do
+        // contain `[1-12]`. Expanded, it would become twelve jobs pointed at
+        // info hashes nobody has.
+        const LINK: &str = concat!(
+            "magnet:?xt=urn:btih:c9e15763f722f23e98a29decdfae341b98d53056",
+            "&dn=Some.Series[1-12].1080p"
+        );
+        assert_eq!(expand(LINK).unwrap(), vec![LINK.to_owned()]);
+    }
+
+    #[test]
+    fn a_torrent_file_path_with_a_range_in_its_name_stays_one_job() {
+        let path = r"D:\dl\pack[1-9].torrent";
+        assert_eq!(expand(path).unwrap(), vec![path.to_owned()]);
+    }
+
     use super::*;
 
     #[test]

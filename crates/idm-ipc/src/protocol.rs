@@ -106,15 +106,24 @@ impl DownloadRequest {
         }
         let lower = url.to_ascii_lowercase();
         let web = lower.starts_with("http://") || lower.starts_with("https://");
+        // A magnet link is how anyone starts a torrent, including by clicking
+        // one on a page, so this is not gated the way `ftp` is: it names a
+        // swarm by hash, carries no credentials, and reaches nothing a
+        // browser could not reach for itself.
+        let magnet = lower.starts_with("magnet:");
+        // A path to a `.torrent` on this machine, which only the app and the
+        // command line may name. A page that could hand one over would have
+        // this process open an arbitrary local file of its choosing.
+        let torrent_file = file_transfer && is_local_torrent_path(url);
         let transfer = file_transfer
             && (lower.starts_with("ftp://")
                 || lower.starts_with("ftps://")
                 || lower.starts_with("sftp://"));
-        if !(web || transfer) {
+        if !(web || magnet || torrent_file || transfer) {
             return Err(if file_transfer {
-                "only http, https, ftp, ftps and sftp urls are accepted".into()
+                "only http, https, magnet, ftp, ftps and sftp addresses, or a .torrent file, are accepted".into()
             } else {
-                "only http and https urls are accepted".to_owned()
+                "only http, https and magnet addresses are accepted".to_owned()
             });
         }
         if let Some(name) = &self.filename {
@@ -129,6 +138,29 @@ impl DownloadRequest {
         }
         Ok(())
     }
+}
+
+/// Whether this is a path to a `.torrent` on this machine.
+///
+/// Checked as a path rather than by extension alone, because an extension
+/// test on its own lets a scheme through: `file:///C:/x.torrent` and even
+/// `javascript:x.torrent` end in `.torrent` and are emphatically not local
+/// paths. So anything carrying a scheme is refused here and left to the
+/// scheme checks, and a lone `X:` is read as a drive letter.
+fn is_local_torrent_path(url: &str) -> bool {
+    if url.contains("://") {
+        return false;
+    }
+    // A scheme is a name followed by a colon. One letter before it is a
+    // Windows drive, which is the one case that is a path and not a scheme.
+    if let Some((head, _)) = url.split_once(':')
+        && head.chars().count() != 1
+    {
+        return false;
+    }
+    std::path::Path::new(url)
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("torrent"))
 }
 
 /// A browser extension the user has approved.
@@ -599,6 +631,48 @@ mod tests {
             assert!(
                 request(url).validate_with(true).is_ok(),
                 "{url} should be allowed from the app"
+            );
+        }
+    }
+
+    #[test]
+    fn a_magnet_link_is_accepted_from_anywhere() {
+        // Clicking a magnet on a page is how torrents normally start. It
+        // names a swarm by hash, carries no credentials, and reaches nothing
+        // the browser could not reach itself, so it is not gated the way an
+        // ftp address is.
+        let link = "magnet:?xt=urn:btih:c9e15763f722f23e98a29decdfae341b98d53056";
+        assert!(request(link).validate().is_ok());
+        assert!(request(link).validate_with(true).is_ok());
+        assert!(request("MAGNET:?xt=urn:btih:abc").validate().is_ok());
+    }
+
+    #[test]
+    fn only_the_app_may_name_a_torrent_file_on_this_machine() {
+        // From a browser this would be a page choosing which local file this
+        // process opens.
+        for path in [r"D:\downloads\ubuntu.torrent", "ubuntu.torrent", r"\nas\share\a.torrent"] {
+            assert!(request(path).validate().is_err(), "{path} should be refused from a browser");
+            assert!(
+                request(path).validate_with(true).is_ok(),
+                "{path} should be allowed from the app"
+            );
+        }
+    }
+
+    #[test]
+    fn a_torrent_extension_does_not_smuggle_a_scheme_past_the_check() {
+        // The trap: testing the extension alone accepts anything at all that
+        // happens to end in `.torrent`, scheme and all.
+        for hostile in [
+            "file:///C:/Windows/System32/config/SAM.torrent",
+            "javascript:alert(1)/x.torrent",
+            "data:application/x-bittorrent;base64,ZDg6.torrent",
+            "blob:https://example.invalid/a.torrent",
+        ] {
+            assert!(
+                request(hostile).validate_with(true).is_err(),
+                "{hostile} should be refused even from the app"
             );
         }
     }
