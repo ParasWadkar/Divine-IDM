@@ -532,13 +532,17 @@ function doneRow(job) {
   meta.className = "meta";
   meta.textContent = bytes(job.downloaded);
 
+  const check = iconButton("check", "Verify", { quiet: true });
+  check.title = "Check it against the hash its source published";
+  check.onclick = () => verifyDownload(job);
+
   const open = iconButton("folder", "Open folder");
   open.onclick = () =>
     invoke("reveal", { path: `${job.output_dir}\\${job.filename}` }).catch((error) =>
       toast(String(error), true),
     );
 
-  row.append(tick, name, meta, open);
+  row.append(tick, name, meta, check, open);
   return row;
 }
 
@@ -824,13 +828,18 @@ async function showHistory() {
         row.append(name, badge, meta);
 
         if (finished) {
-          // Finished: the only thing left to do with it is find it again.
+          // Finished: what is left is finding it again, and asking whether
+          // it is really what its source meant to send.
+          const check = iconButton("check", "Verify", { quiet: true });
+          check.title = "Check it against the hash its source published";
+          check.onclick = () => verifyDownload(job);
+
           const open = iconButton("folder", "Open folder");
           open.onclick = () =>
             invoke("reveal", { path: `${job.output_dir}\\${job.filename}` }).catch((error) =>
               toast(String(error), true),
             );
-          row.append(open);
+          row.append(check, open);
         } else {
           // Incomplete — cancelled or genuinely failed. Either way the bytes
           // on disk are still there to carry on from, or to simply forget.
@@ -1080,6 +1089,81 @@ function confirmDialog(message, { confirm = "Confirm", rememberKey } = {}) {
     cancelBtn.addEventListener("click", onCancel);
     okBtn.addEventListener("click", onOk);
   });
+}
+
+/**
+ * Asks for a value and resolves to it, or to null if it was not given.
+ *
+ * The window's own dialog rather than the browser's prompt box, which
+ * cannot be styled, cannot say what shape the answer should take, and is
+ * a poor place to paste sixty-four characters into.
+ */
+function askFor(message, { placeholder = "", value = "", confirm = "OK" } = {}) {
+  return new Promise((resolve) => {
+    const overlay = $("ask-modal");
+    const field = $("ask-input");
+    const okBtn = $("ask-ok");
+    const cancelBtn = $("ask-cancel");
+
+    $("ask-message").textContent = message;
+    field.placeholder = placeholder;
+    field.value = value;
+    okBtn.textContent = confirm;
+    overlay.hidden = false;
+    field.focus();
+    field.select();
+
+    const finish = (answer) => {
+      overlay.hidden = true;
+      okBtn.removeEventListener("click", onOk);
+      cancelBtn.removeEventListener("click", onCancel);
+      field.removeEventListener("keydown", onKey);
+      resolve(answer);
+    };
+    const onOk = () => finish(field.value.trim() || null);
+    const onCancel = () => finish(null);
+    // Enter and Escape, because a dialog with one field is a dialog
+    // nobody should have to reach for the mouse to finish.
+    const onKey = (event) => {
+      if (event.key === "Enter") onOk();
+      else if (event.key === "Escape") onCancel();
+    };
+
+    okBtn.addEventListener("click", onOk);
+    cancelBtn.addEventListener("click", onCancel);
+    field.addEventListener("keydown", onKey);
+  });
+}
+
+/**
+ * Checks a finished file against a hash published where the link was.
+ *
+ * Worth saying plainly either way: a match is the only evidence there is
+ * that the bytes are the publisher's and not a mirror's older build, and
+ * a mismatch is worth more than a red toast -- so it reports what the
+ * file actually hashes to.
+ */
+async function verifyDownload(job) {
+  const expected = await askFor(`Paste the hash published for ${job.filename}:`, {
+    placeholder: "SHA-256, SHA-1 or MD5",
+    confirm: "Check it",
+  });
+  if (!expected) return;
+
+  toast("Checking…");
+  try {
+    const verdict = await invoke("verify_file", {
+      path: `${job.output_dir}\${job.filename}`,
+      expected,
+    });
+    if (verdict.matched) {
+      toast(`Matches the published ${verdict.algorithm.toUpperCase()}.`);
+    } else {
+      toast(`Does not match. This file is ${verdict.actual}`, true);
+    }
+  } catch (error) {
+    toast(String(error), true);
+  }
 }
 
 $("clear-history").addEventListener("click", async () => {

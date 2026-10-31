@@ -359,6 +359,20 @@
 
     <div id="toast" class="toast" role="status" aria-live="polite" aria-atomic="true" hidden></div>
 
+    <!-- Its counterpart: the one that asks for a value rather than for a
+         yes. A 64-character hash is not something to paste into the
+         browser's own prompt box. -->
+    <div id="ask-modal" class="modal-overlay" hidden>
+      <div class="modal">
+        <p id="ask-message"></p>
+        <input id="ask-input" class="ask-input" type="text" spellcheck="false" autocomplete="off" />
+        <div class="modal-actions">
+          <button id="ask-cancel" class="ghost">Cancel</button>
+          <button id="ask-ok">OK</button>
+        </div>
+      </div>
+    </div>
+
     <!-- A single reusable confirmation, built once and filled in by whatever
          asks for it, rather than one dialog per destructive action. -->
     <div id="confirm-modal" class="modal-overlay" hidden>

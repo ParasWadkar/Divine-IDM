@@ -25,6 +25,14 @@ tauri-plugin-single-instance = "2.4.5"
 # app is not on.
 tauri-plugin-dialog = "2"
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "sync"] }
+# Checking a finished download against the hash its source published. The
+# three are what download pages actually give out; all are RustCrypto and
+# share one `digest` trait, so it is three thin wrappers rather than three
+# implementations.
+sha2 = "0.10"
+sha1 = "0.10"
+md-5 = "0.10"
+digest = "0.10"
 tracing.workspace = true
 
 [target.'cfg(windows)'.dependencies]

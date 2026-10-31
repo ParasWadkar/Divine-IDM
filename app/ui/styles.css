@@ -1292,6 +1292,27 @@ button.icon:hover {
   accent-color: var(--accent);
 }
 
+.ask-input {
+  width: 100%;
+  margin: 12px 0 4px;
+  padding: 9px 11px;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  font: inherit;
+  font-size: 13px;
+  /* A hash is read a character at a time when it does not match, which
+     proportional digits make needlessly hard. */
+  font-variant-numeric: tabular-nums;
+  user-select: text;
+}
+
+.ask-input:focus {
+  outline: none;
+  border-color: var(--accent-dim);
+}
+
 .modal-actions {
   display: flex;
   justify-content: flex-end;

@@ -27,6 +27,7 @@ mod batch;
 mod fileicon;
 mod opened;
 mod state;
+mod verify;
 use state::AppState;
 
 /// How often the window is sent a fresh snapshot.
@@ -174,6 +175,20 @@ async fn save_settings(state: State<'_, AppState>, settings: Settings) -> Result
 /// Opens the system folder picker and returns the choice, or nothing if the
 /// person cancelled.
 ///
+/// Checks a finished download against a hash published by its source.
+///
+/// Takes the path rather than a job, because what is being checked is the
+/// file on disk: a download finished days ago, or one whose row has since
+/// been cleared from History, is exactly when this is worth asking.
+#[tauri::command]
+async fn verify_file(path: String, expected: String) -> Result<verify::Verdict, String> {
+    // Reading a whole file is seconds for an installer and minutes for a
+    // disc image, so it goes nowhere near the runtime's async workers.
+    tokio::task::spawn_blocking(move || verify::check(std::path::Path::new(&path), &expected))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
 /// The icon the shell shows for a kind of file, as raw pixels.
 ///
 /// Asked once per extension and kept by the window, because the answer is
@@ -406,6 +421,7 @@ fn main() {
             remove_history_row,
             reveal,
             file_icon,
+            verify_file,
             choose_folder,
             browser_setup,
             opened_files,
