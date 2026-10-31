@@ -97,6 +97,15 @@ impl Store {
         connection.pragma_update(None, "journal_mode", "WAL")?;
         connection.pragma_update(None, "synchronous", "NORMAL")?;
         connection.pragma_update(None, "foreign_keys", true)?;
+        // SQLite's own default is 1000 pages, and it folds the log back into
+        // the database when the last connection closes. Neither happens here:
+        // this database is written to a few times per download, so the log
+        // takes weeks to reach 1000 pages, and every way out of the app is
+        // `process::exit`, which closes nothing. So the log grows and
+        // `state.sqlite3` keeps whatever it held when it was last folded back
+        // -- which is what anything reading the file alone sees, a backup or
+        // a copy included. A quarter of a megabyte is the most it may drift.
+        connection.pragma_update(None, "wal_autocheckpoint", 64)?;
         connection.busy_timeout(std::time::Duration::from_secs(5))?;
 
         let store = Self { connection: Mutex::new(connection) };
@@ -127,6 +136,44 @@ mod tests {
         }
         let store = Store::open(&path).unwrap();
         assert_eq!(store.queues().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn the_database_file_keeps_up_with_what_has_been_written_to_it() {
+        // The write-ahead log is folded back into the database on a schedule
+        // and when the last connection closes. This app never closes one --
+        // every way out is `process::exit` -- so the schedule is the only
+        // thing keeping `state.sqlite3` current. Left at SQLite's default of
+        // 1000 pages it is reached about once a month here, and until then
+        // the file on its own holds whatever it held weeks ago. That file on
+        // its own is what a backup copies and what a reader that does not
+        // attach the log sees.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.sqlite3");
+
+        let store = Store::open(&path).unwrap();
+        for index in 0..100 {
+            store
+                .add_job(&NewJob {
+                    url: format!("https://example.invalid/{index}.bin"),
+                    filename: format!("{index}.bin"),
+                    output_dir: "D:/downloads".into(),
+                    ..Default::default()
+                })
+                .unwrap();
+        }
+
+        // Copied the way a backup would take it: the database, without the
+        // log beside it. The store is still open, so nothing has been folded
+        // back on the way out.
+        let copy = dir.path().join("backup.sqlite3");
+        std::fs::copy(&path, &copy).unwrap();
+
+        let backed_up = Store::open(&copy).unwrap().unfinished_jobs().unwrap().len();
+        assert!(
+            backed_up >= 50,
+            "the database alone should hold most of the 100 jobs written, not {backed_up}",
+        );
     }
 
     #[test]
