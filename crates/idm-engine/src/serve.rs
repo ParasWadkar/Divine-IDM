@@ -848,6 +848,12 @@ impl Engine {
 
         write_state(&self.inner, id, JobState::Failed, Some("cancelled")).await;
         release_claim(&self.inner, id).await;
+        // The download task drops this mapping itself once it stops, but it
+        // was aborted above and never reached that line. Left behind, the row
+        // still looks live for the rest of the process, and History's Resume
+        // refuses to start a download it believes is already going. After
+        // `write_state`, which needs the mapping to find the row.
+        forget_row(&self.inner, id).await;
         pump(Arc::clone(&self.inner)).await;
         Response::Accepted { id }
     }
@@ -2388,6 +2394,42 @@ mod tests {
 
         assert!(matches!(engine.resume(id).await, Response::Accepted { .. }));
         assert_eq!(engine.outstanding().await, 1, "resuming should hand it a slot");
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_download_can_be_resumed_from_its_history_row() {
+        // Cancelling aborts the task that would otherwise drop this job's row
+        // mapping on its way out. Left behind, the mapping made the row look
+        // live for the rest of the process, and History's Resume refused to
+        // start a download it believed was already going -- so a cancelled
+        // download could not be resumed again until the app was restarted.
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(idm_store::Store::open(&dir.path().join("state.sqlite3")).unwrap());
+        let row = store
+            .add_job(&idm_store::NewJob {
+                url: "http://127.0.0.1:9/big.bin".into(),
+                filename: "big.bin".into(),
+                output_dir: dir.path().join("downloads").display().to_string(),
+                ..Default::default()
+            })
+            .unwrap();
+        store.set_job_state(row, idm_store::JobState::Running, None).unwrap();
+        store.mark_interrupted_as_paused().unwrap();
+
+        let engine = engine_with_store(dir.path(), Arc::clone(&store));
+        set_resume_on_start(&engine, false).await;
+        engine.restore_interrupted().await;
+
+        let Response::Status { jobs } = engine.status(None).await else {
+            panic!("expected a listing");
+        };
+        let id = jobs[0].id;
+
+        assert!(matches!(engine.cancel(id).await, Response::Accepted { .. }));
+        assert!(
+            matches!(engine.resume_history(row).await, Response::Accepted { .. }),
+            "a cancelled download must be resumable from the row it left in History",
+        );
     }
 
     #[tokio::test]
