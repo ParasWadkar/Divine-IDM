@@ -142,6 +142,24 @@ const ICONS = {
     ["path", { d: "M10 11v6" }],
     ["path", { d: "M14 11v6" }],
   ],
+  close: [
+    ["path", { d: "M6 6l12 12" }],
+    ["path", { d: "M18 6 6 18" }],
+  ],
+  check: [["path", { d: "m5 12.5 4.5 4.5L19 7.5" }]],
+  clock: [
+    ["circle", { cx: "12", cy: "12", r: "8.5" }],
+    ["path", { d: "M12 7v5l3.5 2" }],
+  ],
+  link: [
+    ["path", { d: "M10 13a5 5 0 0 0 7.1.1l3-3a5 5 0 0 0-7.1-7.1L11.3 4.7" }],
+    ["path", { d: "M14 11a5 5 0 0 0-7.1-.1l-3 3a5 5 0 0 0 7.1 7.1l1.7-1.7" }],
+  ],
+  speed: [
+    ["path", { d: "M12 4v11" }],
+    ["path", { d: "m7 11 5 5 5-5" }],
+    ["path", { d: "M5 20h14" }],
+  ],
 };
 
 function icon(name) {
@@ -177,6 +195,56 @@ function iconButton(iconName, label, { quiet = false } = {}) {
   return button;
 }
 
+/**
+ * One figure with the thing it measures drawn beside it.
+ *
+ * The icon here is decoration over a label that is already there in words,
+ * which is the one case where a symbol carries no meaning of its own and so
+ * cannot be misread.
+ */
+function fact(iconName, text) {
+  const span = document.createElement("span");
+  span.className = "fact";
+  span.append(icon(iconName));
+  const label = document.createElement("span");
+  label.textContent = text;
+  span.append(label);
+  return span;
+}
+
+/** The six groupings the engine already sorts downloads into. */
+const CATEGORIES = [
+  ["Video", "mp4 mkv avi mov wmv flv webm m4v mpg mpeg ts m2ts vob ogv 3gp"],
+  ["Audio", "mp3 flac wav aac m4a ogg oga opus wma aiff ape"],
+  ["Documents", "pdf doc docx odt rtf txt xls xlsx ods csv ppt pptx odp epub mobi azw3 djvu"],
+  ["Programs", "exe msi msix appx dmg pkg deb rpm appimage apk jar"],
+  ["Archives", "zip rar 7z tar gz bz2 xz zst tgz iso img cab"],
+  ["Images", "jpg jpeg png gif webp bmp tiff tif svg heic avif"],
+];
+
+function categoryOf(filename) {
+  const extension = filename.includes(".") ? filename.split(".").pop().toLowerCase() : "";
+  if (!extension) return { category: "other", extension: "file" };
+  const found = CATEGORIES.find(([, list]) => list.split(" ").includes(extension));
+  return { category: found ? found[0] : "other", extension };
+}
+
+/**
+ * The tile at the left of a download, carrying the file's own extension.
+ *
+ * A drawn glyph for "archive" is a guess at the word the reader already
+ * uses; the three letters they named it are not. Colour groups it, the
+ * letters say it, so neither is doing the job alone.
+ */
+function fileTile(filename) {
+  const { category, extension } = categoryOf(filename);
+  const tile = document.createElement("div");
+  tile.className = `job-icon ${category}`;
+  tile.textContent = extension.slice(0, 4);
+  tile.title = category === "other" ? "File" : category;
+  return tile;
+}
+
 function render(snapshot) {
   latest = snapshot;
   renderPairing(snapshot.pending ?? []);
@@ -192,17 +260,23 @@ function render(snapshot) {
     refreshBrowsers();
   }
 
-  const running = (snapshot.jobs ?? []).filter((job) => job.state === "running");
+  const all = snapshot.jobs ?? [];
+  const running = all.filter((job) => job.state === "running");
   const total = running.reduce((sum, job) => sum + (job.bytes_per_sec ?? 0), 0);
   const connections = running.reduce((sum, job) => sum + (job.connections ?? 0), 0);
 
+  // Four numbers, each one the engine measures. Nothing here uploads, so
+  // there is no upload figure to show -- a meter pinned at zero reads as
+  // broken rather than as idle.
   $("speed-now").textContent = rate(total);
   $("speed-conns").textContent = String(connections);
+  $("stat-active").textContent = String(all.filter((job) => !settled(job)).length);
+  $("stat-done").textContent = String(all.filter((job) => job.state === "completed").length);
 
   history.push(total);
   while (history.length > SAMPLES) history.shift();
   const peak = Math.max(...history, 0);
-  $("speed-peak").textContent = peak > 0 ? `peak ${rate(peak)}` : "";
+  $("stat-peak").textContent = rate(peak);
   drawGraph();
 
   $("engine-dot").className = "dot good";
@@ -268,142 +342,198 @@ function stateLabel(job) {
   return names[job.state] ?? job.state;
 }
 
+/** Whether a download has stopped for good, one way or the other. */
+const settled = (job) => job.state === "completed" || job.state === "failed";
+
+/** How many of the ones that landed are worth repeating outside History. */
+const RECENT_DONE = 5;
+
+/** What the list is filtered and ordered by. A view, so the window owns it. */
+let listFilter = "";
+let listOrder = "recent";
+
+const matchesFilter = (job) => !listFilter || job.filename.toLowerCase().includes(listFilter);
+
+function ordered(jobs) {
+  const list = [...jobs];
+  const share = (job) => (job.total > 0 ? job.downloaded / job.total : 0);
+  if (listOrder === "name") list.sort((a, b) => a.filename.localeCompare(b.filename));
+  else if (listOrder === "size") list.sort((a, b) => (b.total ?? 0) - (a.total ?? 0));
+  else if (listOrder === "progress") list.sort((a, b) => share(b) - share(a));
+  // "recent" is the order the engine hands them over in already.
+  return list;
+}
+
+function jobCard(job) {
+  const card = document.createElement("div");
+  card.className = "job";
+  card.append(fileTile(job.filename));
+
+  const main = document.createElement("div");
+  main.className = "job-main";
+
+  const name = document.createElement("div");
+  name.className = "job-name";
+  name.textContent = job.filename;
+  name.title = job.url;
+
+  // An unknown total means the server never told us; a moving indeterminate
+  // bar is honest where a percentage would be invented.
+  const known = typeof job.total === "number" && job.total > 0;
+  const fraction = known ? Math.min(job.downloaded / job.total, 1) : 0;
+
+  const progress = document.createElement("div");
+  progress.className = "job-progress";
+
+  const size = document.createElement("span");
+  size.className = "job-size";
+  size.textContent = known ? `${bytes(job.downloaded)} / ${bytes(job.total)}` : bytes(job.downloaded);
+
+  const bar = document.createElement("div");
+  bar.className = known ? "bar" : "bar indeterminate";
+  const fill = document.createElement("span");
+  fill.style.width = `${(fraction * 100).toFixed(1)}%`;
+  bar.append(fill);
+
+  const pct = document.createElement("span");
+  pct.className = "job-pct";
+  pct.textContent = known ? `${Math.floor(fraction * 100)}%` : "";
+
+  progress.append(size, bar, pct);
+
+  // While it runs, the three things that are moving. While it does not, the
+  // one thing that matters is why -- so the same row carries the state word
+  // instead, rather than three figures frozen at their last value.
+  const foot = document.createElement("div");
+  foot.className = "job-foot";
+  if (job.state === "running") {
+    foot.append(fact("speed", rate(job.bytes_per_sec)));
+    if (known && job.bytes_per_sec > 0) {
+      const left = (job.total - job.downloaded) / job.bytes_per_sec;
+      foot.append(fact("clock", `${duration(left)} remaining`));
+    }
+    if (job.connections) foot.append(fact("link", `${job.connections} connections`));
+  } else {
+    const state = document.createElement("span");
+    state.className = `job-state ${job.state}`;
+    state.textContent = stateLabel(job);
+    foot.append(state);
+  }
+
+  const spacer = document.createElement("span");
+  spacer.className = "spacer";
+  foot.append(spacer);
+
+  const going = job.state === "running" || job.state === "queued";
+
+  // For a link that expired while the download sat waiting. The bytes are
+  // still good; only the way back to the rest of them is stale, so this
+  // changes the address and keeps the file.
+  if (!going) {
+    const refresh = document.createElement("button");
+    refresh.className = "ghost";
+    refresh.textContent = "New link";
+    refresh.title = "Paste a fresh address and carry on from here";
+    refresh.onclick = async () => {
+      const url = window.prompt(`A fresh address for ${job.filename}:`, job.url);
+      if (url && url.trim()) await act("refresh_link", { id: job.id, url: url.trim() });
+    };
+    foot.append(refresh);
+  }
+
+  main.append(name, progress, foot);
+
+  if (job.error) {
+    const error = document.createElement("div");
+    error.className = "job-error";
+    error.textContent = job.error;
+    main.append(error);
+  }
+
+  const controls = document.createElement("div");
+  controls.className = "job-controls";
+
+  const toggle = iconButton(going ? "pause" : "play", going ? "Pause" : "Resume");
+  toggle.onclick = () => act(going ? "pause_job" : "resume_job", { id: job.id });
+
+  const cancel = iconButton("close", "Cancel", { quiet: true });
+  // It cannot be undone, and the tooltip saying so is invisible until a
+  // mouse happens to rest on it -- while clearing history, which deletes no
+  // file at all, has always asked first.
+  cancel.title = "Stop and delete what has been downloaded";
+  cancel.onclick = async () => {
+    const sure = await confirmDialog(
+      `Stop ${job.filename} and delete the ${bytes(job.downloaded)} downloaded so far? Pausing keeps it.`,
+      { confirm: "Stop and delete", rememberKey: "skip-cancel-download-confirm" },
+    );
+    if (sure) act("cancel_job", { id: job.id });
+  };
+
+  controls.append(toggle, cancel);
+  card.append(main, controls);
+  return card;
+}
+
+/** One that landed: what it was, how big, and the way back to it. */
+function doneRow(job) {
+  const row = document.createElement("div");
+  row.className = "done-row";
+
+  const tick = icon("check");
+  tick.classList.add("tick");
+
+  const name = document.createElement("span");
+  name.className = "name";
+  name.textContent = job.filename;
+  name.title = job.url;
+
+  const meta = document.createElement("span");
+  meta.className = "meta";
+  meta.textContent = bytes(job.downloaded);
+
+  const open = iconButton("folder", "Open folder");
+  open.onclick = () =>
+    invoke("reveal", { path: `${job.output_dir}\\${job.filename}` }).catch((error) =>
+      toast(String(error), true),
+    );
+
+  row.append(tick, name, meta, open);
+  return row;
+}
+
 function renderJobs(jobs) {
-  const list = $("jobs");
   // A cancelled or failed download has nothing left to show moving: showing
   // it here any longer is how a stale progress bar is left looking alive.
   // It belongs in History now, with the Resume and Remove it offers there.
-  const live = jobs.filter((job) => job.state !== "failed");
+  const live = ordered(jobs.filter((job) => !settled(job)).filter(matchesFilter));
+  const landed = jobs.filter((job) => job.state === "completed").filter(matchesFilter);
 
-  if (!live.length) {
-    list.replaceChildren(empty("Nothing downloading. Paste a URL above, or start one in your browser."));
-    return;
-  }
-
-  list.replaceChildren(
-    ...live.map((job) => {
-      const card = document.createElement("div");
-      card.className = "job";
-
-      const top = document.createElement("div");
-      top.className = "job-top";
-      const name = document.createElement("div");
-      name.className = "job-name";
-      name.textContent = job.filename;
-      name.title = job.url;
-      // The state, and the one control that belongs with it: pause while
-      // it runs, play while it does not. Beside the word rather than down
-      // in the row of buttons, because it is the answer to the word.
-      const state = document.createElement("div");
-      state.className = `job-state ${job.state}`;
-      state.textContent = stateLabel(job);
-
-      const going = job.state === "running" || job.state === "queued";
-      const finished = job.state === "completed";
-      const toggle = iconButton(going ? "pause" : "play", going ? "Pause" : "Resume");
-      toggle.onclick = () => act(going ? "pause_job" : "resume_job", { id: job.id });
-
-      // Nothing left to pause or resume once it has finished; the one
-      // control that still means something is finding the file again.
-      const reveal = iconButton("folder", "Open folder");
-      reveal.onclick = () =>
-        invoke("reveal", { path: `${job.output_dir}\\${job.filename}` }).catch((error) =>
-          toast(String(error), true),
-        );
-
-      const controls = document.createElement("div");
-      controls.className = "job-controls";
-      controls.append(finished ? reveal : toggle);
-      controls.append(state);
-      top.append(name, controls);
-
-      // An unknown total means the server never told us; a moving
-      // indeterminate bar is honest where a percentage would be invented.
-      const known = typeof job.total === "number" && job.total > 0;
-      const fraction = known ? Math.min(job.downloaded / job.total, 1) : 0;
-      const bar = document.createElement("div");
-      bar.className = known ? "bar" : "bar indeterminate";
-      const fill = document.createElement("span");
-      fill.style.width = `${(fraction * 100).toFixed(1)}%`;
-      bar.append(fill);
-
-      const foot = document.createElement("div");
-      foot.className = "job-foot";
-      const size = document.createElement("span");
-      // "45.1 MB of 45.1 MB" is one number said twice. Once it has finished
-      // the total is simply the size, which is all there is left to say.
-      size.textContent =
-        known && !finished
-          ? `${bytes(job.downloaded)} of ${bytes(job.total)}`
-          : bytes(job.downloaded);
-      const speed = document.createElement("span");
-      speed.textContent = job.state === "running" ? rate(job.bytes_per_sec) : "";
-      const conns = document.createElement("span");
-      conns.textContent =
-        job.state === "running" && job.connections ? `${job.connections} connections` : "";
-      const eta = document.createElement("span");
-      if (known && job.state === "running" && job.bytes_per_sec > 0) {
-        eta.textContent = `${duration((job.total - job.downloaded) / job.bytes_per_sec)} left`;
-      }
-
-      const spacer = document.createElement("span");
-      spacer.className = "spacer";
-
-      const cancel = document.createElement("button");
-      cancel.className = "ghost";
-      cancel.textContent = "Cancel";
-      // Said plainly: this one does not keep the bytes, and the pause button
-      // beside the status is the one that does.
-      cancel.title = "Stop and delete what has been downloaded";
-      // It cannot be undone, and the tooltip saying so is invisible until a
-      // mouse happens to rest on it -- while clearing history, which deletes
-      // no file at all, has always asked first. "Remember my choice" is
-      // there for anyone who would rather it stopped asking.
-      cancel.onclick = async () => {
-        const sure = await confirmDialog(
-          `Stop ${job.filename} and delete the ${bytes(job.downloaded)} downloaded so far? Pausing keeps it.`,
-          { confirm: "Stop and delete", rememberKey: "skip-cancel-download-confirm" },
-        );
-        if (sure) act("cancel_job", { id: job.id });
-      };
-
-      // For a link that expired while the download sat waiting. The bytes are
-      // still good; only the way back to the rest of them is stale, so this
-      // changes the address and keeps the file.
-      const refresh = document.createElement("button");
-      refresh.className = "ghost";
-      refresh.textContent = "New link";
-      refresh.title = "Paste a fresh address and carry on from here";
-      refresh.onclick = async () => {
-        const url = window.prompt(`A fresh address for ${job.filename}:`, job.url);
-        if (url && url.trim()) await act("refresh_link", { id: job.id, url: url.trim() });
-      };
-
-      foot.append(size, speed, conns, eta, spacer);
-      if (!finished) {
-        if (!going) foot.append(refresh);
-        foot.append(cancel);
-      }
-
-      // A finished download has no progress left to report. A bar sitting
-      // full says only what the word beside it already says, and takes a
-      // row of the window to say it.
-      card.append(top);
-      if (!finished) card.append(bar);
-      card.append(foot);
-      if (job.error) {
-        const error = document.createElement("div");
-        error.className = "job-error";
-        error.textContent = job.error;
-        card.append(error);
-      }
-      return card;
-    }),
+  // With nothing running, the panel below already says to drop a file or
+  // paste a URL, so saying it again here would be the same sentence twice.
+  // A search that found nothing is the one case it cannot explain.
+  $("jobs").replaceChildren(
+    ...(live.length
+      ? live.map(jobCard)
+      : listFilter
+        ? [empty("Nothing running goes by that name.")]
+        : []),
   );
+  $("active-count").textContent = live.length ? `(${live.length})` : "";
+
+  // The last few that landed, where you were already looking. History keeps
+  // the whole record, so repeating all of it here would make two lists of
+  // one thing.
+  const recent = landed.slice(-RECENT_DONE).reverse();
+  $("done-wrap").hidden = recent.length === 0;
+  $("done-count").textContent = `(${recent.length})`;
+  $("done-list").replaceChildren(...recent.map(doneRow));
 }
 
 function showFolder() {
-  $("folder-path").textContent = downloadDir || "Your Downloads folder (default)";
+  const where = downloadDir || "Your Downloads folder (default)";
+  $("folder-path").textContent = where;
+  $("sidebar-folder-path").textContent = where;
+  $("sidebar-folder").title = `${where} — click to change it`;
   $("reset-folder").hidden = !downloadDir;
 }
 
@@ -724,7 +854,7 @@ $("add").addEventListener("submit", async (event) => {
   }
 });
 
-const tabs = [...document.querySelectorAll(".tab")];
+const tabs = [...document.querySelectorAll(".nav-item")];
 
 function selectTab(tab, giveFocus = false) {
   for (const other of tabs) {
@@ -749,10 +879,77 @@ for (const tab of tabs) {
   // use tabs every day already reach for.
   tab.addEventListener("keydown", (event) => {
     const index = tabs.indexOf(tab);
-    if (event.key === "ArrowRight") selectTab(tabs[(index + 1) % tabs.length], true);
-    else if (event.key === "ArrowLeft") selectTab(tabs[(index - 1 + tabs.length) % tabs.length], true);
+    // Up/Down now the list runs down the side; Left/Right still work, since
+    // someone used to them should not have to find that out.
+    const next = ["ArrowDown", "ArrowRight"].includes(event.key);
+    const back = ["ArrowUp", "ArrowLeft"].includes(event.key);
+    if (next) selectTab(tabs[(index + 1) % tabs.length], true);
+    else if (back) selectTab(tabs[(index - 1 + tabs.length) % tabs.length], true);
   });
 }
+
+// --------------------------------------------------------------- the list
+
+$("search").addEventListener("input", (event) => {
+  listFilter = event.target.value.trim().toLowerCase();
+  renderJobs(latest.jobs ?? []);
+});
+
+$("sort").addEventListener("change", (event) => {
+  listOrder = event.target.value;
+  renderJobs(latest.jobs ?? []);
+});
+
+// Pasting is the whole reason the field is there, and reaching for the
+// keyboard to do it is a step this can simply take.
+$("paste").addEventListener("click", async () => {
+  try {
+    const text = (await navigator.clipboard.readText()).trim();
+    if (!text) return toast("Nothing on the clipboard", true);
+    $("url").value = text;
+    $("url").focus();
+  } catch (error) {
+    toast(String(error), true);
+  }
+});
+
+$("sidebar-folder").addEventListener("click", () => {
+  selectTab($("tab-settings"));
+  $("choose-folder").focus();
+});
+
+// ---------------------------------------------------------- dropped files
+
+// A .torrent or a shortcut dropped on the window, rather than its address
+// typed in. Only the window as a whole has to accept it; the dashed panel
+// says where, but anywhere is as good.
+const dropzone = $("dropzone");
+
+for (const name of ["dragenter", "dragover"]) {
+  window.addEventListener(name, (event) => {
+    event.preventDefault();
+    dropzone.classList.add("is-over");
+  });
+}
+
+for (const name of ["dragleave", "drop"]) {
+  window.addEventListener(name, (event) => {
+    event.preventDefault();
+    if (name === "dragleave" && event.relatedTarget) return;
+    dropzone.classList.remove("is-over");
+  });
+}
+
+window.addEventListener("drop", async (event) => {
+  const text = event.dataTransfer?.getData("text")?.trim();
+  if (!text) return;
+  try {
+    await invoke("add_download", { url: text, filename: null });
+    refresh();
+  } catch (error) {
+    toast(String(error), true);
+  }
+});
 
 for (const id of [
   "integration",

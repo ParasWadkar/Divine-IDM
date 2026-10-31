@@ -2,18 +2,24 @@
    and the icon is built for the same palette. */
 
 :root {
-  --bg: #11151d;
-  --panel: #171c26;
-  --panel-2: #1d2430;
-  --line: #27303f;
+  --bg: #090d15;
+  --panel: #0f1520;
+  --panel-2: #151d2b;
+  --line: #1e2838;
   --text: #e7ecf3;
-  --muted: #8d99ab;
-  --accent: #78beff;
-  --accent-dim: #2f5f8f;
-  --good: #58c98b;
+  --muted: #8491a6;
+  --accent: #3b82f6;
+  --accent-dim: #2b5ba8;
+  /* The far end of every progress bar and the primary button. One gradient
+     used in both, so the thing you press and the thing it fills read as the
+     same action. */
+  --accent-2: #22d3ee;
+  --sweep: linear-gradient(90deg, var(--accent), var(--accent-2));
+  --good: #4ad08b;
   --warn: #e0b341;
-  --bad: #e86a6a;
+  --bad: #f0706e;
   --radius: 10px;
+  --radius-lg: 14px;
 }
 
 * {
@@ -44,8 +50,6 @@ body {
 }
 
 body {
-  display: flex;
-  flex-direction: column;
   background: var(--bg);
   color: var(--text);
   font: 14px/1.45 "Segoe UI", system-ui, sans-serif;
@@ -54,45 +58,215 @@ body {
   user-select: none;
 }
 
-/* ---------------------------------------------------------------- topbar */
+/* Said to a screen reader and to nothing else. Used where an icon already
+   carries the meaning for everyone who can see it. */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
 
-.topbar {
+/* --------------------------------------------------------------- shell */
+
+.shell {
   display: flex;
-  align-items: center;
-  gap: 16px;
-  padding: 10px 16px;
+  height: 100%;
+}
+
+/* Navigation down the side, not across the top. The window is far wider
+   than it is tall, so a row spent on three tabs cost the list more than it
+   cost the tabs -- and the sidebar has room for where downloads land, which
+   had been buried in settings. */
+.sidebar {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  gap: 6px;
+  width: 232px;
+  padding: 18px 14px;
   background: var(--panel);
-  border-bottom: 1px solid var(--line);
+  border-right: 1px solid var(--line);
+}
+
+.content {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
 }
 
 .brand {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
+  padding: 2px 8px 20px;
+  font-size: 17px;
   font-weight: 600;
   letter-spacing: 0.2px;
   white-space: nowrap;
 }
 
 .mark {
-  width: 22px;
-  height: 22px;
-  fill: var(--accent);
+  width: 26px;
+  height: 26px;
+  flex: none;
+  color: var(--accent);
+}
+
+.brand-accent {
+  color: var(--accent);
+}
+
+.nav {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.nav-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 11px 12px;
+  color: var(--muted);
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius);
+  font: inherit;
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+}
+
+.nav-item svg {
+  width: 19px;
+  height: 19px;
+  flex: none;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.nav-item:hover {
+  color: var(--text);
+  background: var(--panel-2);
+}
+
+/* The selected section is named, filled and marked -- not colour alone. */
+.nav-item.is-active {
+  color: #06121f;
+  background: var(--accent);
+  font-weight: 600;
+}
+
+.nav-item.is-active:hover {
+  background: var(--accent);
+  filter: brightness(1.05);
+}
+
+/* Where downloads land, one click from anywhere rather than only from the
+   settings pane. */
+.folder-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: auto;
+  padding: 11px 12px;
+  color: var(--muted);
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.folder-card:hover {
+  color: var(--text);
+  border-color: var(--accent-dim);
+}
+
+.folder-card svg {
+  width: 18px;
+  height: 18px;
+  flex: none;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.folder-card .chev {
+  width: 15px;
+  height: 15px;
+  margin-left: auto;
+  opacity: 0.7;
+}
+
+.folder-text {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+}
+
+.folder-text small {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.folder-text span {
+  overflow: hidden;
+  color: var(--text);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---------------------------------------------------------------- topbar */
+
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 16px 20px;
 }
 
 .add {
   display: flex;
+  position: relative;
   flex: 1;
-  gap: 8px;
+  align-items: center;
+  gap: 10px;
   min-width: 0;
+}
+
+.add-mark {
+  position: absolute;
+  left: 14px;
+  width: 17px;
+  height: 17px;
+  color: var(--muted);
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  pointer-events: none;
 }
 
 .add input {
   flex: 1;
   min-width: 0;
-  padding: 8px 12px;
+  padding: 12px 46px 12px 42px;
   color: var(--text);
-  background: var(--bg);
+  background: var(--panel);
   border: 1px solid var(--line);
   border-radius: var(--radius);
   font: inherit;
@@ -104,6 +278,34 @@ body {
   border-color: var(--accent-dim);
 }
 
+/* Sits inside the field it belongs to, so the row reads as one control. */
+.in-field {
+  position: absolute;
+  right: 160px;
+  display: flex;
+  padding: 7px;
+  color: var(--muted);
+  background: transparent;
+  border: 0;
+  border-radius: 7px;
+  cursor: pointer;
+}
+
+.in-field svg {
+  width: 17px;
+  height: 17px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.in-field:hover {
+  color: var(--text);
+  background: var(--panel-2);
+}
+
 button {
   padding: 8px 14px;
   color: #0b1018;
@@ -113,6 +315,27 @@ button {
   font: inherit;
   font-weight: 600;
   cursor: pointer;
+}
+
+button.primary {
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  width: 148px;
+  padding: 12px 18px;
+  background: var(--sweep);
+}
+
+button.primary svg {
+  width: 17px;
+  height: 17px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
 button:hover {
@@ -209,39 +432,10 @@ button.danger {
   color: var(--warn);
 }
 
-/* ------------------------------------------------------------------ tabs */
-
-.tabs {
-  display: flex;
-  gap: 2px;
-  padding: 0 12px;
-  background: var(--panel);
-  border-bottom: 1px solid var(--line);
-}
-
-.tab {
-  padding: 10px 14px;
-  color: var(--muted);
-  background: transparent;
-  border: 0;
-  border-bottom: 2px solid transparent;
-  border-radius: 0;
-  font-weight: 500;
-}
-
-.tab:hover {
-  color: var(--text);
-}
-
-.tab.is-active {
-  color: var(--text);
-  border-bottom-color: var(--accent);
-}
-
 main {
   flex: 1;
   overflow-y: auto;
-  padding: 16px;
+  padding: 4px 20px 20px;
   /* The scroll itself stays; only the bar's own chrome is hidden, so a long
      list does not get a permanent grey stripe down its side. */
   scrollbar-width: none;
@@ -275,15 +469,68 @@ h2:first-child {
   margin-top: 0;
 }
 
-/* ----------------------------------------------------------------- speed */
+/* -------------------------------------------------------------- activity */
 
-.speed {
+/* The graph and the numbers it is a picture of, side by side: the shape
+   answers "is it steady", the figures answer "how fast, how many", and
+   neither is much use without the other. */
+.activity {
+  display: flex;
   position: relative;
-  padding: 14px 16px 6px;
-  margin-bottom: 16px;
+  margin-bottom: 20px;
   background: var(--panel);
   border: 1px solid var(--line);
-  border-radius: var(--radius);
+  border-radius: var(--radius-lg);
+}
+
+.activity-chart {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  padding: 14px 16px 8px;
+}
+
+.activity-stats {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  justify-content: center;
+  gap: 14px;
+  width: 300px;
+  padding: 16px 18px;
+  border-left: 1px solid var(--line);
+}
+
+.stat-big {
+  color: var(--accent-2);
+  font-size: 30px;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.6px;
+  line-height: 1.1;
+}
+
+.stat-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px 10px;
+}
+
+.stat {
+  display: flex;
+  flex-direction: column;
+}
+
+.stat-value {
+  font-size: 15px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.stat small {
+  color: var(--muted);
+  font-size: 11px;
 }
 
 /* The instant-speed readout, following the cursor across the graph the way
@@ -317,27 +564,14 @@ h2:first-child {
   transform: rotate(45deg);
 }
 
+/* The height has to come from here and not from the element's own
+   attribute. `drawGraph` sets that attribute to clientHeight x the device
+   pixel ratio, and with no CSS height the layout height is read back off
+   the same attribute -- so above 1x each frame scaled the canvas up by the
+   ratio again and the panel grew without bound. */
 canvas#graph {
+  height: 104px;
   cursor: crosshair;
-}
-
-.speed-head {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-}
-
-.speed-now {
-  font-size: 26px;
-  font-weight: 650;
-  font-variant-numeric: tabular-nums;
-  letter-spacing: -0.5px;
-}
-
-.speed-label,
-.speed-peak {
-  color: var(--muted);
-  font-size: 12px;
 }
 
 canvas {
@@ -354,30 +588,107 @@ canvas {
 }
 
 .job {
-  padding: 12px 14px;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 14px;
   background: var(--panel);
   border: 1px solid var(--line);
-  border-radius: var(--radius);
+  border-radius: var(--radius-lg);
 }
 
-.job-top {
+.job:hover {
+  border-color: var(--accent-dim);
+}
+
+/* The file's own kind, said in its extension rather than drawn as a
+   picture of one: a glyph for "archive" is a guess at what the reader
+   already calls it, and the three letters are what they named it. */
+.job-icon {
   display: flex;
-  align-items: baseline;
-  gap: 10px;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 46px;
+  height: 46px;
+  border-radius: 12px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+
+.job-icon.Video {
+  color: #c4a2ff;
+  background: #2a1f45;
+}
+.job-icon.Audio {
+  color: #ff9ecd;
+  background: #3d1f33;
+}
+.job-icon.Documents {
+  color: #ffce7a;
+  background: #3a2d16;
+}
+.job-icon.Programs {
+  color: #7fc2ff;
+  background: #152b45;
+}
+.job-icon.Archives {
+  color: #ffb088;
+  background: #3b2418;
+}
+.job-icon.Images {
+  color: #87e0a8;
+  background: #16331f;
+}
+.job-icon.other {
+  color: var(--muted);
+  background: var(--panel-2);
+}
+
+.job-main {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
 }
 
 .job-name {
-  flex: 1;
   overflow: hidden;
   font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
+.job-progress {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.job-size {
+  flex: none;
+  min-width: 108px;
+  color: var(--muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.job-pct {
+  flex: none;
+  min-width: 42px;
+  color: var(--accent);
+  font-size: 14px;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
 .job-state {
   color: var(--muted);
   font-size: 12px;
-  text-transform: capitalize;
 }
 
 .job-state.running {
@@ -392,19 +703,26 @@ canvas {
   color: var(--bad);
 }
 
+.job-controls {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 8px;
+}
+
 .bar {
-  height: 6px;
-  margin: 9px 0 7px;
+  flex: 1;
+  height: 7px;
   overflow: hidden;
   background: var(--panel-2);
-  border-radius: 3px;
+  border-radius: 4px;
 }
 
 .bar span {
   display: block;
   height: 100%;
-  background: var(--accent);
-  border-radius: 3px;
+  background: var(--sweep);
+  border-radius: 4px;
   transition: width 0.3s ease;
 }
 
@@ -425,7 +743,7 @@ canvas {
 .job-foot {
   display: flex;
   align-items: center;
-  gap: 14px;
+  gap: 16px;
   color: var(--muted);
   font-size: 12px;
   font-variant-numeric: tabular-nums;
@@ -433,6 +751,261 @@ canvas {
 
 .job-foot .spacer {
   flex: 1;
+}
+
+/* Each figure next to the thing it measures, so the row reads without
+   having to work out which number is which. */
+.fact {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
+}
+
+.fact svg {
+  width: 13px;
+  height: 13px;
+  flex: none;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  opacity: 0.85;
+}
+
+/* --------------------------------------------------- list head and tools */
+
+.list-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin: 0 0 12px;
+}
+
+/* These two name what you are looking at, rather than labelling a group of
+   settings, so they are read as headings and not as the small caps the
+   settings pane uses for its groups. */
+.list-head h2,
+.activity-chart h2 {
+  margin: 0 0 4px;
+  color: var(--text);
+  font-size: 15px;
+  font-weight: 600;
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.count {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.list-tools {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.search {
+  display: flex;
+  position: relative;
+  align-items: center;
+}
+
+.search svg {
+  position: absolute;
+  left: 11px;
+  width: 15px;
+  height: 15px;
+  color: var(--muted);
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  pointer-events: none;
+}
+
+.search input {
+  width: 210px;
+  padding: 8px 12px 8px 34px;
+  color: var(--text);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  font: inherit;
+  font-size: 13px;
+  user-select: text;
+}
+
+.search input:focus {
+  outline: none;
+  border-color: var(--accent-dim);
+}
+
+.sort {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.sort select {
+  padding: 8px 10px;
+  color: var(--text);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  font: inherit;
+  font-size: 13px;
+}
+
+/* -------------------------------------------------------------- dropzone */
+
+.dropzone {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  margin-top: 12px;
+  padding: 22px;
+  color: var(--muted);
+  border: 1px dashed var(--line);
+  border-radius: var(--radius-lg);
+  text-align: left;
+}
+
+.dropzone svg {
+  width: 34px;
+  height: 34px;
+  flex: none;
+  padding: 8px;
+  background: var(--panel);
+  border-radius: 10px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.dropzone-text {
+  display: flex;
+  flex-direction: column;
+}
+
+.dropzone-text strong {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.dropzone-text small {
+  font-size: 12px;
+}
+
+.dropzone code {
+  padding: 1px 5px;
+  background: var(--panel-2);
+  border-radius: 4px;
+  font-size: 11px;
+}
+
+/* A file is over the window and this is where it would land. */
+.dropzone.is-over {
+  color: var(--accent);
+  background: #0d1a28;
+  border-color: var(--accent);
+  border-style: solid;
+}
+
+/* ------------------------------------------------- finished, in Downloads */
+
+/* The last few that landed, where you were already looking. The whole
+   record lives in History; repeating all of it here would make two lists
+   of one thing. */
+.done {
+  margin-top: 22px;
+}
+
+.done summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 0;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  cursor: pointer;
+  list-style: none;
+}
+
+.done summary::-webkit-details-marker {
+  display: none;
+}
+
+.done summary .chev {
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  transition: transform 0.15s ease;
+}
+
+.done[open] summary .chev {
+  transform: rotate(90deg);
+}
+
+.done-list {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin-top: 6px;
+  overflow: hidden;
+  background: var(--line);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+
+.done-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  background: var(--panel);
+}
+
+.done-row .tick {
+  width: 17px;
+  height: 17px;
+  flex: none;
+  color: var(--good);
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2.2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.done-row .name {
+  flex: 1;
+  min-width: 12ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.done-row .meta {
+  flex: none;
+  color: var(--muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
 }
 
 .job-error {
