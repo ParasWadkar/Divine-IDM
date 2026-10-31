@@ -23,6 +23,7 @@ use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent}
 use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
 
 mod autostart;
+mod fileicon;
 mod opened;
 mod state;
 use state::AppState;
@@ -152,6 +153,20 @@ async fn save_settings(state: State<'_, AppState>, settings: Settings) -> Result
 /// Opens the system folder picker and returns the choice, or nothing if the
 /// person cancelled.
 ///
+/// The icon the shell shows for a kind of file, as raw pixels.
+///
+/// Asked once per extension and kept by the window, because the answer is
+/// the same for every `.zip` it will ever list and the shell takes long
+/// enough that doing it per row would be felt.
+#[tauri::command]
+async fn file_icon(extension: String) -> Result<fileicon::Icon, String> {
+    // The shell call is blocking and talks to COM, so it does not belong on
+    // the runtime's async workers.
+    tokio::task::spawn_blocking(move || fileicon::for_extension(&extension))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
 /// A command of our own rather than the dialog plugin's JavaScript API, so
 /// the page is not granted the plugin: a window that can open arbitrary
 /// dialogs is a larger permission than a window that can ask this one
@@ -369,6 +384,7 @@ fn main() {
             clear_incomplete_history,
             remove_history_row,
             reveal,
+            file_icon,
             choose_folder,
             browser_setup,
             opened_files,

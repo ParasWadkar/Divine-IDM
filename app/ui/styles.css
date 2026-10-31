@@ -647,6 +647,12 @@ canvas {
   background: var(--panel-2);
 }
 
+.job-icon img {
+  width: 32px;
+  height: 32px;
+  display: block;
+}
+
 .job-main {
   display: flex;
   flex: 1;

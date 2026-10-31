@@ -240,9 +240,50 @@ function fileTile(filename) {
   const { category, extension } = categoryOf(filename);
   const tile = document.createElement("div");
   tile.className = `job-icon ${category}`;
-  tile.textContent = extension.slice(0, 4);
   tile.title = category === "other" ? "File" : category;
+
+  // The shell's own icon where we have it by now, the letters until then
+  // and for good where the shell has none -- so the tile is never empty
+  // and never waiting on anything to be useful.
+  const known = shellIcons.get(extension);
+  if (known) {
+    const image = document.createElement("img");
+    image.src = known;
+    image.alt = "";
+    tile.append(image);
+    tile.classList.add("has-icon");
+  } else {
+    tile.textContent = extension.slice(0, 4);
+    askShellForIcon(extension);
+  }
   return tile;
+}
+
+/**
+ * What Explorer draws for each extension, asked once and kept.
+ *
+ * A value of `null` means the shell had nothing, which is as worth
+ * remembering as an icon: it stops every later row asking again.
+ */
+const shellIcons = new Map();
+const iconAsked = new Set();
+
+function askShellForIcon(extension) {
+  if (!extension || extension === "file" || iconAsked.has(extension)) return;
+  iconAsked.add(extension);
+  invoke("file_icon", { extension })
+    .then(({ width, height, rgba }) => {
+      const canvas = document.createElement("canvas");
+      canvas.width = width;
+      canvas.height = height;
+      canvas
+        .getContext("2d")
+        .putImageData(new ImageData(new Uint8ClampedArray(rgba), width, height), 0, 0);
+      shellIcons.set(extension, canvas.toDataURL());
+      // The next snapshot is along in under a second and rebuilds the list
+      // anyway, so there is nothing to redraw by hand.
+    })
+    .catch(() => shellIcons.set(extension, null));
 }
 
 function render(snapshot) {

@@ -31,6 +31,12 @@ tracing.workspace = true
 windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_System_Registry",
+    # The icon the shell already shows for a kind of file, so a download
+    # looks in the list the way it will look in Explorer.
+    "Win32_Graphics_Gdi",
+    "Win32_Storage_FileSystem",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
 ] }
 
 [build-dependencies]
