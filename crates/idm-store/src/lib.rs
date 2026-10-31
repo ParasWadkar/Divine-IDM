@@ -113,6 +113,26 @@ impl Store {
         Ok(store)
     }
 
+    /// Folds the write-ahead log back into the database file.
+    ///
+    /// SQLite does this itself when the last connection closes, and nothing
+    /// here ever closes one: every way out of the app is a process exit, so
+    /// the connection's `Drop` never runs. Until this is called, the newest
+    /// writes live only in `state.sqlite3-wal`, and `state.sqlite3` alone --
+    /// which is what a backup, a copy, or anything reading the file without
+    /// its log sees -- lags behind by up to `wal_autocheckpoint` pages.
+    ///
+    /// It is also the one point at which the database file is actually
+    /// fsynced, because `synchronous = NORMAL` trades the per-commit sync
+    /// away for exactly that: durability at checkpoints instead.
+    ///
+    /// `TRUNCATE` rather than `PASSIVE` so the log is emptied as well as
+    /// applied, leaving nothing to replay and no file to grow from.
+    pub fn checkpoint(&self) -> Result<()> {
+        self.conn().pragma_update(None, "wal_checkpoint", "TRUNCATE")?;
+        Ok(())
+    }
+
     /// A poisoned lock means a previous caller panicked mid-query. SQLite has
     /// already rolled back any open transaction, so the connection is still
     /// usable and recovering it is better than making every later call fail.
@@ -174,6 +194,40 @@ mod tests {
             backed_up >= 50,
             "the database alone should hold most of the 100 jobs written, not {backed_up}",
         );
+    }
+
+    #[test]
+    fn a_checkpoint_leaves_everything_in_the_database_file_itself() {
+        // What the test above settles for -- "most of it" -- is all the
+        // autocheckpoint schedule can promise. This is the guarantee on the
+        // way out: after a checkpoint the file stands alone, with nothing
+        // left in the log that it does not already have.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.sqlite3");
+
+        let store = Store::open(&path).unwrap();
+        for index in 0..100 {
+            store
+                .add_job(&NewJob {
+                    url: format!("https://example.invalid/{index}.bin"),
+                    filename: format!("{index}.bin"),
+                    output_dir: "D:/downloads".into(),
+                    ..Default::default()
+                })
+                .unwrap();
+        }
+        store.checkpoint().unwrap();
+
+        let copy = dir.path().join("backup.sqlite3");
+        std::fs::copy(&path, &copy).unwrap();
+        assert_eq!(Store::open(&copy).unwrap().unfinished_jobs().unwrap().len(), 100);
+
+        // Emptied, not merely applied: a `PASSIVE` checkpoint would leave
+        // the log as long as it was, to be replayed and grown from again.
+        let log = path.with_file_name("state.sqlite3-wal");
+        if log.exists() {
+            assert_eq!(std::fs::metadata(&log).unwrap().len(), 0, "the log should be truncated");
+        }
     }
 
     #[test]

@@ -108,6 +108,23 @@ impl Engine {
         Self::with_parts(output_dir, max_connections, settings_path(), store)
     }
 
+    /// Folds the database's write-ahead log back into the file itself.
+    ///
+    /// For callers on their way out. Nothing closes this connection -- a
+    /// Tauri `exit` and a `process::exit` both skip every destructor -- so
+    /// without this the newest rows stay in the log and `state.sqlite3`
+    /// alone, which is what a backup takes, keeps what it last folded back.
+    ///
+    /// Reported rather than returned: the caller is already leaving, and
+    /// there is nothing it could usefully do about a failure.
+    pub fn checkpoint(&self) {
+        if let Some(store) = &self.inner.store
+            && let Err(error) = store.checkpoint()
+        {
+            tracing::warn!(%error, "could not fold the database log back on the way out");
+        }
+    }
+
     /// An engine with no store, pointed at a chosen settings file.
     /// Tests only: real use goes through `new`, which opens the store.
     #[cfg(test)]
@@ -1370,7 +1387,7 @@ async fn start(inner: &Arc<Inner>, id: JobId, config: DownloadConfig) {
             // Doing it here rather than on a timer means the action fires as
             // soon as the last download lands.
             if let Some((armed, all_succeeded)) = maybe_arm(&inner).await {
-                tokio::spawn(run_post_action(armed, all_succeeded));
+                tokio::spawn(run_post_action(armed, all_succeeded, inner.store.clone()));
             }
         })
     };
@@ -1645,13 +1662,29 @@ async fn maybe_arm(inner: &Arc<Inner>) -> Option<(ArmedAction, bool)> {
 }
 
 /// Runs an armed action, reporting the countdown so the user can stop it.
-async fn run_post_action(armed: ArmedAction, all_succeeded: bool) {
+async fn run_post_action(
+    armed: ArmedAction,
+    all_succeeded: bool,
+    store: Option<Arc<idm_store::Store>>,
+) {
     let action = armed.action();
     eprintln!(
         "All downloads finished. Will {} in {}s unless cancelled.",
         action.describe(),
         armed.countdown().as_secs()
     );
+
+    // Before the countdown, not after: three of the four actions take the
+    // machine away, and `armed.run` performs them itself -- by the time it
+    // returns `Performed(Shutdown)`, Windows is already closing the process.
+    // There is nothing left to write in any case, since an action only arms
+    // once every download has landed, so a cancelled countdown has cost
+    // nothing more than a checkpoint that was due anyway.
+    if let Some(store) = &store
+        && let Err(error) = store.checkpoint()
+    {
+        tracing::warn!(%error, "could not fold the database log back before the post-download action");
+    }
 
     let mut last_announced = u64::MAX;
     let outcome = armed

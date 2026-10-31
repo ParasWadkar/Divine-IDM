@@ -20,7 +20,7 @@ use std::time::Duration;
 use idm_ipc::{IpcServer, JobId, Request, Response, Settings};
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
+use tauri::{AppHandle, Emitter, Manager, RunEvent, State, WindowEvent};
 
 mod autostart;
 mod batch;
@@ -461,8 +461,20 @@ fn main() {
                 let _ = window.hide();
             }
         })
-        .run(tauri::generate_context!())
-        .expect("the application failed to start");
+        .build(tauri::generate_context!())
+        .expect("the application failed to start")
+        // `build` + `run` rather than `run` alone, for the sake of this one
+        // event. Every way out of the app ends in a process exit that runs
+        // no destructor, so the database's connection is never closed and
+        // its write-ahead log is never folded back -- leaving the newest
+        // history in a file beside `state.sqlite3` rather than in it. This
+        // is the single place every route out passes through: the tray's
+        // Quit, the window's, and a signed-out or restarting session.
+        .run(|app, event| {
+            if let RunEvent::Exit = event {
+                app.state::<AppState>().engine.checkpoint();
+            }
+        });
 }
 
 /// Brings back downloads that were interrupted by a restart.
