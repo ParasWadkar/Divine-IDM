@@ -104,6 +104,12 @@ pub fn state_dir() -> PathBuf {
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share")))
         .unwrap_or_else(std::env::temp_dir);
+    // Still the old name, on purpose. The app was renamed; this folder
+    // holds the download history, the settings, the endpoint and the
+    // browser pairings, and renaming it would leave every one of them
+    // behind on a machine that already had the app. The name is internal
+    // -- nobody is shown it -- so the inconsistency costs nothing next to
+    // what moving it would.
     base.join("DivineIDM")
 }
 

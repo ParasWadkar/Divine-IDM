@@ -26,7 +26,7 @@
 use std::path::{Path, PathBuf};
 
 /// The host name both the manifest and the registry key use.
-pub const HOST_NAME: &str = "com.divine.idm";
+pub const HOST_NAME: &str = "com.divine.pulse";
 
 pub use idm_engine::browsers::{BROWSERS, Browser, Family, browser_present};
 
@@ -176,7 +176,7 @@ pub fn manifest_json(
     // JSON needs the backslashes in a Windows path escaped.
     let escaped = host_path.display().to_string().replace('\\', "\\\\");
     Ok(format!(
-        "{{\n  \"name\": \"{HOST_NAME}\",\n  \"description\": \"Divine IDM native messaging host\",\n  \"path\": \"{escaped}\",\n  \"type\": \"stdio\",\n  \"{key}\": [{}]\n}}\n",
+        "{{\n  \"name\": \"{HOST_NAME}\",\n  \"description\": \"DivinePulse native messaging host\",\n  \"path\": \"{escaped}\",\n  \"type\": \"stdio\",\n  \"{key}\": [{}]\n}}\n",
         entries.join(", ")
     ))
 }
@@ -188,8 +188,8 @@ pub fn manifest_dir() -> PathBuf {
 
 pub fn manifest_path(family: Family) -> PathBuf {
     let leaf = match family {
-        Family::Chromium => "com.divine.idm.chromium.json",
-        Family::Gecko => "com.divine.idm.gecko.json",
+        Family::Chromium => "com.divine.pulse.chromium.json",
+        Family::Gecko => "com.divine.pulse.gecko.json",
     };
     manifest_dir().join(leaf)
 }
@@ -483,7 +483,7 @@ mod tests {
 
     #[test]
     fn the_two_families_use_their_own_manifest_keys() {
-        let path = Path::new(r"C:\Program Files\DivineIDM\idm-host.exe");
+        let path = Path::new(r"C:\Program Files\DivinePulse\idm-host.exe");
 
         let chromium = manifest_json(Family::Chromium, path, &callers()).unwrap();
         assert!(chromium.contains("allowed_origins"), "{chromium}");
@@ -511,12 +511,12 @@ mod tests {
 
     #[test]
     fn windows_paths_are_escaped_for_json() {
-        let path = Path::new(r"C:\Program Files\DivineIDM\idm-host.exe");
+        let path = Path::new(r"C:\Program Files\DivinePulse\idm-host.exe");
         let json = manifest_json(Family::Chromium, path, &callers()).unwrap();
-        assert!(json.contains(r"C:\\Program Files\\DivineIDM\\idm-host.exe"), "{json}");
+        assert!(json.contains(r"C:\\Program Files\\DivinePulse\\idm-host.exe"), "{json}");
         // And the result must actually parse.
         let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
-        assert_eq!(parsed["path"], r"C:\Program Files\DivineIDM\idm-host.exe");
+        assert_eq!(parsed["path"], r"C:\Program Files\DivinePulse\idm-host.exe");
         assert_eq!(parsed["type"], "stdio");
         assert_eq!(parsed["name"], HOST_NAME);
     }
@@ -724,7 +724,7 @@ mod tests {
         // browser it has ever registered as installed forever after. Found on
         // a machine where HKCU\Software\Vivaldi existed, held nothing but
         // NativeMessagingHosts, and no Vivaldi had ever been installed.
-        const ROOT: &str = r"DivineIDMTest\PhantomBrowser";
+        const ROOT: &str = r"DivinePulseTest\PhantomBrowser";
 
         let dir = tempfile::tempdir().expect("temp dir");
         let manifest = dir.path().join("host.json");

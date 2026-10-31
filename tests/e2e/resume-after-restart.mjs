@@ -97,7 +97,7 @@ async function main() {
     }
   }
 
-  console.log("Divine IDM — resume after a restart\n");
+  console.log("DivinePulse — resume after a restart\n");
 
   const downloads = mkdtempSync(join(tmpdir(), "idm-resume-"));
   const stateDir = mkdtempSync(join(tmpdir(), "idm-state-"));

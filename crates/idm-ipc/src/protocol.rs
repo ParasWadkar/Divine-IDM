@@ -209,7 +209,7 @@ pub struct Settings {
     /// never stored, so restarting it would only produce a refusal the user
     /// has no way to account for.
     pub resume_on_start: bool,
-    /// Start Divine IDM when this user signs in.
+    /// Start DivinePulse when this user signs in.
     pub start_with_windows: bool,
     /// Sort finished downloads into Video, Audio, Documents and so on.
     ///

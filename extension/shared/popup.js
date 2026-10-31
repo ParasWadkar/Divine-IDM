@@ -23,7 +23,7 @@ function render({ state = {}, settings = {} }) {
     // line still said "not running". The real reason -- the string Chrome
     // puts in runtime.lastError, such as "Specified native messaging host
     // not found" -- was known to the extension and shown to nobody.
-    box.textContent = "Divine IDM is not reachable.";
+    box.textContent = "DivinePulse is not reachable.";
     if (state.reason) {
       const detail = document.createElement("div");
       detail.className = "detail";
@@ -35,11 +35,11 @@ function render({ state = {}, settings = {} }) {
     $("pair").hidden = true;
   } else if (state.integrationEnabled === false) {
     box.className = "status warn";
-    box.textContent = "Browser integration is switched off inside Divine IDM.";
+    box.textContent = "Browser integration is switched off inside DivinePulse.";
     $("pair").hidden = true;
   } else if (state.paired === false) {
     box.className = "status warn";
-    box.textContent = "Waiting for you to approve this browser in Divine IDM.";
+    box.textContent = "Waiting for you to approve this browser in DivinePulse.";
     $("pair").hidden = false;
   } else {
     box.className = "status ok";

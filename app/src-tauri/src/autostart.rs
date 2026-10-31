@@ -14,7 +14,7 @@
 use std::path::Path;
 
 const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
-const VALUE: &str = "DivineIDM";
+const VALUE: &str = "DivinePulse";
 
 /// Adds or removes this executable from the current user's startup.
 pub fn apply(enabled: bool) -> Result<(), String> {
@@ -127,9 +127,9 @@ mod tests {
         // An unquoted path with a space is read as a different program
         // followed by arguments, which is how a startup entry silently
         // stops working the moment it lives under "Program Files".
-        let command = command_for(Path::new(r"C:\Program Files\Divine IDM\divine-idm.exe"));
+        let command = command_for(Path::new(r"C:\Program Files\DivinePulse\divinepulse.exe"));
         assert!(command.starts_with('"'), "{command}");
-        assert!(command.contains(r#""C:\Program Files\Divine IDM\divine-idm.exe""#), "{command}");
+        assert!(command.contains(r#""C:\Program Files\DivinePulse\divinepulse.exe""#), "{command}");
         assert!(command.ends_with(" --hidden"), "{command}");
     }
 

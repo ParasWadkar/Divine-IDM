@@ -83,7 +83,7 @@ if (!existsSync(IDM)) {
   process.exit(1);
 }
 
-console.log("Divine IDM — the network going out mid-download\n");
+console.log("DivinePulse — the network going out mid-download\n");
 
 let server = startServer();
 await sleep(1500);

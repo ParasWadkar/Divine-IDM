@@ -1,6 +1,6 @@
 [package]
 name = "idm-cli"
-description = "Command line driver for the Divine IDM engine."
+description = "Command line driver for the DivinePulse engine."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

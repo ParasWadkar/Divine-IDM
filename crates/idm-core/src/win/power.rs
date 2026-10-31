@@ -41,7 +41,7 @@ impl PostAction {
     pub fn describe(self) -> &'static str {
         match self {
             Self::Nothing => "stay running",
-            Self::ExitApp => "close Divine IDM",
+            Self::ExitApp => "close DivinePulse",
             Self::Sleep => "put this computer to sleep",
             Self::Hibernate => "hibernate this computer",
             Self::Shutdown => "shut this computer down",

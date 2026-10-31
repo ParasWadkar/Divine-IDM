@@ -92,7 +92,7 @@ async function main() {
   const port = 8123;
   const size = 4 * 1024 * 1024;
 
-  console.log("Divine IDM — end-to-end chain\n");
+  console.log("DivinePulse — end-to-end chain\n");
   const mock = await startMock(port, size);
   const engine = spawn(IDM, ["--serve", "-o", downloads], {
     stdio: ["ignore", "pipe", "pipe"],

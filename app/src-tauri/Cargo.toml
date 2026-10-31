@@ -1,6 +1,6 @@
 [package]
 name = "idm-app"
-description = "Divine IDM desktop application."
+description = "DivinePulse desktop application."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,7 +8,7 @@ license.workspace = true
 publish.workspace = true
 
 [[bin]]
-name = "divine-idm"
+name = "divinepulse"
 path = "src/main.rs"
 
 [dependencies]

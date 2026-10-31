@@ -73,7 +73,7 @@ async function main() {
     }
   }
 
-  console.log("Divine IDM — a stream through the engine\n");
+  console.log("DivinePulse — a stream through the engine\n");
 
   const downloads = mkdtempSync(join(tmpdir(), "idm-engstream-"));
   const stateDir = mkdtempSync(join(tmpdir(), "idm-state-"));

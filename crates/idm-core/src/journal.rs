@@ -89,7 +89,7 @@ const FAST_VERIFY_TAIL_BYTES: u64 = 32 << 20;
 pub enum JournalError {
     #[error("journal I/O failed: {0}")]
     Io(#[from] io::Error),
-    #[error("not a Divine IDM journal: bad magic")]
+    #[error("not a DivinePulse journal: bad magic")]
     BadMagic,
     #[error("journal format version {found} is newer than the supported {supported}")]
     UnsupportedVersion { found: u32, supported: u32 },

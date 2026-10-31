@@ -13,7 +13,7 @@
 // only something that runs the real binary can prove the flag is connected
 // to it, because the gap was a single argument at one call site.
 //
-// Non-destructive: it snapshots every com.divine.idm registration first and
+// Non-destructive: it snapshots every com.divine.pulse registration first and
 // puts the machine back exactly as it found it, including removing any
 // registration the run created.
 //
@@ -31,8 +31,8 @@ const HOST = join(REPO, "target", "release", "idm-host.exe");
 
 // Roots no browser will ever own, so the test can assert on them without
 // caring what is installed on the machine running it.
-const CHROMIUM_ROOT = String.raw`DivineIDMTest\ExtraRootChromium`;
-const GECKO_ROOT = String.raw`DivineIDMTest\ExtraRootGecko`;
+const CHROMIUM_ROOT = String.raw`DivinePulseTest\ExtraRootChromium`;
+const GECKO_ROOT = String.raw`DivinePulseTest\ExtraRootGecko`;
 
 // Every root the installer knows, so "put it back" means the whole surface
 // rather than the ones this test happened to touch.
@@ -55,7 +55,7 @@ function check(label, ok, detail = "") {
 }
 
 function keyPath(root) {
-  return "HKCU\\Software\\" + root + "\\NativeMessagingHosts\\com.divine.idm";
+  return "HKCU\\Software\\" + root + "\\NativeMessagingHosts\\com.divine.pulse";
 }
 
 /** The manifest a root is registered to, or null when it is not registered. */
@@ -82,7 +82,7 @@ const MANIFEST_DIR = join(
   "DivineIDM",
   "hosts",
 );
-const MANIFEST_NAMES = ["com.divine.idm.chromium.json", "com.divine.idm.gecko.json"];
+const MANIFEST_NAMES = ["com.divine.pulse.chromium.json", "com.divine.pulse.gecko.json"];
 
 function snapshotManifests() {
   const state = new Map();
@@ -204,12 +204,12 @@ try {
   // right, and never starts the host.
   check(
     "the chromium root got the chromium manifest",
-    chromium !== null && chromium.endsWith("com.divine.idm.chromium.json"),
+    chromium !== null && chromium.endsWith("com.divine.pulse.chromium.json"),
     chromium ?? "unregistered",
   );
   check(
     "the gecko root got the gecko manifest",
-    gecko !== null && gecko.endsWith("com.divine.idm.gecko.json"),
+    gecko !== null && gecko.endsWith("com.divine.pulse.gecko.json"),
     gecko ?? "unregistered",
   );
 

@@ -1380,7 +1380,7 @@ async function collectOpenedFiles() {
     strong.textContent = name;
     text.append(
       strong,
-      " was opened with Divine IDM, but nothing was started. Divine IDM downloads over HTTP, " +
+      " was opened with DivinePulse, but nothing was started. DivinePulse downloads over HTTP, " +
         "FTP and SFTP; BitTorrent is not supported yet, so it cannot download this.",
     );
 

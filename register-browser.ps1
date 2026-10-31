@@ -1,4 +1,4 @@
-# Registers Divine IDM with your browsers and starts it, for real.
+# Registers DivinePulse with your browsers and starts it, for real.
 #
 # RUN THIS FROM A NORMAL POWERSHELL WINDOW (Start menu -> PowerShell), NOT from
 # inside Claude. Claude's desktop app is a packaged (MSIX) app, and anything it
@@ -9,7 +9,7 @@
 #
 # Add -Rebuild to rebuild the app first (it stops the running copy anyway).
 #
-# Anyone installing Divine IDM normally is not affected. This only matters while
+# Anyone installing DivinePulse normally is not affected. This only matters while
 # developing it from inside Claude.
 
 param([switch]$Rebuild)
@@ -17,7 +17,7 @@ param([switch]$Rebuild)
 $ErrorActionPreference = 'Stop'
 $repo  = Split-Path -Parent $MyInvocation.MyCommand.Path
 $idm   = Join-Path $repo 'target\release\idm.exe'
-$app   = Join-Path $repo 'target\release\divine-idm.exe'
+$app   = Join-Path $repo 'target\release\divinepulse.exe'
 $id    = 'epjaomgmiimpmbipmfbnloinhaehdaie'
 $real  = Join-Path $env:LOCALAPPDATA 'DivineIDM'
 $virt  = Join-Path $env:LOCALAPPDATA 'Packages\Claude_pzs8sxrjxfjjc\LocalCache\Local\DivineIDM'
@@ -25,7 +25,7 @@ $virt  = Join-Path $env:LOCALAPPDATA 'Packages\Claude_pzs8sxrjxfjjc\LocalCache\L
 if ($env:LOCALAPPDATA -like '*\Packages\*') { throw 'This looks like it is running inside a package. Open a normal PowerShell.' }
 
 Write-Host '1. Stopping any copy started from inside Claude'
-Get-Process divine-idm -ErrorAction SilentlyContinue | Stop-Process -Force
+Get-Process divinepulse -ErrorAction SilentlyContinue | Stop-Process -Force
 Start-Sleep 2
 
 if ($Rebuild) {
@@ -47,16 +47,16 @@ foreach ($f in 'settings.json','pairings.json','state.sqlite3','state.sqlite3-sh
 Write-Host '3. Registering with your browsers'
 & $idm --install-host --extension-id $id
 
-Write-Host '4. Starting Divine IDM'
+Write-Host '4. Starting DivinePulse'
 Start-Process $app
 Start-Sleep 6
 
 Write-Host '5. Checking'
-$key = 'HKCU:\Software\Google\Chrome\NativeMessagingHosts\com.divine.idm'
+$key = 'HKCU:\Software\Google\Chrome\NativeMessagingHosts\com.divine.pulse'
 $manifest = (Get-ItemProperty $key).'(default)'
 Write-Host "   Chrome registry key -> $manifest"
 Write-Host ("   manifest exists     : " + (Test-Path $manifest))
-Write-Host ("   app running         : " + [bool](Get-Process divine-idm -ErrorAction SilentlyContinue))
+Write-Host ("   app running         : " + [bool](Get-Process divinepulse -ErrorAction SilentlyContinue))
 & $idm --pairings
 Write-Host ''
-Write-Host 'Now click the Divine IDM icon in Chrome (no restart needed).'
+Write-Host 'Now click the DivinePulse icon in Chrome (no restart needed).'

@@ -61,7 +61,7 @@ mod tests {
     fn a_torrent_among_the_arguments_is_found() {
         let dir = tempfile::tempdir().unwrap();
         let torrent = file(dir.path(), "ubuntu.torrent");
-        let found = torrent_files(["C:\\app\\divine-idm.exe".to_owned(), torrent.clone()]);
+        let found = torrent_files(["C:\\app\\divinepulse.exe".to_owned(), torrent.clone()]);
         assert_eq!(found, vec![torrent]);
     }
 
@@ -76,7 +76,7 @@ mod tests {
     fn other_files_and_the_executable_are_ignored() {
         let dir = tempfile::tempdir().unwrap();
         let text = file(dir.path(), "notes.txt");
-        let found = torrent_files(["C:\\app\\divine-idm.exe".to_owned(), text, "--hidden".into()]);
+        let found = torrent_files(["C:\\app\\divinepulse.exe".to_owned(), text, "--hidden".into()]);
         assert!(found.is_empty(), "{found:?}");
     }
 

@@ -91,7 +91,7 @@ async function main() {
     }
   }
 
-  console.log("Divine IDM — SFTP\n");
+  console.log("DivinePulse — SFTP\n");
   const server = spawn(SERVER, ["--port", String(PORT)], { stdio: ["ignore", "pipe", "pipe"] });
   await sleep(1500);
 

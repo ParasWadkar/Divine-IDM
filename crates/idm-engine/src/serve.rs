@@ -284,7 +284,7 @@ impl Engine {
         if client.is_browser() {
             if !settings.browser_integration {
                 return Response::Rejected {
-                    reason: "browser integration is switched off in Divine IDM".into(),
+                    reason: "browser integration is switched off in DivinePulse".into(),
                 };
             }
             // Approved by a human, in the app, before anything is queued.
@@ -294,7 +294,7 @@ impl Engine {
             };
             if !paired {
                 return Response::Rejected {
-                    reason: "this extension is not paired; approve it in Divine IDM".into(),
+                    reason: "this extension is not paired; approve it in DivinePulse".into(),
                 };
             }
             // Enforced here, not in the extension, for the same reason as the
@@ -306,7 +306,7 @@ impl Engine {
             };
             if !enabled {
                 return Response::Rejected {
-                    reason: "this browser is switched off in Divine IDM".into(),
+                    reason: "this browser is switched off in DivinePulse".into(),
                 };
             }
         }
@@ -1459,7 +1459,7 @@ impl Engine {
             // its status check, and "approved" here would have it report
             // connected while every download it handed over was declined.
             PairingOutcome::SwitchedOff => {
-                Response::Rejected { reason: "this browser is switched off in Divine IDM".into() }
+                Response::Rejected { reason: "this browser is switched off in DivinePulse".into() }
             }
             PairingOutcome::Pending { request_id, fresh } => {
                 // Deliberately only a notice: approval has to come from the
@@ -1755,7 +1755,7 @@ pub async fn run(output_dir: PathBuf, max_connections: u32) -> Result<(), String
         eprintln!("picked up {restored} interrupted download(s)");
     }
 
-    eprintln!("Divine IDM serving");
+    eprintln!("DivinePulse serving");
     eprintln!("  downloads -> {}", output_dir.display());
     eprintln!("  endpoint  -> {}", idm_ipc::endpoint_path().display());
     // The pipe name and token are deliberately not printed. The endpoint file

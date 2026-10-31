@@ -1,6 +1,6 @@
 [package]
 name = "idm-host"
-description = "Native messaging bridge between browser extensions and the Divine IDM engine."
+description = "Native messaging bridge between browser extensions and the DivinePulse engine."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

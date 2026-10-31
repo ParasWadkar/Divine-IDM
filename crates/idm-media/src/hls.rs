@@ -146,7 +146,7 @@ impl Media {
     pub fn is_downloadable(&self) -> Result<()> {
         if let Encryption::Unsupported(what) = &self.encryption {
             return Err(MediaError::Unsupported(format!(
-                "this stream uses {what}, which Divine IDM cannot decrypt"
+                "this stream uses {what}, which DivinePulse cannot decrypt"
             )));
         }
         if self.segments.is_empty() {

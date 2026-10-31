@@ -1,4 +1,4 @@
-//! Divine IDM, the desktop application.
+//! DivinePulse, the desktop application.
 //!
 //! The engine runs **in this process**, not as a daemon the window talks to.
 //! Closing the window hides to the tray and downloads carry on; quitting from
@@ -280,7 +280,7 @@ fn extension_dir(app: &AppHandle) -> Option<std::path::PathBuf> {
 
     let mut candidates: Vec<std::path::PathBuf> = Vec::new();
 
-    // Source checkout: <repo>\target\<profile>\divine-idm.exe. Checked
+    // Source checkout: <repo>\target\<profile>\divinepulse.exe. Checked
     // first because that is where the extension is *built*. Building an
     // installer also copies the extension into `target\<profile>\extension`,
     // and that copy goes stale the moment the source changes -- so the window
@@ -493,13 +493,13 @@ fn start_ticker(app: AppHandle) {
 }
 
 fn build_tray(app: &AppHandle) -> tauri::Result<()> {
-    let show = MenuItem::with_id(app, "show", "Open Divine IDM", true, None::<&str>)?;
+    let show = MenuItem::with_id(app, "show", "Open DivinePulse", true, None::<&str>)?;
     let quit_item = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&show, &quit_item])?;
 
     TrayIconBuilder::with_id("main")
         .icon(app.default_window_icon().expect("a window icon").clone())
-        .tooltip("Divine IDM")
+        .tooltip("DivinePulse")
         .menu(&menu)
         // The menu belongs on right-click only, so a left click can do the
         // obvious thing and open the window.
@@ -539,8 +539,8 @@ mod tests {
     #[test]
     fn the_verbatim_prefix_is_dropped() {
         assert_eq!(
-            display_path(Path::new(r"\\?\D:\Apps\Divine IDM\extension")),
-            r"D:\Apps\Divine IDM\extension"
+            display_path(Path::new(r"\\?\D:\Apps\DivinePulse\extension")),
+            r"D:\Apps\DivinePulse\extension"
         );
     }
 
@@ -552,8 +552,8 @@ mod tests {
     #[test]
     fn an_ordinary_path_is_left_alone() {
         assert_eq!(
-            display_path(Path::new(r"C:\Program Files\Divine IDM")),
-            r"C:\Program Files\Divine IDM"
+            display_path(Path::new(r"C:\Program Files\DivinePulse")),
+            r"C:\Program Files\DivinePulse"
         );
     }
 }

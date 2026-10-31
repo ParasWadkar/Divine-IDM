@@ -79,7 +79,7 @@ impl Bridge {
                 Err(error) => {
                     if std::time::Instant::now() >= deadline {
                         return Err(format!(
-                            "Divine IDM did not start in time ({error}). Open it yourself and try the download again."
+                            "DivinePulse did not start in time ({error}). Open it yourself and try the download again."
                         ));
                     }
                     tokio::time::sleep(DIAL_EVERY).await;
@@ -105,7 +105,7 @@ fn start_app() -> Result<(), String> {
         .filter(|path| path.is_file())
         .ok_or_else(|| {
             format!(
-                "Divine IDM is not running, and {APP_EXE} was not found next to the browser helper. Open Divine IDM yourself and try again."
+                "DivinePulse is not running, and {APP_EXE} was not found next to the browser helper. Open DivinePulse yourself and try again."
             )
         })?;
 
@@ -115,11 +115,11 @@ fn start_app() -> Result<(), String> {
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
-        .map_err(|error| format!("Divine IDM could not be started: {error}"))?;
+        .map_err(|error| format!("DivinePulse could not be started: {error}"))?;
     Ok(())
 }
 
-const APP_EXE: &str = "divine-idm.exe";
+const APP_EXE: &str = "divinepulse.exe";
 
 /// What a background check is told when the app is simply closed.
 ///
@@ -128,7 +128,7 @@ const APP_EXE: &str = "divine-idm.exe";
 /// at all to someone reading it in a browser popup.
 fn not_running(error: &idm_ipc::client::ClientError) -> String {
     tracing::debug!(%error, "engine not reachable");
-    "Divine IDM is not running. Open it, or just start a download and it will open itself."
+    "DivinePulse is not running. Open it, or just start a download and it will open itself."
         .to_owned()
 }
 

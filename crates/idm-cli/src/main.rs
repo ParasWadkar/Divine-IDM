@@ -16,7 +16,7 @@ use idm_core::sched::ProfileStore;
 use idm_net::download::{DownloadConfig, DownloadReport, Progress, download_with_progress};
 
 #[derive(Parser, Debug)]
-#[command(name = "idm", about = "Divine IDM — a parallel, resumable downloader", version)]
+#[command(name = "idm", about = "DivinePulse — a parallel, resumable downloader", version)]
 struct Args {
     /// URL to download. Omitted when running with --serve.
     url: Option<String>,

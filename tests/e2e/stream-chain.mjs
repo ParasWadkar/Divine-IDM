@@ -54,7 +54,7 @@ async function main() {
     process.exit(1);
   }
 
-  console.log("Divine IDM — HLS stream\n");
+  console.log("DivinePulse — HLS stream\n");
   const mock = spawn("node", [MOCK, "--port", String(PORT)], {
     stdio: ["ignore", "pipe", "ignore"],
   });

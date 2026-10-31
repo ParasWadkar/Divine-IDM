@@ -73,7 +73,7 @@ async function main() {
     process.exit(1);
   }
 
-  console.log("Divine IDM — FTP\n");
+  console.log("DivinePulse — FTP\n");
   const SIZE = 512 * 1024;
   const NAME = `file-${SIZE}.bin`;
   const servers = [];

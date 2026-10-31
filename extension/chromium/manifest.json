@@ -1,15 +1,15 @@
 {
   "manifest_version": 3,
-  "name": "Divine IDM",
+  "name": "DivinePulse",
   "version": "0.1.1",
-  "description": "Hands large downloads to Divine IDM for parallel, resumable downloading.",
+  "description": "Hands large downloads to DivinePulse for parallel, resumable downloading.",
   "minimum_chrome_version": "102",
   "background": {
     "service_worker": "background.js"
   },
   "action": {
     "default_popup": "popup.html",
-    "default_title": "Divine IDM"
+    "default_title": "DivinePulse"
   },
   "permissions": [
     "downloads",

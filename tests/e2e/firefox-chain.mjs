@@ -231,7 +231,7 @@ async function main() {
     }
   }
 
-  console.log("Divine IDM — Firefox chain\n");
+  console.log("DivinePulse — Firefox chain\n");
   const startedAt = Date.now();
 
   const downloads = mkdtempSync(join(tmpdir(), "idm-ffdl-"));
@@ -410,7 +410,7 @@ async function main() {
       .join("")
       .split("\n")
       .map((line) => line.trimEnd())
-      .filter((line) => /Divine IDM|idm@divine/i.test(line));
+      .filter((line) => /DivinePulse|idm@divine/i.test(line));
     if ((failures || process.env.IDM_VERBOSE) && addonLines.length) {
       console.log("\nadd-on output:\n" + addonLines.join("\n"));
     }

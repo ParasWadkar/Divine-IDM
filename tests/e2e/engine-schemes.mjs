@@ -63,7 +63,7 @@ async function main() {
     }
   }
 
-  console.log("Divine IDM — every scheme the engine accepts\n");
+  console.log("DivinePulse — every scheme the engine accepts\n");
 
   const downloads = mkdtempSync(join(tmpdir(), "idm-schemes-"));
   const stateDir = mkdtempSync(join(tmpdir(), "idm-state-"));

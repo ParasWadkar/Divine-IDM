@@ -1,4 +1,4 @@
-// Divine IDM browser integration.
+// DivinePulse browser integration.
 //
 // One source file for every browser. Chromium and Gecko differ only in the
 // manifest and in whether this runs as a service worker or an event page, so
@@ -19,7 +19,7 @@
 // access are *optional* permissions, requested only if you turn the feature
 // on. Most downloader extensions take them at install time; this one asks.
 
-const HOST = "com.divine.idm";
+const HOST = "com.divine.pulse";
 const STATE_KEY = "idmState";
 const SETTINGS_KEY = "idmSettings";
 
@@ -386,7 +386,7 @@ api.downloads.onCreated.addListener(async (item) => {
   } catch (error) {
     // Already finished, or not pausable. Carry on: cancel may still work,
     // and if it does not the browser simply keeps the download.
-    console.debug("Divine IDM: could not pause download", item.id, error);
+    console.debug("DivinePulse: could not pause download", item.id, error);
   }
 
   let taken = false;
@@ -406,11 +406,11 @@ api.downloads.onCreated.addListener(async (item) => {
         // Not silent: a download we paused and then could not resume is a
         // download the user has lost, and swallowing this is what made that
         // hard to see. Fall back to asking the browser for it again.
-        console.warn("Divine IDM: could not resume download", item.id, error);
+        console.warn("DivinePulse: could not resume download", item.id, error);
         try {
           await api.downloads.download({ url: item.finalUrl || item.url });
         } catch (retryError) {
-          console.warn("Divine IDM: could not restart download either", retryError);
+          console.warn("DivinePulse: could not restart download either", retryError);
         }
       }
     }
@@ -426,7 +426,7 @@ api.runtime.onInstalled.addListener(() => {
     api.contextMenus.removeAll(() => {
       api.contextMenus.create({
         id: "idm-download-link",
-        title: "Download with Divine IDM",
+        title: "Download with DivinePulse",
         contexts: ["link", "image", "video", "audio"],
       });
     });

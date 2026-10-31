@@ -157,21 +157,21 @@ async function timeIdm(url, dir, name) {
 const TOOLS = [
   {
     name: "divine-idm",
-    label: "Divine IDM (adaptive)",
+    label: "DivinePulse (adaptive)",
     available: () => existsSync(OUR_EXE),
     run: (url, dir, name) =>
       timeSpawn(OUR_EXE, [url, "-o", dir, "--name", name, "--no-edge-pinning", "-q"]),
   },
   {
     name: "divine-idm-1",
-    label: "Divine IDM (1 conn)",
+    label: "DivinePulse (1 conn)",
     available: () => existsSync(OUR_EXE),
     run: (url, dir, name) =>
       timeSpawn(OUR_EXE, [url, "-o", dir, "--name", name, "-n", "1", "--no-edge-pinning", "-q"]),
   },
   {
     name: "divine-idm-16",
-    label: "Divine IDM (16 conn)",
+    label: "DivinePulse (16 conn)",
     available: () => existsSync(OUR_EXE),
     run: (url, dir, name) =>
       timeSpawn(OUR_EXE, [url, "-o", dir, "--name", name, "-n", "16", "--no-edge-pinning", "-q"]),
@@ -225,7 +225,7 @@ async function main() {
       ? `one shared ${(BPS / 1e6).toFixed(0)} MB/s bucket for all connections (per-IP shaped)`
       : `${(BPS / 1e6).toFixed(0)} MB/s per connection (per-connection shaped)`;
 
-  console.log(`\nDivine IDM benchmark`);
+  console.log(`\nDivinePulse benchmark`);
   console.log(`  file     ${(SIZE / 1048576).toFixed(0)} MiB`);
   console.log(`  shaping  ${shaping}`);
   console.log(`  latency  ${RTT} ms round trip`);

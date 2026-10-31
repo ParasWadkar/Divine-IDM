@@ -106,7 +106,7 @@ const server = createServer((control) => {
     say("226 Transfer complete.");
   }
 
-  say("220 Divine IDM test server");
+  say("220 DivinePulse test server");
 
   let buffered = "";
   control.on("data", async (chunk) => {

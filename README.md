@@ -1,4 +1,4 @@
-# Divine IDM
+# DivinePulse
 
 A download manager for Windows. It splits a file across many connections at
 once, keeps a journal so an interrupted download carries on rather than
@@ -11,11 +11,11 @@ account, and nothing phones home.
 
 ## Installing
 
-1. Run `Divine IDM_0.1.0_x64-setup.exe`.
+1. Run `DivinePulse_0.1.0_x64-setup.exe`.
 2. Windows will almost certainly warn you ("Windows protected your PC"). The
    installer is not code-signed, which is what that warning means — not that
    anything is wrong with it. Click **More info**, then **Run anyway**.
-3. When it finishes, Divine IDM starts and sits in the system tray.
+3. When it finishes, DivinePulse starts and sits in the system tray.
 
 To uninstall, use Add or Remove Programs like anything else.
 
@@ -24,7 +24,7 @@ To uninstall, use Add or Remove Programs like anything else.
 The browser part is not in the Chrome or Firefox stores yet, so it has to be
 loaded by hand. This takes about a minute.
 
-Open Divine IDM, go to **Settings → Browser Integration**, and click
+Open DivinePulse, go to **Settings → Browser Integration**, and click
 **Install** next to your browser. The card shows the exact folder to point the
 browser at, and the steps for that browser. In short:
 
@@ -40,7 +40,7 @@ browser at, and the steps for that browser. In short:
 2. Click **Load Temporary Add-on** and choose the `manifest.json` the card
    shows.
 
-Then click the Divine IDM icon in the browser toolbar. It will ask Divine IDM
+Then click the DivinePulse icon in the browser toolbar. It will ask DivinePulse
 to pair, and a prompt appears in the app window — approve it there. That
 approval is the whole security model: the app will not accept downloads from
 an extension you have not approved.
@@ -55,7 +55,7 @@ an extension you have not approved.
 
 - **Paste a link.** Put it in the box at the top and press **Download**.
 - **From the browser.** With the extension paired and switched on, downloads
-  over 2 MB are handed to Divine IDM automatically. Smaller ones stay in the
+  over 2 MB are handed to DivinePulse automatically. Smaller ones stay in the
   browser, which is usually what you want.
 - **Where files go.** Settings → Download folder. Files are sorted into
   subfolders by type (`Programs`, `Archives`, `Video`, and so on).
@@ -71,7 +71,7 @@ an extension you have not approved.
 
 Being straight about this so nothing surprises you:
 
-- **BitTorrent.** Double-clicking a `.torrent` opens Divine IDM, but it will
+- **BitTorrent.** Double-clicking a `.torrent` opens DivinePulse, but it will
   tell you it cannot download it. HTTP, HTTPS, FTP and SFTP only for now.
 - **DRM-protected video** (Netflix, Prime Video and the like). Not a missing
   feature — it is not possible without the studio's decryption module.
@@ -82,8 +82,8 @@ Being straight about this so nothing surprises you:
 
 ## If something goes wrong
 
-**The browser says Divine IDM is not reachable.** The app was not running and
-could not be started. Open Divine IDM yourself from the Start menu and try the
+**The browser says DivinePulse is not reachable.** The app was not running and
+could not be started. Open DivinePulse yourself from the Start menu and try the
 download again.
 
 **The browser icon says it is not paired.** Click the icon, then approve the

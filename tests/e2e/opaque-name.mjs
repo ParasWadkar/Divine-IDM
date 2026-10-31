@@ -61,7 +61,7 @@ if (!existsSync(IDM)) {
   process.exit(1);
 }
 
-console.log("Divine IDM — a URL with no usable name\n");
+console.log("DivinePulse — a URL with no usable name\n");
 
 const downloads = mkdtempSync(join(tmpdir(), "idm-name-dl-"));
 const stateDir = mkdtempSync(join(tmpdir(), "idm-name-state-"));

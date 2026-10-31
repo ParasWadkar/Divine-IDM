@@ -182,7 +182,7 @@ impl client::Handler for HostKeyCheck {
         // trustworthy because it parsed would be worse than refusing it.
         let PublicKeyOrCertificate::PublicKey { key, .. } = offered else {
             *self.outcome.lock().unwrap() = Some(
-                "the server offered a host certificate, which Divine IDM cannot check".to_owned(),
+                "the server offered a host certificate, which DivinePulse cannot check".to_owned(),
             );
             return Ok(false);
         };

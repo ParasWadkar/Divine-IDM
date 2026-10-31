@@ -75,7 +75,7 @@ pub struct HttpConfig {
 impl Default for HttpConfig {
     fn default() -> Self {
         Self {
-            user_agent: concat!("DivineIDM/", env!("CARGO_PKG_VERSION")).to_owned(),
+            user_agent: concat!("DivinePulse/", env!("CARGO_PKG_VERSION")).to_owned(),
             streams_per_lane: 4,
             connect_timeout: Duration::from_secs(15),
             request_timeout: Duration::from_secs(3600),
