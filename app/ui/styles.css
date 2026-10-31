@@ -458,6 +458,7 @@ canvas {
   gap: 12px;
   padding: 9px 12px;
   background: var(--panel);
+  flex-wrap: wrap;
 }
 
 .hrow .name {
@@ -928,6 +929,7 @@ button.icon {
   align-items: center;
   justify-content: center;
   gap: 6px;
+  flex-shrink: 0;
 }
 
 button.icon svg {
