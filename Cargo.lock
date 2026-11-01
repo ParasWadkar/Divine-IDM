@@ -2732,7 +2732,7 @@ checksum = "b9e0384b61958566e926dc50660321d12159025e767c18e043daf26b70104c39"
 
 [[package]]
 name = "idm-app"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "digest 0.10.7",
  "idm-core",
@@ -2757,7 +2757,7 @@ dependencies = [
 
 [[package]]
 name = "idm-cli"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "clap",
  "idm-core",
@@ -2776,7 +2776,7 @@ dependencies = [
 
 [[package]]
 name = "idm-core"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "bytes",
  "crc32c",
@@ -2790,7 +2790,7 @@ dependencies = [
 
 [[package]]
 name = "idm-engine"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "idm-core",
  "idm-ipc",
@@ -2808,7 +2808,7 @@ dependencies = [
 
 [[package]]
 name = "idm-host"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "idm-ipc",
  "serde",
@@ -2820,7 +2820,7 @@ dependencies = [
 
 [[package]]
 name = "idm-ipc"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "rand 0.9.5",
  "serde",
@@ -2834,7 +2834,7 @@ dependencies = [
 
 [[package]]
 name = "idm-media"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "aes",
  "cbc",
@@ -2848,7 +2848,7 @@ dependencies = [
 
 [[package]]
 name = "idm-net"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "bytes",
  "httpdate",
@@ -2868,7 +2868,7 @@ dependencies = [
 
 [[package]]
 name = "idm-store"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "idm-core",
  "rusqlite",
@@ -2879,7 +2879,7 @@ dependencies = [
 
 [[package]]
 name = "idm-torrent"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "bytes",
  "librqbit",
