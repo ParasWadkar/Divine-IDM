@@ -179,16 +179,18 @@ impl Store {
     }
 
     /// Moves a job to a new state, stamping the finish time when it stops.
-    /// Renames a row.
+    /// Records what a row turned out to be called, and where it went.
     ///
-    /// For the one case where a download does not know its own name when it
-    /// starts: a magnet link carries an info hash, and the name the files are
-    /// written under arrives later, from the swarm. Without this the history
-    /// would keep the placeholder for good.
-    pub fn set_job_filename(&self, id: i64, filename: &str) -> Result<()> {
+    /// For the one case where a download knows neither when it starts: a
+    /// magnet link carries an info hash, and both the name and -- because the
+    /// folder is chosen from what the torrent contains -- the destination are
+    /// settled only once the swarm supplies the metadata. Without this the
+    /// history would keep the placeholder for good and point Open folder at
+    /// the wrong place.
+    pub fn set_job_destination(&self, id: i64, filename: &str, output_dir: &str) -> Result<()> {
         self.conn().execute(
-            "UPDATE jobs SET filename = ?1 WHERE id = ?2",
-            rusqlite::params![filename, id],
+            "UPDATE jobs SET filename = ?1, output_dir = ?2 WHERE id = ?3",
+            rusqlite::params![filename, output_dir, id],
         )?;
         Ok(())
     }

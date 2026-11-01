@@ -28,7 +28,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use librqbit::{
-    AddTorrent, AddTorrentOptions, ManagedTorrent, Session, SessionOptions,
+    AddTorrent, AddTorrentOptions, AddTorrentResponse, ManagedTorrent, Session, SessionOptions,
     SessionPersistenceConfig, TorrentStatsState,
 };
 
@@ -81,6 +81,40 @@ pub enum Phase {
     Failed(String),
 }
 
+/// What a torrent turns out to be, read before it starts.
+///
+/// Carries the resolved metadata so starting it needs no second lookup --
+/// see [`Torrents::start_listed`].
+pub struct Listing {
+    /// The torrent's own name: one file's name, or the folder a set of files
+    /// goes in.
+    pub name: String,
+    pub total: u64,
+    pub file_count: usize,
+    /// The largest file in the torrent, which is what it is really *for*.
+    ///
+    /// The name to judge a torrent's kind by. A release is a film of two
+    /// gigabytes next to subtitles of forty kilobytes, and the torrent's own
+    /// name is a folder name with no extension at all, so neither of those
+    /// answers the question.
+    pub principal_file: Option<String>,
+    /// The `.torrent`, as the swarm or the file supplied it.
+    bytes: bytes::Bytes,
+    /// Peers met while looking the metadata up, so the real start is warm.
+    peers: Vec<std::net::SocketAddr>,
+}
+
+impl std::fmt::Debug for Listing {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Listing")
+            .field("name", &self.name)
+            .field("total", &self.total)
+            .field("file_count", &self.file_count)
+            .field("principal_file", &self.principal_file)
+            .finish_non_exhaustive()
+    }
+}
+
 /// The app's single BitTorrent session.
 ///
 /// One per process, not one per torrent. A session owns a listening socket, a
@@ -121,9 +155,87 @@ impl Torrents {
         Ok(Self { session })
     }
 
-    /// Adds a torrent and starts it.
-    pub async fn add(&self, source: &Source, output_dir: &Path) -> Result<Torrent> {
-        let add = match source {
+    /// A session that touches no network at all.
+    ///
+    /// For testing `inspect`, which needs a session but not a swarm when the
+    /// metadata is already in a local `.torrent`. No DHT, no trackers, no
+    /// listener: a unit test must not announce this machine to anybody.
+    #[cfg(test)]
+    async fn offline(state_dir: &Path, download_dir: PathBuf) -> Result<Self> {
+        let options = SessionOptions {
+            dht: None,
+            disable_trackers: true,
+            listen: None,
+            persistence: None,
+            disable_local_service_discovery: true,
+            ..Default::default()
+        };
+        let _ = state_dir;
+        let session = Session::new_with_opts(download_dir, options)
+            .await
+            .map_err(|error| TorrentError::Session(error.to_string()))?;
+        Ok(Self { session })
+    }
+
+    /// Reads a torrent's metadata without starting it.
+    ///
+    /// This exists so the destination can be settled before the first byte is
+    /// written, which is the rule everywhere else in this app and the one
+    /// thing a torrent makes awkward: a magnet knows neither its name nor
+    /// what it contains until the swarm says, and by then a download that
+    /// started straight away is already writing somewhere.
+    ///
+    /// For a `.torrent` or an http link this costs nothing -- the metadata is
+    /// the file. For a magnet it is a swarm lookup, which is why the listing
+    /// carries the resolved bytes and the peers it met: starting from those
+    /// does not look anything up a second time.
+    pub async fn inspect(&self, source: &Source) -> Result<Listing> {
+        let options = AddTorrentOptions { list_only: true, ..Default::default() };
+        let response = self
+            .session
+            .add_torrent(self.describe(source)?, Some(options))
+            .await
+            .map_err(|error| TorrentError::Refused(error.to_string()))?;
+
+        let AddTorrentResponse::ListOnly(listed) = response else {
+            // `list_only` was asked for, so anything else means librqbit
+            // already had this torrent and handed back the running one.
+            return Err(TorrentError::Refused("that torrent is already running".into()));
+        };
+
+        // The largest file decides what the torrent *is*. A single-file
+        // torrent is its one file; a release is a video of two gigabytes
+        // beside subtitles of forty kilobytes, and calling that collection
+        // "subtitles" because of what sorts last would be absurd.
+        let principal = listed
+            .info
+            .iter_file_details()
+            .filter(|file| !file.attrs().padding)
+            .max_by_key(|file| file.len)
+            .and_then(|file| {
+                file.filename
+                    .to_pathbuf()
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+            });
+
+        Ok(Listing {
+            name: listed
+                .info
+                .name()
+                .map(|name| name.into_owned())
+                .unwrap_or_else(|| source.provisional_name()),
+            total: listed.info.lengths().total_length(),
+            file_count: listed.info.iter_file_lengths().count(),
+            principal_file: principal,
+            bytes: listed.torrent_bytes,
+            peers: listed.seen_peers,
+        })
+    }
+
+    /// How librqbit should be handed this source.
+    fn describe(&self, source: &Source) -> Result<AddTorrent<'static>> {
+        Ok(match source {
             Source::Magnet(address) | Source::Metadata(address) => {
                 AddTorrent::from_url(address.clone())
             }
@@ -134,9 +246,36 @@ impl Torrents {
                 })?;
                 AddTorrent::from_bytes(bytes)
             }
-        };
+        })
+    }
 
+    /// Starts a torrent already read by [`Torrents::inspect`].
+    ///
+    /// From the listing's own bytes and peers, so nothing is looked up twice
+    /// and the swarm is not asked for metadata it has already given.
+    pub async fn start_listed(&self, listing: &Listing, output_dir: &Path) -> Result<Torrent> {
+        self.add_bytes(
+            AddTorrent::from_bytes(listing.bytes.clone()),
+            output_dir,
+            Some(listing.peers.clone()),
+        )
+        .await
+    }
+
+    /// Adds a torrent and starts it.
+    pub async fn add(&self, source: &Source, output_dir: &Path) -> Result<Torrent> {
+        let add = self.describe(source)?;
+        self.add_bytes(add, output_dir, None).await
+    }
+
+    async fn add_bytes(
+        &self,
+        add: AddTorrent<'_>,
+        output_dir: &Path,
+        initial_peers: Option<Vec<std::net::SocketAddr>>,
+    ) -> Result<Torrent> {
         let options = AddTorrentOptions {
+            initial_peers,
             output_folder: Some(output_dir.display().to_string()),
             // Required to resume at all: librqbit will not write into files
             // that already exist without it, and a half-finished torrent is
@@ -303,6 +442,63 @@ mod tests {
             finished,
             live: None,
         }
+    }
+
+    /// A real multi-file torrent, made here, read back offline.
+    ///
+    /// `inspect` cannot be tested by constructing a `Listing` -- the part
+    /// worth testing is what it reads *out* of real metadata. librqbit can
+    /// make a `.torrent` from a folder, so this needs no swarm.
+    async fn listing_of(files: &[(&str, usize)]) -> (tempfile::TempDir, Listing) {
+        let dir = tempfile::tempdir().unwrap();
+        let content = dir.path().join("Some.Release.2024");
+        std::fs::create_dir_all(&content).unwrap();
+        for (name, size) in files {
+            std::fs::write(content.join(name), vec![b'x'; *size]).unwrap();
+        }
+
+        let made = librqbit::create_torrent(
+            &content,
+            librqbit::CreateTorrentOptions::default(),
+            &librqbit::spawn_utils::BlockingSpawner::new(1),
+        )
+        .await
+        .unwrap();
+        let path = dir.path().join("made.torrent");
+        std::fs::write(&path, made.as_bytes().unwrap()).unwrap();
+
+        let session =
+            Torrents::offline(dir.path(), dir.path().join("out")).await.unwrap();
+        let source = Source::parse(path.to_str().unwrap()).unwrap();
+        let listing = session.inspect(&source).await.unwrap();
+        session.stop().await;
+        (dir, listing)
+    }
+
+    #[tokio::test]
+    async fn the_largest_file_is_what_a_torrent_is_judged_by() {
+        // The question this answers: which folder does a release belong in?
+        // Its own name is `Some.Release.2024`, a folder name with no
+        // extension, so that says nothing. The smallest file is subtitles.
+        // Sorting by either would be wrong; the film decides.
+        let (_dir, listing) = listing_of(&[
+            ("Some.Release.2024.srt", 2_000),
+            ("Some.Release.2024.mkv", 400_000),
+            ("readme.nfo", 500),
+        ])
+        .await;
+
+        assert_eq!(listing.name, "Some.Release.2024");
+        assert_eq!(listing.file_count, 3);
+        assert_eq!(listing.principal_file.as_deref(), Some("Some.Release.2024.mkv"));
+        assert_eq!(listing.total, 402_500);
+    }
+
+    #[tokio::test]
+    async fn a_single_file_torrent_is_judged_by_that_file() {
+        let (_dir, listing) = listing_of(&[("ubuntu-24.04.iso", 50_000)]).await;
+        assert_eq!(listing.file_count, 1);
+        assert_eq!(listing.principal_file.as_deref(), Some("ubuntu-24.04.iso"));
     }
 
     #[test]

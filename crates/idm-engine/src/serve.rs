@@ -13,7 +13,7 @@
 //! weaker guarantee than having no path to sanitise.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -399,8 +399,14 @@ impl Engine {
         // Decided before the download starts, because the destination has
         // to be settled before the first byte is written — there is no
         // moving the file afterwards without racing whatever opened it.
-        let category =
-            settings.sort_into_folders.then(|| crate::category::category_for(&filename)).flatten();
+        // Not for a torrent: there is nothing yet to sort by. Its name is an
+        // info hash, or a folder name with no extension, and what it
+        // actually contains is known only once the metadata arrives. That
+        // happens in `run_torrent`, which places it before writing anything
+        // -- which is all the rule here ever required.
+        let category = (torrent.is_none() && settings.sort_into_folders)
+            .then(|| crate::category::category_for(&filename))
+            .flatten();
         // The chosen folder if there is one, else the default the engine was
         // started with. Read now, so a change applies to what is queued next
         // and never moves a download already under way.
@@ -1317,30 +1323,31 @@ async fn run_torrent(
         }
         None => {
             let session = torrent_session(inner).await?;
+
+            // Read before it is started, so the destination can be settled
+            // before the first byte -- the same rule every other download
+            // here follows. For a magnet this is a swarm lookup and the job
+            // sits in `Preparing` while it happens; starting from the
+            // listing costs no second lookup.
+            let listing = session.inspect(&source).await.map_err(RunFailure::from_transport)?;
+            let output_dir = place_torrent(inner, config, &listing).await?;
+
             let torrent = Arc::new(
                 session
-                    .add(&source, &config.output_dir)
+                    .start_listed(&listing, &output_dir)
                     .await
                     .map_err(RunFailure::from_transport)?,
             );
+            adopt_torrent_destination(inner, id, &listing.name, &output_dir).await;
             inner.live_torrents.lock().await.insert(id, Arc::clone(&torrent));
             torrent
         }
     };
 
-    // A magnet starts with a placeholder: the real name is in the metadata,
-    // which arrives from the swarm after the job is already on screen. Taken
-    // once, the first time it is there.
-    let mut named = false;
     let mut ticker = tokio::time::interval(TORRENT_POLL);
 
     loop {
         ticker.tick().await;
-
-        if !named && let Some(name) = torrent.name() {
-            adopt_torrent_name(inner, id, &name).await;
-            named = true;
-        }
 
         let progress = torrent.progress();
         record_torrent(inner, id, &progress);
@@ -1365,24 +1372,73 @@ async fn run_torrent(
     }
 }
 
-/// Takes the torrent's real name once the metadata supplies it.
+/// Which folder a torrent's files belong in.
 ///
-/// Both in the list and in the stored row, or the history would keep the
-/// placeholder -- an info hash -- for good.
-async fn adopt_torrent_name(inner: &Arc<Inner>, id: JobId, name: &str) {
+/// The category question, asked at the only moment it can be answered: after
+/// the metadata and before the first write. Judged by the largest file in the
+/// torrent, because the torrent's own name is a folder name with no extension
+/// and the smallest file is some subtitles.
+async fn place_torrent(
+    inner: &Arc<Inner>,
+    config: &DownloadConfig,
+    listing: &idm_torrent::Listing,
+) -> std::result::Result<PathBuf, RunFailure> {
+    // Read now rather than remembered from when the job was queued, which may
+    // have been before the setting was last changed.
+    if !inner.settings.lock().await.sort_into_folders {
+        return Ok(config.output_dir.clone());
+    }
+
+    // A job being restarted already has its category in the folder it was
+    // given, and joining another one would make `Downloads/Video/Video`.
+    let base = base_of(&config.output_dir);
+    let name = listing.principal_file.as_deref().unwrap_or(&listing.name);
+    let Some(category) = crate::category::category_for(name) else {
+        return Ok(base);
+    };
+
+    let chosen = base.join(category);
+    // Created here, because librqbit is about to be told to write into it and
+    // would fail less clearly.
+    std::fs::create_dir_all(&chosen).map_err(RunFailure::from_transport)?;
+    Ok(chosen)
+}
+
+/// A download folder with any category folder taken back off.
+///
+/// So that placing a torrent is idempotent: a job resumed from its stored row
+/// arrives with the folder it was already given, and this is what makes
+/// deciding again produce the same answer rather than a deeper one.
+fn base_of(dir: &Path) -> PathBuf {
+    let is_category = dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| crate::category::all_categories().contains(&name));
+
+    match (is_category, dir.parent()) {
+        (true, Some(parent)) => parent.to_owned(),
+        _ => dir.to_owned(),
+    }
+}
+
+/// Records what a torrent turned out to be: its name, and where it went.
+///
+/// In the list and in the stored row. Without this the history would keep the
+/// placeholder -- an info hash -- for good, and Open folder would point at
+/// the folder the job was queued with rather than the one it was placed in.
+async fn adopt_torrent_destination(inner: &Arc<Inner>, id: JobId, name: &str, dir: &Path) {
     let Some(name) = sanitise_filename(name) else { return };
+    let dir = dir.display().to_string();
 
     if let Some(record) = inner.jobs.lock().await.get_mut(&id) {
-        if record.status.filename == name {
-            return;
-        }
         record.status.filename = name.clone();
+        record.status.output_dir = dir.clone();
     }
 
     if let Some((store, row)) = row_of(inner, id).await
-        && let Err(error) = store.set_job_filename(row, &name)
+        && let Err(error) = store.set_job_destination(row, &name, &dir)
     {
-        tracing::warn!(%error, "could not record a torrent's name");
+        tracing::warn!(%error, "could not record where a torrent went");
     }
 }
 
@@ -2213,6 +2269,31 @@ mod tests {
         let path = r"D:\downloads\ubuntu.torrent";
         assert!(engine.vet(&request(path), 0, true).is_ok());
         assert!(engine.vet(&request(path), 0, false).is_err());
+    }
+
+    #[test]
+    fn a_category_folder_is_not_nested_inside_itself_on_a_resume() {
+        // A torrent is placed from what it contains, which is known only
+        // after it starts. A job resumed from its stored row therefore
+        // arrives with the folder it was already given -- and deciding again
+        // without this would produce `Downloads/Video/Video`, then
+        // `Downloads/Video/Video/Video`.
+        assert_eq!(base_of(Path::new(r"D:\Downloads\Video")), PathBuf::from(r"D:\Downloads"));
+        assert_eq!(base_of(Path::new(r"D:\Downloads")), PathBuf::from(r"D:\Downloads"));
+
+        // Every folder the sorter can produce has to be recognised, or the
+        // nesting comes back for whichever one was missed.
+        for category in crate::category::all_categories() {
+            let dir = PathBuf::from(r"D:\Downloads").join(category);
+            assert_eq!(base_of(&dir), PathBuf::from(r"D:\Downloads"), "{category}");
+        }
+
+        // A folder of the user's own that merely happens to sit at the end
+        // of the path is not a category and must not be stripped.
+        assert_eq!(
+            base_of(Path::new(r"D:\Downloads\Linux ISOs")),
+            PathBuf::from(r"D:\Downloads\Linux ISOs")
+        );
     }
 
     #[tokio::test]

@@ -2881,6 +2881,7 @@ dependencies = [
 name = "idm-torrent"
 version = "0.1.1"
 dependencies = [
+ "bytes",
  "librqbit",
  "tempfile",
  "thiserror 2.0.21",
