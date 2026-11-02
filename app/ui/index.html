@@ -90,7 +90,6 @@
           </form>
 
           <div class="status">
-            <span id="engine-dot" class="dot" title="Engine"></span>
             <span id="engine-text">starting</span>
           </div>
         </header>
@@ -190,6 +189,27 @@
                 <button id="clear-history" class="ghost">Clear all</button>
               </div>
             </div>
+
+            <!-- Filters and a search field, not more buttons. History is kept
+                 for good and is read far more often than it is acted on, so
+                 the useful controls are the ones that find a row: "where is
+                 that ISO from March" and "what did I never finish" are the
+                 two questions an archive exists to answer. -->
+            <div class="history-tools">
+              <div class="filters" role="group" aria-label="Show which downloads">
+                <button type="button" class="filter-chip" data-outcome="all" aria-pressed="true">All</button>
+                <button type="button" class="filter-chip" data-outcome="completed" aria-pressed="false">Completed</button>
+                <button type="button" class="filter-chip" data-outcome="incomplete" aria-pressed="false">Incomplete</button>
+                <button type="button" class="filter-chip" data-outcome="failed" aria-pressed="false">Failed</button>
+                <button type="button" class="filter-chip" data-outcome="cancelled" aria-pressed="false">Cancelled</button>
+              </div>
+              <label class="search">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5" /><path d="m16 16 4.5 4.5" /></svg>
+                <input id="history-search" type="search" placeholder="Search downloads…" autocomplete="off" />
+                <span class="sr-only">Search history</span>
+              </label>
+            </div>
+
             <div id="history" class="history"></div>
           </section>
 

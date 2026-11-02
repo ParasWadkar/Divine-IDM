@@ -260,6 +260,21 @@ async fn remove_history_row(state: State<'_, AppState>, id: i64) -> Result<(), S
     state.remove_history_row(id)
 }
 
+/// Opens a finished file with whatever Windows uses for it.
+///
+/// Through `explorer.exe` rather than a shell string: the path arrives as one
+/// argv element, so a filename containing quotes or an ampersand cannot turn
+/// into extra arguments. A download's name comes from a server, which makes
+/// that the difference between opening a file and running a command.
+#[tauri::command]
+fn open_file(path: String) -> Result<(), String> {
+    std::process::Command::new("explorer.exe")
+        .arg(&path)
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
 /// Shows a finished file in Explorer, selected.
 #[tauri::command]
 fn reveal(path: String) -> Result<(), String> {
@@ -420,6 +435,7 @@ fn main() {
             clear_incomplete_history,
             remove_history_row,
             reveal,
+            open_file,
             file_icon,
             verify_file,
             choose_folder,

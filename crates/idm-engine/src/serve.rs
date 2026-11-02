@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use crate::failure::Failure;
 use crate::pairing::{PairingOutcome, PairingStore};
 use idm_core::win::power::{ActionOutcome, ArmedAction, Canceller, PostAction, SystemPower};
 use idm_ipc::protocol::{
@@ -608,7 +609,11 @@ impl Engine {
             idm_store::JobState::Completed => {
                 return Response::Rejected { reason: "that download has already finished".into() };
             }
-            idm_store::JobState::Failed => {}
+            // Both terminal states that left bytes on disk. A cancelled
+            // download is as resumable as a failed one -- the files were
+            // thrown away, but the user asking again is asking for it to
+            // start over, not to be told it cannot.
+            idm_store::JobState::Failed | idm_store::JobState::Cancelled => {}
             // Queued, Running or Paused: still live, or the row is stale
             // because the engine has not caught up with it yet either way.
             _ => return Response::Rejected { reason: "that download is already going".into() },
@@ -914,8 +919,10 @@ impl Engine {
                     if let Some(abort) = record.abort.take() {
                         abort.abort();
                     }
-                    record.status.state = JobState::Failed;
-                    record.status.error = Some("cancelled".into());
+                    record.status.state = JobState::Cancelled;
+                    // Nothing went wrong, so there is nothing to report. The
+                    // state is the whole story.
+                    record.status.error = None;
                     record.waiting = false;
                     record.claimed.clone()
                 }
@@ -949,7 +956,7 @@ impl Engine {
             tracing::warn!(%error, "could not remove a cancelled torrent from the session");
         }
 
-        write_state(&self.inner, id, JobState::Failed, Some("cancelled")).await;
+        write_state(&self.inner, id, JobState::Cancelled, None).await;
         release_claim(&self.inner, id).await;
         // The download task drops this mapping itself once it stops, but it
         // was aborted above and never reached that line. Left behind, the row
@@ -1021,7 +1028,7 @@ fn start_stall_watchdog(inner: Arc<Inner>) {
                 {
                     abort.abort();
                 }
-                schedule_retry(&inner, id, "the connection went away".to_owned()).await;
+                schedule_retry(&inner, id, Failure::stalled()).await;
             }
         }
     });
@@ -1039,7 +1046,7 @@ fn start_stall_watchdog(inner: Arc<Inner>) {
 /// costs nothing. It checks the state again on waking: the user may have
 /// paused or cancelled in the meantime, and neither should be overridden by
 /// a timer that was already running.
-async fn schedule_retry(inner: &Arc<Inner>, id: JobId, message: String) {
+async fn schedule_retry(inner: &Arc<Inner>, id: JobId, failure: Failure) {
     let delay = {
         let mut jobs = inner.jobs.lock().await;
         let Some(job) = jobs.get_mut(&id) else { return };
@@ -1052,13 +1059,15 @@ async fn schedule_retry(inner: &Arc<Inner>, id: JobId, message: String) {
         job.status.bytes_per_sec = 0.0;
         job.status.connections = 0;
         job.status.retry_in_secs = Some(delay.as_secs());
-        job.status.error = Some(message.clone());
+        job.status.error = Some(failure.summary.clone());
         job.waiting = false;
         job.abort = None;
         delay
     };
 
-    write_state(inner, id, JobState::Reconnecting, Some(&message)).await;
+    // Recorded even though the row is not finished: a download waiting to
+    // try again is one the user may ask about, and "why" is the question.
+    write_state(inner, id, JobState::Reconnecting, Some(outcome_of(&failure))).await;
     // A slot is free while this one waits, so anything queued behind it can
     // get on rather than being held up by a connection that is not there.
     pump(Arc::clone(inner)).await;
@@ -1087,37 +1096,6 @@ async fn schedule_retry(inner: &Arc<Inner>, id: JobId, message: String) {
         }
         pump(inner).await;
     });
-}
-
-/// Why a download stopped, and whether waiting could fix it.
-///
-/// The run functions used to flatten every error to a string, which threw
-/// away the one thing the engine most needs to know: a 404 and a dropped
-/// Wi-Fi look identical once they are both `String`.
-struct RunFailure {
-    message: String,
-    /// True when the network went away rather than the download being
-    /// impossible. See [`idm_net::download::DownloadError::is_transient`].
-    transient: bool,
-}
-
-impl RunFailure {
-    /// For the transports whose errors are not `DownloadError`.
-    ///
-    /// FTP, SFTP and the stream fetcher each have their own error type, and
-    /// all three run over a network that can go away. Treating their failures
-    /// as worth another try is the same bet as for HTTP; a genuinely
-    /// impossible transfer fails again straight away and the attempt costs a
-    /// few seconds.
-    fn from_transport(error: impl std::fmt::Display) -> Self {
-        Self { message: error.to_string(), transient: true }
-    }
-}
-
-impl From<idm_net::download::DownloadError> for RunFailure {
-    fn from(error: idm_net::download::DownloadError) -> Self {
-        Self { transient: error.is_transient(), message: error.to_string() }
-    }
 }
 
 /// How long to wait before trying again, by consecutive failure.
@@ -1233,7 +1211,7 @@ async fn run_file(
     inner: &Arc<Inner>,
     id: JobId,
     config: &DownloadConfig,
-) -> std::result::Result<Option<u64>, RunFailure> {
+) -> std::result::Result<Option<u64>, Failure> {
     let progress_inner = Arc::clone(inner);
     let report = download_with_progress(config, move |progress: Progress| {
         record_progress(&progress_inner, id, &progress);
@@ -1273,7 +1251,7 @@ fn record_transfer(inner: &Inner, id: JobId, done: u64, total: Option<u64>) {
 /// torrents with never opens a listening socket or joins the DHT.
 async fn torrent_session(
     inner: &Arc<Inner>,
-) -> std::result::Result<Arc<idm_torrent::Torrents>, RunFailure> {
+) -> std::result::Result<Arc<idm_torrent::Torrents>, Failure> {
     // Read before the session starts and not re-read afterwards: librqbit
     // takes its rate limit when the session is built. A limit changed later
     // applies to the next run of the app, which is worth saying out loud
@@ -1287,7 +1265,7 @@ async fn torrent_session(
             idm_torrent::Torrents::start(&idm_ipc::state_dir(), download_dir, limit)
                 .await
                 .map(Arc::new)
-                .map_err(RunFailure::from_transport)
+                .map_err(Failure::from_transport)
         })
         .await
         .cloned()
@@ -1310,7 +1288,7 @@ async fn run_torrent(
     id: JobId,
     config: &DownloadConfig,
     source: idm_torrent::Source,
-) -> std::result::Result<Option<u64>, RunFailure> {
+) -> std::result::Result<Option<u64>, Failure> {
     // A torrent this job already has is one that was paused: librqbit kept
     // it, along with the record of which pieces are verified, so resuming is
     // unpausing rather than adding it again. Adding again would throw that
@@ -1318,7 +1296,7 @@ async fn run_torrent(
     let existing = inner.live_torrents.lock().await.get(&id).cloned();
     let torrent = match existing {
         Some(torrent) => {
-            torrent.resume().await.map_err(RunFailure::from_transport)?;
+            torrent.resume().await.map_err(Failure::from_transport)?;
             torrent
         }
         None => {
@@ -1329,14 +1307,14 @@ async fn run_torrent(
             // here follows. For a magnet this is a swarm lookup and the job
             // sits in `Preparing` while it happens; starting from the
             // listing costs no second lookup.
-            let listing = session.inspect(&source).await.map_err(RunFailure::from_transport)?;
+            let listing = session.inspect(&source).await.map_err(Failure::from_transport)?;
             let output_dir = place_torrent(inner, config, &listing).await?;
 
             let torrent = Arc::new(
                 session
                     .start_listed(&listing, &output_dir)
                     .await
-                    .map_err(RunFailure::from_transport)?,
+                    .map_err(Failure::from_transport)?,
             );
             adopt_torrent_destination(inner, id, &listing.name, &output_dir).await;
             inner.live_torrents.lock().await.insert(id, Arc::clone(&torrent));
@@ -1362,7 +1340,7 @@ async fn run_torrent(
             }
             idm_torrent::Phase::Failed(reason) => {
                 inner.live_torrents.lock().await.remove(&id);
-                return Err(RunFailure::from_transport(reason));
+                return Err(Failure::from_transport(reason));
             }
             // `Preparing` is fetching metadata or checking files on disk,
             // `Paused` can only be seen here if something outside this loop
@@ -1382,7 +1360,7 @@ async fn place_torrent(
     inner: &Arc<Inner>,
     config: &DownloadConfig,
     listing: &idm_torrent::Listing,
-) -> std::result::Result<PathBuf, RunFailure> {
+) -> std::result::Result<PathBuf, Failure> {
     // Read now rather than remembered from when the job was queued, which may
     // have been before the setting was last changed.
     if !inner.settings.lock().await.sort_into_folders {
@@ -1400,7 +1378,7 @@ async fn place_torrent(
     let chosen = base.join(category);
     // Created here, because librqbit is about to be told to write into it and
     // would fail less clearly.
-    std::fs::create_dir_all(&chosen).map_err(RunFailure::from_transport)?;
+    std::fs::create_dir_all(&chosen).map_err(Failure::from_transport)?;
     Ok(chosen)
 }
 
@@ -1464,7 +1442,7 @@ async fn run_ftp(
     inner: &Arc<Inner>,
     id: JobId,
     config: &DownloadConfig,
-) -> std::result::Result<Option<u64>, RunFailure> {
+) -> std::result::Result<Option<u64>, Failure> {
     let mut options = idm_net::ftp::FtpOptions::new(config.output_dir.clone());
     options.filename = config.filename.clone();
     options.limiter = config.fetch.limiter.clone();
@@ -1474,7 +1452,7 @@ async fn run_ftp(
         record_transfer(&progress_inner, id, done, total);
     })
     .await
-    .map_err(RunFailure::from_transport)?;
+    .map_err(Failure::from_transport)?;
     Ok(Some(report.bytes))
 }
 
@@ -1485,7 +1463,7 @@ async fn run_sftp(
     inner: &Arc<Inner>,
     id: JobId,
     config: &DownloadConfig,
-) -> std::result::Result<Option<u64>, RunFailure> {
+) -> std::result::Result<Option<u64>, Failure> {
     let mut options = idm_net::sftp::SftpOptions::new(config.output_dir.clone());
     options.filename = config.filename.clone();
     options.limiter = config.fetch.limiter.clone();
@@ -1496,7 +1474,7 @@ async fn run_sftp(
         record_transfer(&progress_inner, id, done, total);
     })
     .await
-    .map_err(RunFailure::from_transport)?;
+    .map_err(Failure::from_transport)?;
     Ok(Some(report.bytes))
 }
 
@@ -1510,7 +1488,7 @@ async fn run_stream(
     inner: &Arc<Inner>,
     id: JobId,
     config: &DownloadConfig,
-) -> std::result::Result<Option<u64>, RunFailure> {
+) -> std::result::Result<Option<u64>, Failure> {
     let mut options = idm_net::stream::StreamOptions::new(config.output_dir.clone());
     options.filename = config.filename.clone();
     options.referrer = config.referrer.clone();
@@ -1532,7 +1510,7 @@ async fn run_stream(
         }
     })
     .await
-    .map_err(RunFailure::from_transport)?;
+    .map_err(Failure::from_transport)?;
 
     if let Some(note) = &report.note {
         eprintln!("note: {note}");
@@ -1650,9 +1628,9 @@ async fn start(inner: &Arc<Inner>, id: JobId, config: DownloadConfig) {
                     // The partial file and journal are deliberately left in
                     // place, so a retry resumes rather than restarts.
                     if failure.transient {
-                        schedule_retry(&inner, id, failure.message).await;
+                        schedule_retry(&inner, id, failure).await;
                     } else {
-                        finish(&inner, id, JobState::Failed, None, Some(failure.message)).await;
+                        finish(&inner, id, JobState::Failed, None, Some(failure)).await;
                     }
                 }
             }
@@ -1690,7 +1668,12 @@ async fn row_of(inner: &Inner, id: JobId) -> Option<(Arc<idm_store::Store>, i64)
     Some((store, row))
 }
 
-async fn write_state(inner: &Inner, id: JobId, state: JobState, error: Option<&str>) {
+async fn write_state(
+    inner: &Inner,
+    id: JobId,
+    state: JobState,
+    outcome: Option<idm_store::Outcome<'_>>,
+) {
     let Some((store, row)) = row_of(inner, id).await else {
         return;
     };
@@ -1703,9 +1686,19 @@ async fn write_state(inner: &Inner, id: JobId, state: JobState, error: Option<&s
         JobState::Paused | JobState::Reconnecting => idm_store::JobState::Paused,
         JobState::Completed => idm_store::JobState::Completed,
         JobState::Failed => idm_store::JobState::Failed,
+        JobState::Cancelled => idm_store::JobState::Cancelled,
     };
-    if let Err(error) = store.set_job_state(row, stored, error) {
+    if let Err(error) = store.set_job_state(row, stored, outcome) {
         tracing::warn!(%error, "could not record the job state");
+    }
+}
+
+/// The three parts of a failure, borrowed for the write.
+fn outcome_of(failure: &Failure) -> idm_store::Outcome<'_> {
+    idm_store::Outcome {
+        kind: failure.kind.code(),
+        summary: &failure.summary,
+        detail: &failure.detail,
     }
 }
 
@@ -1720,11 +1713,14 @@ async fn finish(
     id: JobId,
     state: JobState,
     total: Option<u64>,
-    error: Option<String>,
+    failure: Option<Failure>,
 ) {
     if let Some(record) = inner.jobs.lock().await.get_mut(&id) {
         record.status.state = state;
-        record.status.error = error.clone();
+        // The short line, not the whole explanation: the window has one row
+        // of space for this, and the full text is kept in the store for
+        // History's Technical details to open.
+        record.status.error = failure.as_ref().map(|failure| failure.summary.clone());
         if let Some(total) = total {
             record.status.total = Some(total);
             record.status.downloaded = total;
@@ -1738,7 +1734,7 @@ async fn finish(
     {
         tracing::warn!(%error, "could not record the final size");
     }
-    write_state(inner, id, state, error.as_deref()).await;
+    write_state(inner, id, state, failure.as_ref().map(outcome_of)).await;
 }
 
 impl Engine {

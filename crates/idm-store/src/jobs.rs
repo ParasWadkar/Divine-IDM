@@ -16,7 +16,17 @@ pub enum JobState {
     Running,
     Paused,
     Completed,
+    /// Stopped by a problem.
     Failed,
+    /// Stopped because the user said so.
+    ///
+    /// Its own state rather than a `Failed` row carrying the word
+    /// "cancelled" in its error column, which is what this was before. That
+    /// arrangement meant the difference between a download that broke and one
+    /// the user changed their mind about was a string comparison against an
+    /// English word -- in a column that otherwise holds whatever the server
+    /// said.
+    Cancelled,
 }
 
 impl JobState {
@@ -27,6 +37,7 @@ impl JobState {
             Self::Paused => "paused",
             Self::Completed => "completed",
             Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
         }
     }
 
@@ -37,14 +48,52 @@ impl JobState {
             "paused" => Ok(Self::Paused),
             "completed" => Ok(Self::Completed),
             "failed" => Ok(Self::Failed),
+            "cancelled" => Ok(Self::Cancelled),
             other => Err(StoreError::Invalid(format!("unknown job state {other:?}"))),
         }
     }
 
     /// Whether the job has stopped for good.
     pub fn is_finished(self) -> bool {
-        matches!(self, Self::Completed | Self::Failed)
+        matches!(self, Self::Completed | Self::Failed | Self::Cancelled)
     }
+
+    /// Whether it stopped for good without arriving.
+    ///
+    /// What "Clear incomplete" clears, and the one place the three terminal
+    /// states have to be counted rather than told apart.
+    pub fn is_unfinished_end(self) -> bool {
+        matches!(self, Self::Failed | Self::Cancelled)
+    }
+
+    /// Whether History should show it.
+    ///
+    /// Everything except the two states that mean something is happening to
+    /// the download right now. A paused one belongs in both places and for
+    /// different reasons: the Downloads tab holds it because it can still be
+    /// resumed, and History holds it because "the downloads I never
+    /// finished" is a question about the past that nothing else answers. A
+    /// queued or running download has no business in an archive -- it has
+    /// not been anywhere yet.
+    pub fn is_archived(self) -> bool {
+        !matches!(self, Self::Queued | Self::Running)
+    }
+}
+
+/// What a stopped download has to say for itself.
+///
+/// Three fields because they are read in three different places and must not
+/// be allowed to collapse into one: `kind` is switched on, `summary` is the
+/// line in the list, `detail` is what opens when somebody wants the truth.
+/// See `idm_engine::failure` for where they are worked out.
+#[derive(Debug, Clone, Copy)]
+pub struct Outcome<'a> {
+    /// A taxonomy code, such as `storage.insufficient_space`.
+    pub kind: &'a str,
+    /// One short line: "10.21 GB more space required".
+    pub summary: &'a str,
+    /// The full technical text.
+    pub detail: &'a str,
 }
 
 /// What a caller supplies to record a new job.
@@ -89,11 +138,16 @@ pub struct StoredJob {
     pub updated_at_ms: u64,
     pub finished_at_ms: Option<u64>,
     pub needs_browser_auth: bool,
+    /// The taxonomy code, absent on rows written before it existed.
+    pub error_kind: Option<String>,
+    /// The short line. `error` keeps the full text behind it.
+    pub error_summary: Option<String>,
 }
 
 pub(crate) const COLUMNS: &str = "id, url, filename, output_dir, state, downloaded, total, error, category, \
                        referrer, user_agent, mime, queue_id, position, created_at_ms, \
-                       updated_at_ms, finished_at_ms, needs_browser_auth";
+                       updated_at_ms, finished_at_ms, needs_browser_auth, error_kind, \
+                       error_summary";
 
 pub(crate) fn read(row: &Row<'_>) -> rusqlite::Result<StoredJob> {
     Ok(StoredJob {
@@ -119,6 +173,8 @@ pub(crate) fn read(row: &Row<'_>) -> rusqlite::Result<StoredJob> {
         updated_at_ms: row.get::<_, i64>(15)? as u64,
         finished_at_ms: row.get::<_, Option<i64>>(16)?.map(|v| v as u64),
         needs_browser_auth: row.get::<_, i64>(17)? != 0,
+        error_kind: row.get(18)?,
+        error_summary: row.get(19)?,
     })
 }
 
@@ -195,18 +251,39 @@ impl Store {
         Ok(())
     }
 
-    pub fn set_job_state(&self, id: i64, state: JobState, error: Option<&str>) -> Result<()> {
+    /// Moves a job to a new state, with what stopped it if anything did.
+    ///
+    /// Passing `None` clears all three failure columns, which is what a retry
+    /// needs: a row going back into flight must not keep the reason it
+    /// stopped last time, or History would show a live download explaining
+    /// itself in the past tense.
+    pub fn set_job_state(
+        &self,
+        id: i64,
+        state: JobState,
+        outcome: Option<Outcome<'_>>,
+    ) -> Result<()> {
         let now = now_ms();
         let conn = self.conn();
         conn.prepare_cached(
             "UPDATE jobs
                 SET state = ?2,
                     error = ?3,
-                    updated_at_ms = ?4,
-                    finished_at_ms = CASE WHEN ?5 THEN ?4 ELSE NULL END
+                    error_kind = ?4,
+                    error_summary = ?5,
+                    updated_at_ms = ?6,
+                    finished_at_ms = CASE WHEN ?7 THEN ?6 ELSE NULL END
               WHERE id = ?1",
         )?
-        .execute(params![id, state.as_str(), error, now as i64, state.is_finished()])?;
+        .execute(params![
+            id,
+            state.as_str(),
+            outcome.map(|outcome| outcome.detail),
+            outcome.map(|outcome| outcome.kind),
+            outcome.map(|outcome| outcome.summary),
+            now as i64,
+            state.is_finished()
+        ])?;
         Ok(())
     }
 
@@ -222,13 +299,23 @@ impl Store {
         Ok(rows)
     }
 
-    /// Finished jobs, most recently finished first.
+    /// The archive, most recent first.
+    ///
+    /// Not only finished jobs. A download the user stopped and never came
+    /// back to never gets a `finished_at_ms`, so the old predicate left it
+    /// out of History entirely -- which made "Incomplete" a category with
+    /// nothing in it, and left the one question an archive is for ("what did
+    /// I never finish?") unanswerable.
+    ///
+    /// Ordering falls back to `updated_at_ms` for exactly those rows: it is
+    /// when the download last did anything, which is the only honest date to
+    /// file it under.
     pub fn history(&self, limit: u32) -> Result<Vec<StoredJob>> {
         let conn = self.conn();
         let mut statement = conn.prepare_cached(&format!(
             "SELECT {COLUMNS} FROM jobs
-              WHERE finished_at_ms IS NOT NULL
-              ORDER BY finished_at_ms DESC
+              WHERE state NOT IN ('queued', 'running')
+              ORDER BY COALESCE(finished_at_ms, updated_at_ms) DESC
               LIMIT ?1"
         ))?;
         let rows =
@@ -272,7 +359,13 @@ impl Store {
     pub fn clear_incomplete_history(&self) -> Result<usize> {
         let conn = self.conn();
         Ok(conn.execute(
-            "DELETE FROM jobs WHERE finished_at_ms IS NOT NULL AND state = 'failed'",
+            // Both terminal states that are not an arrival. When cancelling
+            // merely wrote 'failed' with a word in the error column, this read
+            // `state = 'failed'` and happened to be right; now that cancelled
+            // rows say so, that predicate would quietly start leaving them
+            // behind.
+            "DELETE FROM jobs
+              WHERE finished_at_ms IS NOT NULL AND state IN ('failed', 'cancelled')",
             [],
         )?)
     }
@@ -329,15 +422,57 @@ mod tests {
         assert!(store.job(id).unwrap().unwrap().finished_at_ms.is_none());
     }
 
+    fn a_reason() -> Outcome<'static> {
+        Outcome {
+            kind: "storage.insufficient_space",
+            summary: "10.21 GB more space required",
+            detail: "not enough space on D:\\: needs 178 GB and 168 GB is free",
+        }
+    }
+
     #[test]
-    fn a_failure_keeps_its_reason() {
+    fn a_failure_keeps_its_reason_in_all_three_parts() {
         let store = Store::in_memory().unwrap();
         let id = store.add_job(&a_job()).unwrap();
-        store.set_job_state(id, JobState::Failed, Some("connection reset")).unwrap();
+        store.set_job_state(id, JobState::Failed, Some(a_reason())).unwrap();
 
         let job = store.job(id).unwrap().unwrap();
         assert_eq!(job.state, JobState::Failed);
-        assert_eq!(job.error.as_deref(), Some("connection reset"));
+        assert_eq!(job.error_kind.as_deref(), Some("storage.insufficient_space"));
+        assert_eq!(job.error_summary.as_deref(), Some("10.21 GB more space required"));
+        assert!(job.error.as_deref().unwrap().contains("168 GB is free"));
+    }
+
+    #[test]
+    fn retrying_a_failed_download_does_not_carry_its_old_reason_forward() {
+        // Otherwise a download running again still has yesterday's failure
+        // attached, and the interface has no way to tell that it is stale.
+        let store = Store::in_memory().unwrap();
+        let id = store.add_job(&a_job()).unwrap();
+        store.set_job_state(id, JobState::Failed, Some(a_reason())).unwrap();
+        store.set_job_state(id, JobState::Running, None).unwrap();
+
+        let job = store.job(id).unwrap().unwrap();
+        assert!(job.error.is_none());
+        assert!(job.error_kind.is_none());
+        assert!(job.error_summary.is_none());
+    }
+
+    #[test]
+    fn a_cancelled_download_is_its_own_state_and_is_finished() {
+        // It used to be a Failed row whose error column held the word
+        // "cancelled", so anything wanting to tell the two apart had to
+        // compare strings with what the server might also have said.
+        let store = Store::in_memory().unwrap();
+        let id = store.add_job(&a_job()).unwrap();
+        store.set_job_state(id, JobState::Cancelled, None).unwrap();
+
+        let job = store.job(id).unwrap().unwrap();
+        assert_eq!(job.state, JobState::Cancelled);
+        assert!(job.state.is_finished(), "it belongs in History");
+        assert!(job.finished_at_ms.is_some());
+        assert!(job.error.is_none(), "nothing went wrong, so there is nothing to say");
+        assert_eq!(store.history(10).unwrap().len(), 1);
     }
 
     #[test]
@@ -391,14 +526,55 @@ mod tests {
         let done = store.add_job(&a_job()).unwrap();
         let cancelled = store.add_job(&a_job()).unwrap();
         let going = store.add_job(&a_job()).unwrap();
+        let broke = store.add_job(&a_job()).unwrap();
         store.set_job_state(done, JobState::Completed, None).unwrap();
-        store.set_job_state(cancelled, JobState::Failed, Some("cancelled")).unwrap();
+        store.set_job_state(cancelled, JobState::Cancelled, None).unwrap();
+        store.set_job_state(broke, JobState::Failed, Some(a_reason())).unwrap();
         store.set_job_state(going, JobState::Running, None).unwrap();
 
-        assert_eq!(store.clear_incomplete_history().unwrap(), 1);
+        // Both kinds of unfinished end, which is the whole point: clearing
+        // must not depend on which of them a row happens to be.
+        assert_eq!(store.clear_incomplete_history().unwrap(), 2);
         assert!(store.job(done).unwrap().is_some(), "a finished download must survive");
         assert!(store.job(cancelled).unwrap().is_none());
+        assert!(store.job(broke).unwrap().is_none());
         assert!(store.job(going).unwrap().is_some(), "a running download must survive");
+    }
+
+    #[test]
+    fn a_download_the_user_stopped_and_left_is_in_the_archive() {
+        // The question an archive exists to answer -- "what did I never
+        // finish?" -- had no answer while History meant `finished_at_ms IS
+        // NOT NULL`, because a paused download never gets one.
+        let store = Store::in_memory().unwrap();
+        let paused = store.add_job(&a_job()).unwrap();
+        let running = store.add_job(&a_job()).unwrap();
+        store.set_job_state(paused, JobState::Paused, None).unwrap();
+        store.set_job_state(running, JobState::Running, None).unwrap();
+
+        let archived: Vec<i64> = store.history(50).unwrap().iter().map(|job| job.id).collect();
+        assert_eq!(archived, vec![paused], "a paused download is in the archive");
+        // And still in the work list, because it can still be resumed. The
+        // two lists answer different questions and may both say yes.
+        let live: Vec<i64> = store.unfinished_jobs().unwrap().iter().map(|job| job.id).collect();
+        assert!(live.contains(&paused));
+        assert!(live.contains(&running));
+    }
+
+    #[test]
+    fn clearing_incomplete_history_spares_a_download_that_can_still_be_resumed() {
+        // A paused row shows as Incomplete, but it is live work: deleting it
+        // would take a resumable download out of the Downloads tab as a side
+        // effect of tidying a list.
+        let store = Store::in_memory().unwrap();
+        let paused = store.add_job(&a_job()).unwrap();
+        let cancelled = store.add_job(&a_job()).unwrap();
+        store.set_job_state(paused, JobState::Paused, None).unwrap();
+        store.set_job_state(cancelled, JobState::Cancelled, None).unwrap();
+
+        assert_eq!(store.clear_incomplete_history().unwrap(), 1);
+        assert!(store.job(paused).unwrap().is_some(), "a resumable download must survive");
+        assert!(store.job(cancelled).unwrap().is_none());
     }
 
     #[test]

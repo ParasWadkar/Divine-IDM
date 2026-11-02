@@ -76,6 +76,19 @@ const MIGRATIONS: &[&str] = &[
     r#"
     ALTER TABLE jobs ADD COLUMN needs_browser_auth INTEGER NOT NULL DEFAULT 0;
     "#,
+    // v3 — what a failure was, beside what it said.
+    //
+    // `error` held a sentence, and a sentence can only be re-read. Deciding
+    // whether a row was a full disk or a dead link meant matching English
+    // prose, which is why the interface ended up asking `error == "cancelled"`
+    // to find out whether the user had cancelled something.
+    //
+    // Both columns are nullable with no default: a row that predates them has
+    // no classification and never will, and a default would claim otherwise.
+    r#"
+    ALTER TABLE jobs ADD COLUMN error_kind TEXT;
+    ALTER TABLE jobs ADD COLUMN error_summary TEXT;
+    "#,
 ];
 
 pub const LATEST: u32 = MIGRATIONS.len() as u32;
@@ -138,8 +151,11 @@ mod tests {
             let conn = store.conn();
             // Wind the database back to v1, then write a row the way v1
             // would have: the point is that an upgrade preserves data that
-            // predates the column it adds.
-            conn.execute("ALTER TABLE jobs DROP COLUMN needs_browser_auth", []).unwrap();
+            // predates the columns it adds. Every column added since has to
+            // come off, or replaying that migration hits a duplicate.
+            for column in ["needs_browser_auth", "error_kind", "error_summary"] {
+                conn.execute(&format!("ALTER TABLE jobs DROP COLUMN {column}"), []).unwrap();
+            }
             conn.pragma_update(None, "user_version", 1).unwrap();
             conn.execute(
                 "INSERT INTO jobs (url, filename, output_dir, state, created_at_ms, updated_at_ms)
@@ -156,6 +172,11 @@ mod tests {
         let job = upgraded.job(id).unwrap().expect("the row should survive the upgrade");
         assert_eq!(job.filename, "a.bin");
         assert!(!job.needs_browser_auth, "the new column should take its default");
+        // Nullable with no default, on purpose: a row written before the
+        // taxonomy existed has no classification, and inventing one would
+        // claim the old failure had been understood.
+        assert!(job.error_kind.is_none(), "an old row must not claim a classification");
+        assert!(job.error_summary.is_none());
     }
 
     #[test]

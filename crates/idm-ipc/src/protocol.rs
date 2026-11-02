@@ -424,6 +424,13 @@ pub enum JobState {
     Reconnecting,
     Completed,
     Failed,
+    /// Stopped because the user said so.
+    ///
+    /// Distinct from `Failed` because nothing went wrong, and the window
+    /// should not offer to diagnose a decision. It was a `Failed` job whose
+    /// error read "cancelled" until this existed, which meant every reader
+    /// had to compare that word against a field the server also writes to.
+    Cancelled,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

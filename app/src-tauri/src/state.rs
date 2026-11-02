@@ -119,8 +119,21 @@ impl AppState {
                         "state": job.state.as_str(),
                         "downloaded": job.downloaded,
                         "total": job.total,
+                        // Three fields, not one, because the list, the icon
+                        // and the Technical details pane each want a
+                        // different one of them. See `idm_engine::failure`.
                         "error": job.error,
+                        "error_kind": job.error_kind,
+                        "error_summary": job.error_summary,
                         "finished_at_ms": job.finished_at_ms,
+                        // When to file it under. A download that was stopped
+                        // and left never finished, so it has no finish time
+                        // and would otherwise group under no date at all.
+                        "at_ms": job.finished_at_ms.unwrap_or(job.updated_at_ms),
+                        // Whether the engine may still be holding it, which
+                        // decides whether History offers to act on it or
+                        // points at the Downloads tab.
+                        "live": !job.state.is_finished(),
                     })
                 })
                 .collect(),

@@ -401,8 +401,13 @@ button.danger {
   background: var(--good);
 }
 
-.dot.bad {
-  background: var(--bad);
+/* The engine says how it is in words beside this. A coloured disc in the
+   corner spends all but a few seconds of its life saying that everything
+   is fine, which is the one thing nobody needs telling; when it does have
+   something to say, a 9px circle is a poor place to say it. So the words
+   carry it, and the colour only follows them. */
+#engine-text.bad {
+  color: var(--bad);
 }
 
 /* --------------------------------------------------------------- pairing */
@@ -449,6 +454,10 @@ main::-webkit-scrollbar {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  /* These buttons delete things, and they sat directly against the list
+     they delete from -- too close for a control whose nearest neighbour
+     is the first row it would remove. */
+  margin-bottom: 14px;
 }
 
 .panel-actions {
@@ -1029,85 +1038,308 @@ canvas {
 
 /* --------------------------------------------------------------- history */
 
+.history-tools {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+/* Solid, where `.chip` is dashed: that one is a thing to put back, this one
+   is a thing to choose. */
+.filter-chip {
+  padding: 4px 11px;
+  color: var(--muted);
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.filter-chip:hover {
+  color: var(--text);
+}
+
+/* Keyed off `aria-pressed` rather than a class of its own, so the state a
+   screen reader announces and the state you can see cannot drift apart --
+   there is only one of them. */
+.filter-chip[aria-pressed="true"] {
+  color: var(--text);
+  background: var(--panel-2);
+  border-color: var(--accent-dim);
+}
+
+/* Days, not one long table. A gap between groups and no outer border: the
+   list is a sequence of dates, and the dates are what you scan. */
 .history {
   display: flex;
   flex-direction: column;
+  gap: 18px;
+}
+
+/* Native <details>, so the chevron, the keyboard, Enter, Space and the
+   open/closed state are the browser's business rather than four more
+   handlers of ours to get wrong. */
+.hgroup > summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 0 8px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  list-style: none;
+  cursor: pointer;
+}
+
+.hgroup > summary::-webkit-details-marker {
+  display: none;
+}
+
+.hgroup > summary:hover {
+  color: var(--text);
+}
+
+.hgroup > summary .chev {
+  flex: none;
+  transition: transform 120ms ease;
+}
+
+.hgroup[open] > summary .chev {
+  transform: rotate(90deg);
+}
+
+/* How many are inside, said only while they cannot be seen. */
+.hcount {
+  font-weight: 500;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.hgroup-rows {
+  display: flex;
+  flex-direction: column;
   gap: 1px;
-  overflow: hidden;
   background: var(--line);
   border: 1px solid var(--line);
   border-radius: var(--radius);
 }
 
+/* The corners are rounded on the rows themselves rather than clipped by the
+   container. `overflow: hidden` here is the obvious way to get them, and it
+   also cuts off anything a row needs to hang outside itself -- which a row
+   whose actions open a menu does, every time. */
+.hgroup-rows > .hrow:first-child {
+  border-radius: calc(var(--radius) - 1px) calc(var(--radius) - 1px) 0 0;
+}
+
+.hgroup-rows > .hrow:last-child {
+  border-radius: 0 0 calc(var(--radius) - 1px) calc(var(--radius) - 1px);
+}
+
+.hgroup-rows > .hrow:only-child {
+  border-radius: calc(var(--radius) - 1px);
+}
+
+/* No row-wide colour, deliberately. A permanent history accumulates
+   failures, and painting each one red turns the archive into a wall of
+   alarm; the glyph and the reason already say which rows they are. */
 .hrow {
   display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 9px 12px;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 12px;
   background: var(--panel);
 }
 
-.hrow .name {
+/* All a click does. Opening the folder on a row click was a navigation
+   nobody asked for, aimed at whichever row the pointer happened to be over
+   -- and the one action in this list with no way back. */
+.hrow.is-selected {
+  background: var(--panel-2);
+}
+
+.hstatus {
+  display: flex;
+  flex: none;
+  margin-top: 2px;
+  color: var(--muted);
+}
+
+.hstatus.completed {
+  color: var(--good);
+}
+
+.hstatus.incomplete {
+  color: var(--warn);
+}
+
+.hstatus.failed {
+  color: var(--bad);
+}
+
+.hrow-main {
+  display: flex;
   flex: 1;
-  /* The filename is what tells one row from another, so it is the last
-     thing on the row that may give up space. `flex: 1` bases it at zero,
-     which left it at no width at all beside a long failure reason: the
-     rows that had most to say about themselves were the ones that ended up
-     unnamed. */
-  min-width: 12ch;
+  flex-direction: column;
+  /* A flex child will not shrink below its longest word without this, which
+     is how a long failure reason used to leave the filename with no room. */
+  min-width: 0;
+  gap: 2px;
+}
+
+.hrow .name {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .hrow .meta {
+  overflow: hidden;
   color: var(--muted);
   font-size: 12px;
   font-variant-numeric: tabular-nums;
-}
-
-/* Why a download stopped is worth a line where there is room for one and
-   worth losing where there is not. `min-width: 0` is what lets it shrink at
-   all -- a flex item will not go below its longest word without it -- and
-   its title keeps the full sentence. */
-.hrow .reason {
-  min-width: 0;
-  overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.hrow.failed .name {
-  color: var(--bad);
+/* The 80/20 line. The short reason is always there; the whole truth is one
+   click away and costs no space until somebody asks for it. */
+.hdetails {
+  margin-top: 2px;
 }
 
-.hrow.completed .name {
-  color: var(--good);
-}
-
-/* The word carries the meaning; colour only repeats it for someone who can
-   use colour to tell the two apart faster. Telling them apart never depends
-   on being able to. */
-.hrow-badge {
-  flex: none;
-  padding: 2px 8px;
-  border: 1px solid var(--line);
-  border-radius: 999px;
+.hdetails > summary {
+  width: fit-content;
+  color: var(--muted);
   font-size: 11px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  white-space: nowrap;
+  list-style: none;
+  cursor: pointer;
 }
 
-.hrow-badge.completed {
-  color: var(--good);
-  border-color: var(--good);
+.hdetails > summary::-webkit-details-marker {
+  display: none;
 }
 
-.hrow-badge.failed {
+.hdetails > summary:hover {
+  color: var(--text);
+}
+
+.hdetails > summary .chev {
+  flex: none;
+  transition: transform 120ms ease;
+}
+
+.hdetails[open] > summary .chev {
+  transform: rotate(90deg);
+}
+
+.hdetails > summary {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.hdetails pre {
+  margin: 6px 0 2px;
+  padding: 8px 10px;
+  overflow-wrap: anywhere;
+  color: var(--muted);
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  /* The only thing anyone wants from this pane is to paste it somewhere. */
+  user-select: text;
+}
+
+.hrow-actions {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 2px;
+}
+
+/* An icon with no word beside it, which every other control in this window
+   refuses to be. It is allowed here because a row carries two of them and
+   the words would crowd out the filename -- so the label moves into
+   `aria-label` and an `.sr-only` span rather than being dropped. The control
+   is still named; it is only unnamed to the eye, which has the tooltip. */
+button.icon-only {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  color: var(--muted);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+button.icon-only:hover {
+  color: var(--text);
+  background: var(--panel-2);
+  border-color: var(--line);
+}
+
+.hmenu-wrap {
+  position: relative;
+}
+
+.hmenu {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 20;
+  min-width: 190px;
+  padding: 4px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  box-shadow: 0 12px 28px rgb(0 0 0 / 45%);
+}
+
+.hmenu-item {
+  display: block;
+  width: 100%;
+  padding: 7px 10px;
+  color: var(--text);
+  background: transparent;
+  border: 0;
+  border-radius: 7px;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.hmenu-item:hover {
+  background: var(--panel);
+}
+
+.hmenu-item.is-danger:hover {
   color: var(--bad);
-  border-color: var(--bad);
+}
+
+.hmenu-line {
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--line);
 }
 
 /* -------------------------------------------------------------- settings */

@@ -39,7 +39,7 @@ mod queues;
 mod schema;
 
 pub use idm_core::sched::HostKey;
-pub use jobs::{JobState, NewJob, StoredJob};
+pub use jobs::{JobState, NewJob, Outcome, StoredJob};
 pub use queues::Queue;
 
 #[derive(Debug, thiserror::Error)]

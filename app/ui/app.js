@@ -84,16 +84,6 @@ function duration(seconds) {
   return `${Math.floor(hours / 24)}d ${hours % 24}h`;
 }
 
-function when(ms) {
-  if (!ms) return "";
-  const date = new Date(Number(ms));
-  const today = new Date();
-  const sameDay = date.toDateString() === today.toDateString();
-  return sameDay
-    ? date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
-    : date.toLocaleDateString([], { month: "short", day: "numeric" });
-}
-
 function toast(message, bad = false) {
   const element = $("toast");
   element.textContent = message;
@@ -147,6 +137,26 @@ const ICONS = {
     ["path", { d: "M18 6 6 18" }],
   ],
   check: [["path", { d: "m5 12.5 4.5 4.5L19 7.5" }]],
+  // The three other things a download can have turned out to be. Shapes, not
+  // only colours: which of these a row is must survive being looked at by
+  // someone who cannot tell the red one from the green one.
+  warn: [
+    ["path", { d: "M12 4.2 2.6 20.2h18.8z" }],
+    ["path", { d: "M12 10v4.4" }],
+    ["path", { d: "M12 17.3v.2" }],
+  ],
+  bang: [
+    ["circle", { cx: "12", cy: "12", r: "8.6" }],
+    ["path", { d: "M12 7.4v5.4" }],
+    ["path", { d: "M12 16.2v.2" }],
+  ],
+  hollow: [["circle", { cx: "12", cy: "12", r: "8.6" }]],
+  more: [
+    ["circle", { cx: "12", cy: "5.4", r: "1.5", fill: "currentColor", stroke: "none" }],
+    ["circle", { cx: "12", cy: "12", r: "1.5", fill: "currentColor", stroke: "none" }],
+    ["circle", { cx: "12", cy: "18.6", r: "1.5", fill: "currentColor", stroke: "none" }],
+  ],
+  chevron: [["path", { d: "m9.5 5 7 7-7 7" }]],
   clock: [
     ["circle", { cx: "12", cy: "12", r: "8.5" }],
     ["path", { d: "M12 7v5l3.5 2" }],
@@ -320,7 +330,7 @@ function render(snapshot) {
   $("stat-peak").textContent = rate(peak);
   drawGraph();
 
-  $("engine-dot").className = "dot good";
+  $("engine-text").className = "";
   $("engine-text").textContent = running.length ? `${running.length} downloading` : "";
 
   notifyOnStateChange(snapshot.jobs ?? []);
@@ -379,12 +389,15 @@ function stateLabel(job) {
     running: "Running",
     queued: "Queued",
     paused: "Paused",
+    failed: "Failed",
+    cancelled: "Cancelled",
   };
   return names[job.state] ?? job.state;
 }
 
 /** Whether a download has stopped for good, one way or the other. */
-const settled = (job) => job.state === "completed" || job.state === "failed";
+const settled = (job) =>
+  job.state === "completed" || job.state === "failed" || job.state === "cancelled";
 
 /** How many of the ones that landed are worth repeating outside History. */
 const RECENT_DONE = 5;
@@ -734,8 +747,10 @@ function notifyOnStateChange(jobs) {
       new Notification("Download finished", {
         body: `${job.filename} — ${bytes(job.total ?? job.downloaded)}`,
       });
-    } else if (job.state === "failed" && job.error !== "cancelled") {
-      // Cancelling is something the person just chose to do; it is not news.
+    } else if (job.state === "failed") {
+      // Cancelling is something the person just chose to do, so it is not
+      // news -- and it no longer has to be recognised by the word in the
+      // error field, because it is a state of its own now.
       new Notification("Download stopped", {
         body: `${job.filename} — ${job.error ?? "stopped unexpectedly"}`,
       });
@@ -766,7 +781,7 @@ async function refresh() {
   try {
     render(await invoke("snapshot"));
   } catch (error) {
-    $("engine-dot").className = "dot bad";
+    $("engine-text").className = "bad";
     $("engine-text").textContent = "engine unavailable";
     toast(String(error), true);
   }
@@ -801,92 +816,510 @@ async function saveSettings(overrides = {}) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// History
+// ---------------------------------------------------------------------------
+
+/**
+ * History is an archive, not a second download queue.
+ *
+ * It keeps every download for good, including the ones that worked: the
+ * reason to look something up months later is almost always a file you did
+ * get -- where it went, what its link was, whether to fetch it again. So the
+ * rows are built to be read and found, not acted on. A row carries a glyph, a
+ * name and one line of context; everything you can do to it is behind an
+ * explicit menu, and clicking the row itself only selects it.
+ *
+ * It had two words for four outcomes before this -- "Finished" and
+ * "Incomplete" -- which put a download the user cancelled, one that ran out
+ * of disk and one they stopped for lunch under the same label.
+ */
+
+/** The four things a download can have turned out to be. */
+const OUTCOMES = {
+  completed: { label: "Completed", icon: "check" },
+  incomplete: { label: "Incomplete", icon: "bang" },
+  failed: { label: "Failed", icon: "warn" },
+  cancelled: { label: "Cancelled", icon: "hollow" },
+};
+
+/**
+ * Which of the four a stored row is.
+ *
+ * Read from the state alone. Cancelling used to be recorded as a failure
+ * whose error text happened to read "cancelled", so telling a decision from
+ * a fault meant comparing an English word against a field the server also
+ * writes to.
+ */
+function outcomeOf(job) {
+  switch (job.state) {
+    case "completed":
+      return "completed";
+    case "failed":
+      // Rows written before cancelling had a state of its own: a failure
+      // whose whole error text is the word. Reading it here is the one
+      // place that comparison is still right, because these rows cannot be
+      // reclassified -- nothing knows now what they were then beyond this.
+      return job.error === "cancelled" ? "cancelled" : "failed";
+    case "cancelled":
+      return "cancelled";
+    // Paused: stopped without finishing and without anything going wrong.
+    default:
+      return "incomplete";
+  }
+}
+
+/** The rows as last fetched. Filtering and searching never refetch. */
+let historyRows = [];
+let historyOutcome = "all";
+let historyQuery = "";
+/** The selected row, which is all a click on one does. */
+let historySelected = null;
+/**
+ * What the user has opened or closed by hand.
+ *
+ * Two sets rather than one, because "not closed" and "opened" are different
+ * from the default, and a rebuild has to leave both alone.
+ */
+const daysClosed = new Set();
+const daysOpened = new Set();
+const openDetails = new Set();
+/** The one open overflow menu, so anything else closes it. */
+let openMenu = null;
+
+const DAY = 86_400_000;
+
+function startOfDay(ms) {
+  const date = new Date(Number(ms));
+  date.setHours(0, 0, 0, 0);
+  return date.getTime();
+}
+
+/**
+ * The heading over a day's downloads.
+ *
+ * Words where words are what people use. "TODAY" and "YESTERDAY" are how the
+ * last two days are referred to, and a date is only worth spelling out once
+ * it is far enough away to need spelling out.
+ */
+function dayHeading(dayMs) {
+  const today = startOfDay(Date.now());
+  const date = new Date(dayMs);
+  const thisYear = date.getFullYear() === new Date().getFullYear();
+  const spelled = date
+    .toLocaleDateString(
+      [],
+      thisYear
+        ? { day: "numeric", month: "long" }
+        : { day: "numeric", month: "long", year: "numeric" },
+    )
+    .toUpperCase();
+  if (dayMs === today) return `TODAY \u00B7 ${spelled}`;
+  if (dayMs === today - DAY) return `YESTERDAY \u00B7 ${spelled}`;
+  return spelled;
+}
+
+/** The time of day. The date is already on the group it sits in. */
+function clockOf(ms) {
+  if (!ms) return "";
+  return new Date(Number(ms)).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
+function dayIsOpen(dayMs) {
+  if (daysClosed.has(dayMs)) return false;
+  if (daysOpened.has(dayMs)) return true;
+  // Today and yesterday open, everything older closed. A year of history
+  // should not have to be scrolled past to reach this morning.
+  return dayMs >= startOfDay(Date.now()) - DAY;
+}
+
+/**
+ * The one line under the filename.
+ *
+ * A failed row spends it on the reason rather than on the word "failed",
+ * which the glyph has already said. Repeating the status there would use the
+ * only line the row has to tell you nothing.
+ */
+function metaFor(job, outcome) {
+  const time = clockOf(job.at_ms);
+  if (outcome === "completed") {
+    return `Completed \u00B7 ${bytes(job.total ?? job.downloaded)} \u00B7 ${time}`;
+  }
+  if (outcome === "failed") {
+    return `${job.error_summary || job.error || "Failed"} \u00B7 ${time}`;
+  }
+  const label = outcome === "cancelled" ? "Cancelled" : "Incomplete";
+  const size = job.total
+    ? `${bytes(job.downloaded)} of ${bytes(job.total)}`
+    : `${bytes(job.downloaded)} downloaded`;
+  return `${label} \u00B7 ${size} \u00B7 ${time}`;
+}
+
+/**
+ * An icon with no word beside it.
+ *
+ * `iconButton` refuses to make one, for good reasons that still hold: a
+ * symbol can be read differently by different people and a tooltip is
+ * invisible until a mouse sits still on it. A history row carries two of
+ * these and the words would crowd out the filename, so the label moves into
+ * `aria-label` and a hidden span instead of being dropped. The control is
+ * still named -- it is unnamed only to the eye, which has the tooltip.
+ */
+function iconOnlyButton(iconName, label) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "icon-only";
+  button.append(icon(iconName));
+  const said = document.createElement("span");
+  said.className = "sr-only";
+  said.textContent = label;
+  button.append(said);
+  button.title = label;
+  button.setAttribute("aria-label", label);
+  return button;
+}
+
+function closeMenu() {
+  if (!openMenu) return;
+  openMenu.menu.hidden = true;
+  openMenu.button.setAttribute("aria-expanded", "false");
+  openMenu = null;
+}
+
+/**
+ * The row's actions, behind one button.
+ *
+ * Laying them out flat is what made the old rows look like a queue: four
+ * controls each, on every row, for things you do to one row a month.
+ */
+function overflowMenu(items) {
+  const wrap = document.createElement("div");
+  wrap.className = "hmenu-wrap";
+
+  const button = iconOnlyButton("more", "More actions");
+  button.setAttribute("aria-haspopup", "true");
+  button.setAttribute("aria-expanded", "false");
+
+  const menu = document.createElement("div");
+  menu.className = "hmenu";
+  menu.hidden = true;
+  menu.setAttribute("role", "menu");
+
+  for (const item of items) {
+    if (!item) {
+      const line = document.createElement("div");
+      line.className = "hmenu-line";
+      menu.append(line);
+      continue;
+    }
+    const entry = document.createElement("button");
+    entry.type = "button";
+    // Not `danger`: that is a filled red button elsewhere in this window,
+    // and `button.danger` would win the background off a menu item.
+    entry.className = item.danger ? "hmenu-item is-danger" : "hmenu-item";
+    entry.setAttribute("role", "menuitem");
+    entry.textContent = item.label;
+    entry.onclick = () => {
+      closeMenu();
+      item.run();
+    };
+    menu.append(entry);
+  }
+
+  button.onclick = (event) => {
+    // Otherwise the document handler below closes it in the same click, and
+    // the row underneath takes the click as a selection.
+    event.stopPropagation();
+    const wasOpen = !menu.hidden;
+    closeMenu();
+    if (wasOpen) return;
+    menu.hidden = false;
+    button.setAttribute("aria-expanded", "true");
+    openMenu = { menu, button };
+  };
+  // A click inside the menu is the menu's, not the row's.
+  menu.addEventListener("click", (event) => event.stopPropagation());
+
+  wrap.append(button, menu);
+  return wrap;
+}
+
+function historyPath(job) {
+  return `${job.output_dir}\\${job.filename}`;
+}
+
+async function copyLink(url) {
+  try {
+    await navigator.clipboard.writeText(url);
+    toast("Link copied");
+  } catch (error) {
+    toast(String(error), true);
+  }
+}
+
+/** Carries on from the bytes already on disk, where there are any. */
+async function retryFromHistory(job) {
+  try {
+    await invoke("resume_from_history", { id: job.id });
+    toast("Started \u2014 check the Downloads tab");
+    showHistory();
+  } catch (error) {
+    toast(String(error), true);
+  }
+}
+
+/**
+ * Fetches it again from scratch.
+ *
+ * A finished download has nothing to resume, so this is a new job from the
+ * old address rather than a retry of the old one.
+ */
+async function downloadAgain(job) {
+  try {
+    await invoke("add_download", { url: job.url, filename: null });
+    toast("Added \u2014 check the Downloads tab");
+  } catch (error) {
+    toast(String(error), true);
+  }
+}
+
+async function removeFromHistory(job) {
+  try {
+    await invoke("remove_history_row", { id: job.id });
+    if (historySelected === job.id) historySelected = null;
+    showHistory();
+  } catch (error) {
+    toast(String(error), true);
+  }
+}
+
+/** Where an unfinished download is actually managed. */
+function showInDownloads(job) {
+  const search = $("search");
+  search.value = job.filename;
+  search.dispatchEvent(new Event("input"));
+  selectTab($("tab-active"));
+}
+
+/** Everything the error knew, for the one person in a hundred who opens it. */
+function technicalDetails(job) {
+  const lines = [];
+  if (job.error_kind) lines.push(`Kind: ${job.error_kind}`);
+  if (job.error) lines.push(`Error: ${job.error}`);
+  lines.push(`URL: ${job.url}`);
+  lines.push(`Folder: ${job.output_dir}`);
+  lines.push(
+    job.total
+      ? `Progress: ${bytes(job.downloaded)} of ${bytes(job.total)}`
+      : `Downloaded: ${bytes(job.downloaded)}`,
+  );
+  lines.push(`When: ${new Date(Number(job.at_ms)).toLocaleString()}`);
+  return lines.join("\n");
+}
+
+function historyMenuItems(job, outcome) {
+  const path = historyPath(job);
+  const shell = (command) => () =>
+    invoke(command, { path }).catch((error) => toast(String(error), true));
+  const items = [];
+
+  if (outcome === "incomplete") {
+    // Still live work. The engine is holding this one and the Downloads tab
+    // is already showing it, so a second set of controls here would be two
+    // ways to drive one download.
+    items.push({ label: "Show in Downloads", run: () => showInDownloads(job) });
+  } else if (outcome === "completed") {
+    items.push({ label: "Open file", run: shell("open_file") });
+  } else {
+    items.push({
+      label: outcome === "failed" ? "Try again" : "Download again",
+      run: () => retryFromHistory(job),
+    });
+  }
+
+  items.push({ label: "Open folder", run: shell("reveal") });
+  items.push({ label: "Copy link", run: () => copyLink(job.url) });
+
+  if (outcome === "completed") {
+    items.push({ label: "Check against a hash\u2026", run: () => verifyDownload(job) });
+    items.push({ label: "Download again", run: () => downloadAgain(job) });
+  }
+
+  if (outcome !== "incomplete") {
+    // Removing a paused row would delete a download that can still be
+    // resumed, which is not what tidying a list should do.
+    items.push(null);
+    items.push({
+      label: "Remove from history",
+      danger: true,
+      run: () => removeFromHistory(job),
+    });
+  }
+  return items;
+}
+
+function historyRow(job) {
+  const outcome = outcomeOf(job);
+  const row = document.createElement("div");
+  row.className = historySelected === job.id ? "hrow is-selected" : "hrow";
+
+  const status = document.createElement("span");
+  status.className = `hstatus ${outcome}`;
+  status.append(icon(OUTCOMES[outcome].icon));
+  // The glyph is the primary cue, so it carries the word for anyone not
+  // reading it by eye.
+  const said = document.createElement("span");
+  said.className = "sr-only";
+  said.textContent = OUTCOMES[outcome].label;
+  status.append(said);
+  status.title = OUTCOMES[outcome].label;
+
+  const main = document.createElement("div");
+  main.className = "hrow-main";
+
+  const name = document.createElement("div");
+  name.className = "name";
+  name.textContent = job.filename;
+  name.title = job.url;
+
+  const meta = document.createElement("div");
+  meta.className = "meta";
+  meta.textContent = metaFor(job, outcome);
+  // The first thing cut short in a narrow window, so the whole line has to
+  // stay reachable somewhere.
+  meta.title = meta.textContent;
+
+  main.append(name, meta);
+
+  if (job.error) {
+    const details = document.createElement("details");
+    details.className = "hdetails";
+    details.open = openDetails.has(job.id);
+
+    const summary = document.createElement("summary");
+    const chev = icon("chevron");
+    chev.classList.add("chev");
+    const label = document.createElement("span");
+    label.textContent = "Technical details";
+    summary.append(chev, label);
+    details.append(summary);
+
+    const pre = document.createElement("pre");
+    pre.textContent = technicalDetails(job);
+    details.append(pre);
+
+    // Survives the rebuild that a filter change or a retry causes.
+    details.addEventListener("toggle", () => {
+      if (details.open) openDetails.add(job.id);
+      else openDetails.delete(job.id);
+    });
+    main.append(details);
+  }
+
+  const actions = document.createElement("div");
+  actions.className = "hrow-actions";
+  const folder = iconOnlyButton("folder", "Open folder");
+  folder.onclick = (event) => {
+    event.stopPropagation();
+    invoke("reveal", { path: historyPath(job) }).catch((error) => toast(String(error), true));
+  };
+  actions.append(folder, overflowMenu(historyMenuItems(job, outcome)));
+
+  row.append(status, main, actions);
+  row.addEventListener("click", (event) => {
+    // A click in the details pane is someone reading it, not picking a row.
+    if (event.target.closest(".hdetails")) return;
+    historySelected = historySelected === job.id ? null : job.id;
+    renderHistory();
+  });
+  return row;
+}
+
+function renderHistory() {
+  closeMenu();
+  const box = $("history");
+
+  if (!historyRows.length) {
+    box.replaceChildren(empty("Nothing has been downloaded yet."));
+    return;
+  }
+
+  const shown = historyRows.filter((job) => {
+    if (historyOutcome !== "all" && outcomeOf(job) !== historyOutcome) return false;
+    if (!historyQuery) return true;
+    // The address as well as the name: a file saved under a name the server
+    // chose is often remembered by where it came from.
+    return (
+      job.filename.toLowerCase().includes(historyQuery) ||
+      job.url.toLowerCase().includes(historyQuery)
+    );
+  });
+
+  if (!shown.length) {
+    box.replaceChildren(empty("Nothing here matches."));
+    return;
+  }
+
+  const days = new Map();
+  for (const job of shown) {
+    const key = startOfDay(job.at_ms);
+    if (!days.has(key)) days.set(key, []);
+    days.get(key).push(job);
+  }
+
+  const groups = [...days.entries()]
+    .sort(([a], [b]) => b - a)
+    .map(([day, jobs]) => {
+      const group = document.createElement("details");
+      group.className = "hgroup";
+      group.open = dayIsOpen(day);
+
+      const summary = document.createElement("summary");
+      const chev = icon("chevron");
+      chev.classList.add("chev");
+      const heading = document.createElement("span");
+      heading.textContent = dayHeading(day);
+
+      // Said only while the rows cannot be seen: a count beside a list you
+      // are looking at is a number you can already see.
+      const count = document.createElement("span");
+      count.className = "hcount";
+      count.textContent = `${jobs.length} download${jobs.length === 1 ? "" : "s"}`;
+      count.hidden = group.open;
+
+      summary.append(chev, heading, count);
+      group.append(summary);
+
+      const rows = document.createElement("div");
+      rows.className = "hgroup-rows";
+      rows.append(...jobs.map(historyRow));
+      group.append(rows);
+
+      // Hiding the count rather than rebuilding: a re-render here would take
+      // the focus off the heading the user just pressed.
+      group.addEventListener("toggle", () => {
+        count.hidden = group.open;
+        if (group.open) {
+          daysOpened.add(day);
+          daysClosed.delete(day);
+        } else {
+          daysClosed.add(day);
+          daysOpened.delete(day);
+        }
+      });
+      return group;
+    });
+
+  box.replaceChildren(...groups);
+}
+
 async function showHistory() {
   try {
-    const rows = await invoke("history", { limit: 200 });
-    const box = $("history");
-    if (!rows.length) {
-      box.replaceChildren(empty("Nothing has finished yet."));
-      return;
-    }
-    box.replaceChildren(
-      ...rows.map((job) => {
-        const row = document.createElement("div");
-        row.className = `hrow ${job.state}`;
-
-        const name = document.createElement("div");
-        name.className = "name";
-        name.textContent = job.filename;
-        name.title = job.url;
-
-        const meta = document.createElement("div");
-        meta.className = "meta";
-        meta.textContent = `${bytes(job.downloaded)} · ${when(job.finished_at_ms)}`;
-
-        // The word, not just the colour: a badge that says what happened,
-        // so telling two rows apart never depends on being able to see red
-        // from green.
-        const finished = job.state === "completed";
-        const badge = document.createElement("span");
-        badge.className = `hrow-badge ${job.state}`;
-        badge.textContent = finished ? "Finished" : "Incomplete";
-
-        row.append(name, badge, meta);
-
-        if (finished) {
-          // Finished: what is left is finding it again, and asking whether
-          // it is really what its source meant to send.
-          const check = iconButton("check", "Verify", { quiet: true });
-          check.title = "Check it against the hash its source published";
-          check.onclick = () => verifyDownload(job);
-
-          const open = iconButton("folder", "Open folder");
-          open.onclick = () =>
-            invoke("reveal", { path: `${job.output_dir}\\${job.filename}` }).catch((error) =>
-              toast(String(error), true),
-            );
-          row.append(check, open);
-        } else {
-          // Incomplete — cancelled or genuinely failed. Either way the bytes
-          // on disk are still there to carry on from, or to simply forget.
-          if (job.error) {
-            const reason = document.createElement("div");
-            reason.className = "meta reason";
-            reason.textContent = job.error;
-            // It is the first thing cut short when the window is narrow, so
-            // the whole sentence has to stay reachable somewhere.
-            reason.title = job.error;
-            row.append(reason);
-          }
-
-          const resume = iconButton("play", "Resume");
-          resume.title = "Resume — carries on from the bytes already on disk";
-          resume.onclick = async () => {
-            try {
-              await invoke("resume_from_history", { id: job.id });
-              toast("Resuming — check the Downloads tab");
-              showHistory();
-            } catch (error) {
-              toast(String(error), true);
-            }
-          };
-
-          const remove = iconButton("trash", "Remove", { quiet: true });
-          remove.title = "Remove from history";
-          remove.onclick = async () => {
-            try {
-              await invoke("remove_history_row", { id: job.id });
-              showHistory();
-            } catch (error) {
-              toast(String(error), true);
-            }
-          };
-
-          row.append(resume, remove);
-        }
-        return row;
-      }),
-    );
+    // The archive is kept for good, so this is a ceiling rather than a page:
+    // five hundred rows is more than the window can usefully scroll and the
+    // search field is the way past it.
+    historyRows = await invoke("history", { limit: 500 });
+    renderHistory();
   } catch (error) {
     toast(String(error), true);
   }
@@ -1182,6 +1615,27 @@ async function verifyDownload(job) {
     toast(String(error), true);
   }
 }
+
+for (const chip of document.querySelectorAll(".filter-chip")) {
+  chip.addEventListener("click", () => {
+    historyOutcome = chip.dataset.outcome;
+    for (const other of document.querySelectorAll(".filter-chip")) {
+      other.setAttribute("aria-pressed", String(other === chip));
+    }
+    renderHistory();
+  });
+}
+
+$("history-search").addEventListener("input", (event) => {
+  historyQuery = event.target.value.trim().toLowerCase();
+  renderHistory();
+});
+
+// One menu open at a time, and anything else closes it.
+document.addEventListener("click", closeMenu);
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") closeMenu();
+});
 
 $("clear-history").addEventListener("click", async () => {
   const sure = await confirmDialog(
