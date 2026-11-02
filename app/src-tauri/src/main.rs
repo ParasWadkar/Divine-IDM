@@ -57,6 +57,7 @@ async fn add_download(
     url: String,
     filename: Option<String>,
     mirrors: Option<Vec<String>>,
+    queue: Option<i64>,
 ) -> Result<usize, String> {
     let addresses = batch::expand(url.trim())?;
     let mirrors: Vec<String> = mirrors
@@ -75,7 +76,7 @@ async fn add_download(
     for (index, address) in addresses.iter().enumerate() {
         let name = if index == 0 { filename.clone() } else { None };
         let mirrors = if index == 0 { mirrors.clone() } else { Vec::new() };
-        match state.add_download(address.clone(), name, mirrors).await {
+        match state.add_download(address.clone(), name, mirrors, queue).await {
             Ok(_) => queued += 1,
             Err(error) => failed = failed.or(Some(error)),
         }
@@ -87,6 +88,62 @@ async fn add_download(
     match failed {
         Some(error) if queued == 0 => Err(error),
         _ => Ok(queued),
+    }
+}
+
+/// The named queues, with what each is running right now.
+#[tauri::command]
+async fn queues(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
+    queue_reply(state.request(Request::ListQueues).await)
+}
+
+/// Creates a queue, or changes how many a queue runs at once.
+///
+/// Returns the queues as they now stand, because the engine answers these
+/// with the whole list: the counts on every queue can change when one of
+/// them is touched, and asking again in a second round trip would show the
+/// window a list from a different instant.
+#[tauri::command]
+async fn set_queue(
+    state: State<'_, AppState>,
+    name: String,
+    max_concurrent: u32,
+) -> Result<serde_json::Value, String> {
+    queue_reply(state.request(Request::SetQueue { name, max_concurrent }).await)
+}
+
+#[tauri::command]
+async fn enable_queue(
+    state: State<'_, AppState>,
+    id: i64,
+    enabled: bool,
+) -> Result<serde_json::Value, String> {
+    queue_reply(state.request(Request::EnableQueue { id, enabled }).await)
+}
+
+#[tauri::command]
+async fn remove_queue(state: State<'_, AppState>, id: i64) -> Result<serde_json::Value, String> {
+    queue_reply(state.request(Request::RemoveQueue { id }).await)
+}
+
+/// Moves a download into a queue, or out of one when `queue` is absent.
+#[tauri::command]
+async fn assign_queue(
+    state: State<'_, AppState>,
+    id: u64,
+    queue: Option<i64>,
+) -> Result<serde_json::Value, String> {
+    queue_reply(state.request(Request::AssignQueue { id: JobId(id), queue }).await)
+}
+
+fn queue_reply(response: Response) -> Result<serde_json::Value, String> {
+    match response {
+        Response::Queues { queues } => {
+            serde_json::to_value(queues).map_err(|error| error.to_string())
+        }
+        Response::Rejected { reason } => Err(reason),
+        Response::Error { message } => Err(message),
+        other => Err(format!("unexpected reply: {other:?}")),
     }
 }
 
@@ -452,6 +509,11 @@ fn main() {
             resume_from_history,
             pause_job,
             refresh_link,
+            queues,
+            set_queue,
+            enable_queue,
+            remove_queue,
+            assign_queue,
             approve_pairing,
             deny_pairing,
             set_browser_enabled,

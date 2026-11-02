@@ -83,10 +83,35 @@ pub struct DownloadRequest {
     pub size_hint: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mime: Option<String>,
+    /// The named queue this download joins, if any.
+    ///
+    /// Set only by the app. A browser extension has no business naming one:
+    /// the ids are opaque row numbers it could only guess at, and a page that
+    /// could pick a queue could park a download in a switched-off one so that
+    /// it never ran and nobody noticed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue: Option<i64>,
 }
 
 /// Most addresses one download may be told to fetch from at once.
 pub const MAX_MIRRORS: usize = 8;
+
+/// One named queue, as the window sees it.
+///
+/// Carries the live counts the store cannot know: the store can see what its
+/// rows say, but which downloads are actually in flight is the engine's own
+/// knowledge.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueueView {
+    pub id: i64,
+    pub name: String,
+    pub max_concurrent: u32,
+    pub enabled: bool,
+    /// Downloads of this queue that hold a slot right now.
+    pub running: u32,
+    /// Downloads of this queue waiting for one.
+    pub waiting: u32,
+}
 
 impl DownloadRequest {
     /// Rejects anything the engine should not act on.
@@ -158,6 +183,21 @@ impl DownloadRequest {
                 if !(lower.starts_with("http://") || lower.starts_with("https://")) {
                     return Err("a mirror must be an http or https address".into());
                 }
+            }
+        }
+
+        if let Some(queue) = self.queue {
+            // `file_transfer` is the app-or-browser distinction this function
+            // already turns on twice above, used here for the third time
+            // rather than taking a second flag that would always agree with
+            // it. A browser naming a queue is refused rather than ignored:
+            // ignoring it would let a page believe it had parked a download
+            // somewhere it had not.
+            if !file_transfer {
+                return Err("a browser cannot choose a queue".into());
+            }
+            if queue <= 0 {
+                return Err("that is not a queue".into());
             }
         }
 
@@ -479,6 +519,34 @@ pub enum Request {
     },
     GetSettings,
     SetSettings(Settings),
+    /// The named queues, with what each is running right now.
+    ///
+    /// Queue management is refused for browser clients throughout, for the
+    /// same reason pairing is: a queue decides what runs and when, and an
+    /// extension that could switch one off could stop every download in it
+    /// without anything in the window saying so.
+    ListQueues,
+    /// Creates a queue, or changes the concurrency of one with this name.
+    SetQueue {
+        name: String,
+        max_concurrent: u32,
+    },
+    /// Switches a queue on or off. Off stops it starting anything more; it
+    /// does not stop what is already running.
+    EnableQueue {
+        id: i64,
+        enabled: bool,
+    },
+    /// Removes a queue. Its downloads are kept and become unqueued.
+    RemoveQueue {
+        id: i64,
+    },
+    /// Moves a download into a queue, or out of one with `None`.
+    AssignQueue {
+        id: JobId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        queue: Option<i64>,
+    },
     /// Cancels an armed post-download action during its countdown.
     CancelPostAction,
     Ping,
@@ -529,6 +597,15 @@ pub struct JobStatus {
     /// Shown so a wait looks like a wait rather than a stall.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry_in_secs: Option<u64>,
+    /// The queue holding this download, if any.
+    ///
+    /// Both the id and the name, because the window needs each: the id to
+    /// show which entry of the queue picker is the current one, the name to
+    /// put on the job without a second round trip to look it up.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -558,6 +635,9 @@ pub enum Response {
         pending: Vec<PendingPairing>,
     },
     Settings(Settings),
+    Queues {
+        queues: Vec<QueueView>,
+    },
     Pong,
     Error {
         message: String,

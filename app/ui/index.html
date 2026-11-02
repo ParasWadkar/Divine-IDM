@@ -33,6 +33,17 @@
             <span>Downloads</span>
           </button>
           <button
+            id="tab-queues"
+            class="nav-item"
+            data-tab="queues"
+            role="tab"
+            aria-selected="false"
+            aria-controls="panel-queues"
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16" /><path d="M4 12h16" /><path d="M4 17h10" /></svg>
+            <span>Queues</span>
+          </button>
+          <button
             id="tab-history"
             class="nav-item"
             data-tab="history"
@@ -83,6 +94,14 @@
               <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="3" width="8" height="4" rx="1" /><path d="M16 5h2a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h2" /></svg>
               <span class="sr-only">Paste from the clipboard</span>
             </button>
+            <!-- Hidden until there is a queue to choose. Somebody who never
+                 makes one should never see a control asking which they want. -->
+            <label id="queue-pick-wrap" class="queue-pick" hidden>
+              <span class="sr-only">Queue</span>
+              <select id="queue-pick" title="Put this download in a queue">
+                <option value="">No queue</option>
+              </select>
+            </label>
             <button type="submit" class="primary">
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11" /><path d="m7 11 5 5 5-5" /><path d="M5 20h14" /></svg>
               <span>Download</span>
@@ -195,6 +214,46 @@
               </summary>
               <div id="done-list" class="done-list"></div>
             </details>
+          </section>
+
+          <section
+            id="panel-queues"
+            class="panel"
+            role="tabpanel"
+            aria-labelledby="tab-queues"
+            hidden
+          >
+            <div class="list-head">
+              <h2>Queues</h2>
+            </div>
+
+            <p class="queues-note">
+              A queue runs a few of its downloads at a time and holds the rest
+              back. Switching one off stops it starting anything more; whatever
+              it already has running carries on, because stopping a transfer
+              mid-flight is what Pause is for.
+            </p>
+
+            <form id="queue-add" class="queue-add">
+              <label class="sr-only" for="queue-name">Queue name</label>
+              <input
+                id="queue-name"
+                class="text-input"
+                type="text"
+                placeholder="Name, such as “overnight”"
+                maxlength="64"
+                autocomplete="off"
+              />
+              <label class="queue-at-once">
+                <span>at once</span>
+                <input id="queue-at-once" type="number" min="1" max="16" step="1" value="2" />
+              </label>
+              <button type="submit" class="primary">
+                <span>Add queue</span>
+              </button>
+            </form>
+
+            <div id="queue-list" class="queue-list"></div>
           </section>
 
           <section

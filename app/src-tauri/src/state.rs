@@ -74,8 +74,9 @@ impl AppState {
         url: String,
         filename: Option<String>,
         mirrors: Vec<String>,
+        queue: Option<i64>,
     ) -> Result<u64, String> {
-        let request = DownloadRequest { url, filename, mirrors, ..Default::default() };
+        let request = DownloadRequest { url, filename, mirrors, queue, ..Default::default() };
         match self.request(Request::Enqueue(request)).await {
             Response::Accepted { id } => Ok(id.0),
             Response::Rejected { reason } => Err(reason),

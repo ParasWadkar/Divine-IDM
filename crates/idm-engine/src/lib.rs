@@ -14,6 +14,7 @@ pub mod failure;
 pub mod folder;
 pub mod pairing;
 pub mod proxy;
+pub mod queues;
 pub mod serve;
 
 pub use serve::Engine;

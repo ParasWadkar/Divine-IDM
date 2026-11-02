@@ -221,6 +221,11 @@ impl Bridge {
                     // could claim it could aim half of a download at a
                     // server of its choosing.
                     mirrors: Vec::new(),
+                    // Also never from a browser, and spelled out for the
+                    // same reason. The engine refuses one anyway; this is so
+                    // that a later field added to the request cannot quietly
+                    // start carrying something from a web page.
+                    queue: None,
                 };
                 match self.ask_waking(Request::Enqueue(request)).await {
                     Ok(Response::Accepted { id }) => ToExtension::Accepted { id: id.0 },

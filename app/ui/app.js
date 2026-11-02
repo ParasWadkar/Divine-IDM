@@ -480,6 +480,22 @@ function jobCard(job) {
     foot.append(state);
   }
 
+  // Both the answer to "which queue is this in" and the way to change it.
+  // One control rather than a chip plus a menu: the chip would have to be
+  // clicked to find out there was a menu at all.
+  if (queues.length > 0) {
+    const pick = document.createElement("select");
+    pick.className = "job-queue";
+    pick.title = "Which queue holds this download";
+    fillQueueOptions(pick, job.queue ?? null);
+    pick.onchange = () =>
+      queueAction("assign_queue", {
+        id: job.id,
+        queue: pick.value === "" ? null : Number(pick.value),
+      });
+    foot.append(pick);
+  }
+
   const spacer = document.createElement("span");
   spacer.className = "spacer";
   foot.append(spacer);
@@ -777,6 +793,176 @@ function notifyOnStateChange(jobs) {
 // ---------------------------------------------------------------------------
 // Actions
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Queues
+// ---------------------------------------------------------------------------
+
+// The queues as the engine last reported them. Kept here because three
+// separate things draw from it — the picker in the add form, the panel, and
+// the select on every job card — and each of those would otherwise ask the
+// engine for itself and show a list from a different instant.
+let queues = [];
+
+/** Re-reads the queues and redraws everything that shows them. */
+async function refreshQueues() {
+  try {
+    queues = await invoke("queues");
+  } catch (error) {
+    // Not a toast. The engine runs without its database on purpose, and
+    // somebody who never opens this panel should not be told about it.
+    queues = [];
+  }
+  showQueuePicker();
+  renderQueues();
+  // The job list draws a queue select of its own, and it is built from this
+  // list. Without redrawing here, the cards rendered before the queues
+  // arrived keep no select at all -- which is every card on screen the first
+  // time the window opens.
+  refresh();
+}
+
+/** Fills a select with the queues, keeping `chosen` selected if it is still there. */
+function fillQueueOptions(select, chosen) {
+  select.replaceChildren();
+  const none = document.createElement("option");
+  none.value = "";
+  none.textContent = "No queue";
+  select.append(none);
+  for (const queue of queues) {
+    const option = document.createElement("option");
+    option.value = String(queue.id);
+    // Said on the option rather than only in the panel, because this is
+    // where the choice is actually made.
+    option.textContent = queue.enabled
+      ? `${queue.name} (${queue.max_concurrent} at once)`
+      : `${queue.name} (off)`;
+    select.append(option);
+  }
+  select.value = chosen == null ? "" : String(chosen);
+  // A queue that has been removed since: fall back rather than leave the
+  // select showing a blank with a value behind it.
+  if (select.value !== (chosen == null ? "" : String(chosen))) select.value = "";
+}
+
+function showQueuePicker() {
+  const wrap = $("queue-pick-wrap");
+  const select = $("queue-pick");
+  const chosen = select.value;
+  wrap.hidden = queues.length === 0;
+  fillQueueOptions(select, chosen === "" ? null : Number(chosen));
+}
+
+function renderQueues() {
+  const list = $("queue-list");
+  list.replaceChildren();
+
+  if (queues.length === 0) {
+    const empty = document.createElement("p");
+    empty.className = "queues-empty";
+    empty.textContent = "No queues yet. Name one above to start holding downloads back.";
+    list.append(empty);
+    return;
+  }
+
+  for (const queue of queues) {
+    const card = document.createElement("div");
+    card.className = queue.enabled ? "queue" : "queue is-off";
+
+    const name = document.createElement("div");
+    name.className = "queue-title";
+    name.textContent = queue.name;
+
+    const counts = document.createElement("div");
+    counts.className = "queue-counts";
+    // Both numbers always, including the zeroes: "0 waiting" is the answer
+    // to "is anything stuck in here", and a field that disappears when it is
+    // zero cannot give it.
+    counts.textContent = `${queue.running} running · ${queue.waiting} waiting`;
+
+    const atOnce = document.createElement("label");
+    atOnce.className = "queue-at-once";
+    const atOnceText = document.createElement("span");
+    atOnceText.textContent = "at once";
+    const atOnceInput = document.createElement("input");
+    atOnceInput.type = "number";
+    atOnceInput.min = "1";
+    atOnceInput.max = "16";
+    atOnceInput.step = "1";
+    atOnceInput.value = String(queue.max_concurrent);
+    atOnceInput.onchange = async () => {
+      const wanted = Number(atOnceInput.value);
+      if (!Number.isFinite(wanted) || wanted < 1) {
+        atOnceInput.value = String(queue.max_concurrent);
+        return;
+      }
+      // Set by name, which is how the engine identifies a queue to change:
+      // the same request creates one and changes one.
+      await queueAction("set_queue", { name: queue.name, maxConcurrent: wanted });
+    };
+    atOnce.append(atOnceText, atOnceInput);
+
+    const toggle = document.createElement("button");
+    toggle.type = "button";
+    toggle.className = "ghost";
+    toggle.textContent = queue.enabled ? "Switch off" : "Switch on";
+    toggle.title = queue.enabled
+      ? "Stop starting anything more from this queue"
+      : "Let this queue start downloads again";
+    toggle.onclick = () =>
+      queueAction("enable_queue", { id: queue.id, enabled: !queue.enabled });
+
+    const remove = document.createElement("button");
+    remove.type = "button";
+    // Ghost, not the solid red Cancel wears: removing a queue keeps every
+    // download in it, so dressing it as destruction would overstate it.
+    remove.className = "ghost queue-remove";
+    remove.textContent = "Remove";
+    remove.title = "Remove the queue. Its downloads are kept.";
+    remove.onclick = async () => {
+      const sure = await confirmDialog(
+        `Remove the queue “${queue.name}”? Its downloads are kept and become ` +
+          "unqueued, so anything waiting in it will start.",
+        { confirm: "Remove" },
+      );
+      if (sure) await queueAction("remove_queue", { id: queue.id });
+    };
+
+    const controls = document.createElement("div");
+    controls.className = "queue-controls";
+    controls.append(atOnce, toggle, remove);
+
+    card.append(name, counts, controls);
+    list.append(card);
+  }
+}
+
+/** Sends a queue change and takes the fresh list straight from the reply. */
+async function queueAction(command, args = {}) {
+  try {
+    queues = await invoke(command, args);
+    showQueuePicker();
+    renderQueues();
+    // The list of downloads changes too: a queue change can start something.
+    refresh();
+  } catch (error) {
+    toast(String(error), true);
+  }
+}
+
+$("queue-add").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const name = $("queue-name").value.trim();
+  if (!name) {
+    $("queue-name").focus();
+    return;
+  }
+  await queueAction("set_queue", {
+    name,
+    maxConcurrent: Math.max(1, Number($("queue-at-once").value) || 1),
+  });
+  $("queue-name").value = "";
+});
 
 async function act(command, args = {}) {
   try {
@@ -1352,7 +1538,13 @@ $("add").addEventListener("submit", async (event) => {
     .map((line) => line.trim())
     .filter(Boolean);
   try {
-    const queued = await invoke("add_download", { url, filename: null, mirrors });
+    const chosen = $("queue-pick").value;
+    const queued = await invoke("add_download", {
+      url,
+      filename: null,
+      mirrors,
+      queue: chosen === "" ? null : Number(chosen),
+    });
     field.value = "";
     // Cleared along with the address, since they belonged to it. Left
     // behind, they would silently attach to whatever was typed next.
@@ -1376,10 +1568,13 @@ function selectTab(tab, giveFocus = false) {
     // The state a screen reader announces, not only the one shown in paint.
     other.setAttribute("aria-selected", String(active));
   }
-  for (const name of ["active", "history", "settings"]) {
+  for (const name of ["active", "queues", "history", "settings"]) {
     $(`panel-${name}`).hidden = name !== tab.dataset.tab;
   }
   if (tab.dataset.tab === "history") showHistory();
+  // The counts move as downloads start and finish, so they are read when the
+  // panel is opened rather than left at whatever they were last time.
+  if (tab.dataset.tab === "queues") refreshQueues();
   // A browser may have been installed or paired since this was last looked at.
   if (tab.dataset.tab === "settings") refreshBrowsers();
   if (giveFocus) tab.focus();
@@ -2045,3 +2240,7 @@ collectOpenedFiles();
 
 requestNotificationPermission();
 refresh();
+// Read at startup, not only when the panel is opened: the picker in the add
+// form and the select on every job card both need the list before anybody
+// visits the Queues tab.
+refreshQueues();

@@ -21,7 +21,8 @@ use crate::failure::Failure;
 use crate::pairing::{PairingOutcome, PairingStore};
 use idm_core::win::power::{ActionOutcome, ArmedAction, Canceller, PostAction, SystemPower};
 use idm_ipc::protocol::{
-    DownloadRequest, JobId, JobState, JobStatus, PostActionSetting, Request, Response, Settings,
+    DownloadRequest, JobId, JobState, JobStatus, PostActionSetting, QueueView, Request, Response,
+    Settings,
 };
 use idm_ipc::server::{ClientInfo, Handler};
 use idm_ipc::{IpcServer, SessionToken};
@@ -48,6 +49,12 @@ struct JobRecord {
     config: Box<DownloadConfig>,
     /// True while the job is queued and has not yet been handed a slot.
     waiting: bool,
+    /// The named queue governing this job, if any.
+    ///
+    /// Held here as well as in the row because the scheduler reads it on
+    /// every handover, and reaching the disk while holding the job lock is
+    /// the one thing that loop must not do.
+    queue: Option<i64>,
     /// Consecutive failures that looked like the network rather than the
     /// file. Drives how long to wait before trying again, and is cleared the
     /// moment anything succeeds.
@@ -95,6 +102,13 @@ struct Inner {
     /// app doing none of that. One for the whole engine, not one per job:
     /// see `idm_torrent::Torrents`.
     torrents: tokio::sync::OnceCell<Arc<idm_torrent::Torrents>>,
+    /// The named queues, mirrored from the store.
+    ///
+    /// A mirror rather than a lookup: `pump` consults this while holding the
+    /// job registry, and a SQLite read under that lock would put the disk on
+    /// the path of every single handover. The store stays the durable copy
+    /// and this is reloaded from it whenever a queue changes.
+    queues: Mutex<Vec<crate::queues::Queue>>,
     /// The torrents currently in that session, by job.
     ///
     /// Needed because cancelling aborts the job's task, and a torrent is not
@@ -157,6 +171,10 @@ impl Engine {
         store: Option<Arc<idm_store::Store>>,
     ) -> Arc<Self> {
         let starting_limit = load_settings(&settings_file).speed_limit_bytes_per_sec;
+        // Read once, here, rather than on demand. Without this the first
+        // handover after a restart would find no queues and start everything
+        // a queue was meant to hold back.
+        let queues = store.as_deref().map(read_queues).unwrap_or_default();
         let engine = Arc::new(Self {
             inner: Arc::new(Inner {
                 output_dir,
@@ -175,6 +193,7 @@ impl Engine {
                 armed: Mutex::new(None),
                 torrents: tokio::sync::OnceCell::new(),
                 live_torrents: Mutex::new(HashMap::new()),
+                queues: Mutex::new(queues),
             }),
         });
         start_stall_watchdog(Arc::clone(&engine.inner));
@@ -377,19 +396,17 @@ impl Engine {
         // is decided. See `name_from_server`. Never for a torrent: there is
         // no server to ask, and a magnet would be sent as an HTTP address.
         // The real name comes from the metadata, once the swarm supplies it.
-        let filename = if torrent.is_none()
-            && request.filename.is_none()
-            && !has_extension(&filename)
-        {
-            // The proxy goes with it: this is a real request to the origin,
-            // and a network where downloads must be proxied is one where
-            // this probe would otherwise hang until its timeout and then
-            // silently fall back to guessing from the URL.
-            let proxy = crate::proxy::mode(&self.inner.settings.lock().await.clone());
-            name_from_server(&request, proxy).await.unwrap_or(filename)
-        } else {
-            filename
-        };
+        let filename =
+            if torrent.is_none() && request.filename.is_none() && !has_extension(&filename) {
+                // The proxy goes with it: this is a real request to the origin,
+                // and a network where downloads must be proxied is one where
+                // this probe would otherwise hang until its timeout and then
+                // silently fall back to guessing from the URL.
+                let proxy = crate::proxy::mode(&self.inner.settings.lock().await.clone());
+                name_from_server(&request, proxy).await.unwrap_or(filename)
+            } else {
+                filename
+            };
 
         // Asking for something already here continues it rather than
         // starting a second copy beside it. Without this, downloading the
@@ -399,6 +416,21 @@ impl Engine {
         if let Some(existing) = self.unfinished_job_for(&request.url).await {
             return self.resume_or_report(existing).await;
         }
+
+        // Checked against the queues that exist, not taken on trust. An id
+        // naming nothing would otherwise be kept on the job and read as "no
+        // queue" by the scheduler, which starts the download immediately --
+        // the opposite of what asking for a queue meant.
+        let queue = match request.queue {
+            Some(wanted) => {
+                let queues = self.inner.queues.lock().await;
+                if crate::queues::find(&queues, wanted).is_none() {
+                    return Response::Rejected { reason: "that queue no longer exists".into() };
+                }
+                Some(wanted)
+            }
+            None => None,
+        };
 
         let id = JobId(self.inner.next_id.fetch_add(1, Ordering::SeqCst));
 
@@ -489,6 +521,15 @@ impl Engine {
             match store.add_job(&row) {
                 Ok(row_id) => {
                     self.inner.rows.lock().await.insert(id, row_id);
+                    // So a restart finds it in the same queue. Written after
+                    // the row exists rather than as a column on it, because
+                    // the assignment also sets the job's position within the
+                    // queue, which is the store's business to work out.
+                    if let Some(queue) = queue
+                        && let Err(error) = store.assign_to_queue(row_id, Some(queue))
+                    {
+                        tracing::warn!(%error, "could not put the job in its queue");
+                    }
                 }
                 Err(error) => tracing::warn!(%error, "could not record the job"),
             }
@@ -506,6 +547,10 @@ impl Engine {
             connections: 0,
             error: None,
             retry_in_secs: None,
+            queue,
+            // Filled in by `status`, from the queue table as it stands when
+            // the window asks.
+            queue_name: None,
         };
 
         self.inner.jobs.lock().await.insert(
@@ -516,6 +561,7 @@ impl Engine {
                 claimed: claimed_path,
                 config: Box::new(config),
                 waiting: true,
+                queue,
                 attempts: 0,
                 last_progress: std::time::Instant::now(),
             },
@@ -634,8 +680,7 @@ impl Engine {
         // resume with here. Saying so is more useful than a 403.
         if row.needs_browser_auth {
             return Response::Rejected {
-                reason: "this download was authorised by your browser; start it there again"
-                    .into(),
+                reason: "this download was authorised by your browser; start it there again".into(),
             };
         }
 
@@ -651,6 +696,9 @@ impl Engine {
             self.inner.store.clone().map(|store| store as Arc<dyn idm_core::sched::ProfileStore>);
 
         let destination = PathBuf::from(&row.output_dir).join(&row.filename);
+        // Whatever queue it was in before, so starting a download again from
+        // History does not quietly promote it past everything in that queue.
+        let queue = row.queue_id;
         let status = JobStatus {
             id,
             url: row.url.clone(),
@@ -663,6 +711,10 @@ impl Engine {
             connections: 0,
             error: None,
             retry_in_secs: None,
+            queue,
+            // Filled in by `status`, from the queue table as it stands when
+            // the window asks.
+            queue_name: None,
         };
 
         self.inner.claimed.lock().await.insert(destination.clone());
@@ -675,6 +727,7 @@ impl Engine {
                 claimed: Some(destination),
                 config: Box::new(config),
                 waiting: true,
+                queue,
                 attempts: 0,
                 last_progress: std::time::Instant::now(),
             },
@@ -726,7 +779,7 @@ impl Engine {
             config.mirrors = row.mirrors.clone();
             config.fetch.limiter = Some(Arc::clone(&self.inner.limiter));
             config.http.proxy = crate::proxy::mode(&self.inner.settings.lock().await.clone());
-        config.http.proxy = crate::proxy::mode(&self.inner.settings.lock().await.clone());
+            config.http.proxy = crate::proxy::mode(&self.inner.settings.lock().await.clone());
             config.profiles = self
                 .inner
                 .store
@@ -750,6 +803,8 @@ impl Engine {
                     "this download was authorised by your browser; start it there again".to_owned()
                 }),
                 retry_in_secs: None,
+                queue: row.queue_id,
+                queue_name: None,
             };
 
             // The destination it was already using, so a new download
@@ -768,6 +823,7 @@ impl Engine {
                     claimed: Some(PathBuf::from(&row.output_dir).join(&row.filename)),
                     config: Box::new(config),
                     waiting: true,
+                    queue: row.queue_id,
                     attempts: 0,
                     last_progress: std::time::Instant::now(),
                 },
@@ -783,11 +839,23 @@ impl Engine {
     }
 
     async fn status(&self, id: Option<JobId>) -> Response {
+        // Read before the job lock, not under it, and kept in the order the
+        // two locks are taken everywhere else in this file.
+        let queues = self.inner.queues.lock().await.clone();
+
         let jobs = self.inner.jobs.lock().await;
-        let listed = match id {
+        let mut listed: Vec<JobStatus> = match id {
             Some(wanted) => jobs.get(&wanted).map(|job| job.status.clone()).into_iter().collect(),
             None => jobs.values().map(|job| job.status.clone()).collect(),
         };
+        // Filled in here rather than stored on the job, so renaming a queue
+        // shows up on everything in it without touching a single record.
+        for job in &mut listed {
+            job.queue_name = job
+                .queue
+                .and_then(|id| crate::queues::find(&queues, id))
+                .map(|queue| queue.name.clone());
+        }
         Response::Status { jobs: listed }
     }
 
@@ -1568,6 +1636,12 @@ async fn pump_inner(inner: Arc<Inner>) {
     let limit = inner.settings.lock().await.max_concurrent_downloads.max(1);
 
     loop {
+        // Read before the job registry is locked, never under it. The
+        // queue table is small and changes rarely; reaching the disk for it
+        // while holding the registry would put SQLite on the path of every
+        // handover between downloads.
+        let queues = inner.queues.lock().await.clone();
+
         let next = {
             let mut jobs = inner.jobs.lock().await;
             // Counted by whether the job has been handed out, not by
@@ -1585,16 +1659,30 @@ async fn pump_inner(inner: Arc<Inner>) {
                 return;
             }
 
+            // The same count again, per queue, so each queue's own limit can
+            // be applied to it. Counted the same way and in the same pass
+            // for the same reason.
+            let mut busy: HashMap<i64, u32> = HashMap::new();
+            for job in jobs.values() {
+                let held = !job.waiting
+                    && matches!(job.status.state, JobState::Queued | JobState::Running);
+                if let (true, Some(queue)) = (held, job.queue) {
+                    *busy.entry(queue).or_default() += 1;
+                }
+            }
+
             // Oldest first: ids are handed out in order, so that is the
             // order they were asked for in.
-            let mut waiting: Vec<JobId> = jobs
+            let mut waiting: Vec<(JobId, Option<i64>)> = jobs
                 .iter()
                 .filter(|(_, job)| job.waiting && job.status.state == JobState::Queued)
-                .map(|(id, _)| *id)
+                .map(|(id, job)| (*id, job.queue))
                 .collect();
-            waiting.sort_by_key(|id| id.0);
+            waiting.sort_by_key(|(id, _)| id.0);
 
-            match waiting.first().copied() {
+            // The first that *may* start, which is not always the first
+            // waiting: see `queues::next_to_start`.
+            match crate::queues::next_to_start(&waiting, &queues, &busy) {
                 // Taken under the same lock that chose it, so two pumps
                 // running at once cannot both start the same job.
                 Some(id) => jobs.get_mut(&id).map(|job| {
@@ -1857,6 +1945,184 @@ impl Engine {
         }
     }
 
+    /// The queues, with what each is running and holding right now.
+    async fn list_queues(&self, client: &ClientInfo) -> Response {
+        if let Some(refusal) = Self::refuse_browser_queues(client) {
+            return refusal;
+        }
+        let queues = self.inner.queues.lock().await.clone();
+        let jobs = self.inner.jobs.lock().await;
+
+        let mut running: HashMap<i64, u32> = HashMap::new();
+        let mut waiting: HashMap<i64, u32> = HashMap::new();
+        for job in jobs.values() {
+            let Some(queue) = job.queue else { continue };
+            // Counted the way `pump` counts, so the window's numbers and the
+            // scheduler's cannot disagree: a job that has been handed a slot
+            // is running even in the moment before its task says so.
+            match (job.waiting, job.status.state) {
+                (false, JobState::Queued | JobState::Running) => {
+                    *running.entry(queue).or_default() += 1;
+                }
+                (true, JobState::Queued) => *waiting.entry(queue).or_default() += 1,
+                _ => {}
+            }
+        }
+        drop(jobs);
+
+        Response::Queues {
+            queues: queues
+                .into_iter()
+                .map(|queue| QueueView {
+                    running: running.get(&queue.id).copied().unwrap_or(0),
+                    waiting: waiting.get(&queue.id).copied().unwrap_or(0),
+                    id: queue.id,
+                    name: queue.name,
+                    max_concurrent: queue.max_concurrent,
+                    enabled: queue.enabled,
+                })
+                .collect(),
+        }
+    }
+
+    /// Creates a queue, or changes the concurrency of the one with that name.
+    async fn set_queue(&self, client: &ClientInfo, name: String, max_concurrent: u32) -> Response {
+        if let Some(refusal) = Self::refuse_browser_queues(client) {
+            return refusal;
+        }
+        let Some(store) = self.inner.store.clone() else {
+            return Response::Rejected { reason: NO_STORE.into() };
+        };
+        let name = match crate::queues::vet_name(&name) {
+            Ok(name) => name,
+            Err(reason) => return Response::Rejected { reason },
+        };
+        let max_concurrent = match crate::queues::vet_limit(max_concurrent) {
+            Ok(limit) => limit,
+            Err(reason) => return Response::Rejected { reason },
+        };
+
+        match store.upsert_queue(&name, max_concurrent) {
+            Ok(_) => {
+                self.reload_queues().await;
+                // Raising a limit means there may be room now that there was
+                // not a moment ago, and nothing else would notice: a slot
+                // opening is normally a download finishing.
+                pump(Arc::clone(&self.inner)).await;
+                self.list_queues(client).await
+            }
+            Err(error) => Response::Rejected { reason: error.to_string() },
+        }
+    }
+
+    async fn enable_queue(&self, client: &ClientInfo, id: i64, enabled: bool) -> Response {
+        if let Some(refusal) = Self::refuse_browser_queues(client) {
+            return refusal;
+        }
+        let Some(store) = self.inner.store.clone() else {
+            return Response::Rejected { reason: NO_STORE.into() };
+        };
+        if let Err(error) = store.set_queue_enabled(id, enabled) {
+            return Response::Rejected { reason: error.to_string() };
+        }
+        self.reload_queues().await;
+        // Switching a queue off stops it starting anything more; it
+        // deliberately does not stop what is already running. Stopping a
+        // download mid-flight is what Pause is for, and doing it here would
+        // make one click on a queue interrupt several transfers that were
+        // going perfectly well.
+        if enabled {
+            pump(Arc::clone(&self.inner)).await;
+        }
+        self.list_queues(client).await
+    }
+
+    /// Removes a queue, keeping its downloads.
+    async fn remove_queue(&self, client: &ClientInfo, id: i64) -> Response {
+        if let Some(refusal) = Self::refuse_browser_queues(client) {
+            return refusal;
+        }
+        let Some(store) = self.inner.store.clone() else {
+            return Response::Rejected { reason: NO_STORE.into() };
+        };
+        match store.remove_queue(id) {
+            Ok(false) => return Response::Rejected { reason: "there is no such queue".into() },
+            Err(error) => return Response::Rejected { reason: error.to_string() },
+            Ok(true) => {}
+        }
+
+        // The row's own `queue_id` is cleared by the foreign key; the live
+        // jobs are not, and one left pointing at a queue that has gone would
+        // be read as unqueued by the scheduler anyway. Cleared here so that
+        // the window stops showing a name that no longer exists.
+        {
+            let mut jobs = self.inner.jobs.lock().await;
+            for job in jobs.values_mut() {
+                if job.queue == Some(id) {
+                    job.queue = None;
+                    job.status.queue = None;
+                }
+            }
+        }
+        self.reload_queues().await;
+        pump(Arc::clone(&self.inner)).await;
+        self.list_queues(client).await
+    }
+
+    /// Moves a download into a queue, or out of one.
+    async fn assign_queue(&self, client: &ClientInfo, id: JobId, queue: Option<i64>) -> Response {
+        if let Some(refusal) = Self::refuse_browser_queues(client) {
+            return refusal;
+        }
+        if let Some(wanted) = queue {
+            let queues = self.inner.queues.lock().await;
+            if crate::queues::find(&queues, wanted).is_none() {
+                return Response::Rejected { reason: "that queue no longer exists".into() };
+            }
+        }
+
+        let moved = {
+            let mut jobs = self.inner.jobs.lock().await;
+            match jobs.get_mut(&id) {
+                Some(job) => {
+                    job.queue = queue;
+                    job.status.queue = queue;
+                    true
+                }
+                None => false,
+            }
+        };
+        if !moved {
+            return Response::Rejected { reason: "there is no such download".into() };
+        }
+
+        if let (Some(store), Some(row)) =
+            (self.inner.store.clone(), self.inner.rows.lock().await.get(&id).copied())
+            && let Err(error) = store.assign_to_queue(row, queue)
+        {
+            tracing::warn!(%error, "could not record the queue change");
+        }
+
+        // Taking a download out of a queue, or into one with room, may mean
+        // it can start now.
+        pump(Arc::clone(&self.inner)).await;
+        self.list_queues(client).await
+    }
+
+    /// Re-reads the queues from the store into the copy the scheduler uses.
+    async fn reload_queues(&self) {
+        if let Some(store) = &self.inner.store {
+            *self.inner.queues.lock().await = read_queues(store.as_ref());
+        }
+    }
+
+    /// Managing queues is refused for browser clients.
+    fn refuse_browser_queues(client: &ClientInfo) -> Option<Response> {
+        client.is_browser().then(|| Response::Rejected {
+            reason: "the browser integration cannot manage queues".into(),
+        })
+    }
+
     async fn get_settings(&self) -> Response {
         Response::Settings(self.inner.settings.lock().await.clone())
     }
@@ -2045,6 +2311,36 @@ fn load_settings(path: &PathBuf) -> Settings {
     }
 }
 
+/// Said when a queue change arrives and there is nowhere to keep it.
+///
+/// The engine runs without the database on purpose -- a database that will
+/// not open should cost a re-climbed ramp, never a download -- but a queue is
+/// nothing if it does not survive a restart, so this is a refusal rather than
+/// a queue that quietly forgets itself.
+const NO_STORE: &str = "queues need the database, which could not be opened";
+
+/// The queues as the store holds them, in the form the scheduler wants.
+fn read_queues(store: &idm_store::Store) -> Vec<crate::queues::Queue> {
+    match store.queues() {
+        Ok(queues) => queues
+            .into_iter()
+            .map(|queue| crate::queues::Queue {
+                id: queue.id,
+                name: queue.name,
+                max_concurrent: queue.max_concurrent,
+                enabled: queue.enabled,
+            })
+            .collect(),
+        Err(error) => {
+            // Empty means every download starts freely, which is the old
+            // behaviour and the safe direction: the alternative would be
+            // holding downloads back on the strength of a failed read.
+            tracing::warn!(%error, "could not read the queues");
+            Vec::new()
+        }
+    }
+}
+
 fn save_settings(path: &PathBuf, settings: &Settings) {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
@@ -2075,6 +2371,13 @@ impl Handler for Engine {
             Request::SetBrowserEnabled { client_id, enabled } => {
                 self.set_browser_enabled(client, client_id, enabled).await
             }
+            Request::ListQueues => self.list_queues(client).await,
+            Request::SetQueue { name, max_concurrent } => {
+                self.set_queue(client, name, max_concurrent).await
+            }
+            Request::EnableQueue { id, enabled } => self.enable_queue(client, id, enabled).await,
+            Request::RemoveQueue { id } => self.remove_queue(client, id).await,
+            Request::AssignQueue { id, queue } => self.assign_queue(client, id, queue).await,
             Request::GetSettings => self.get_settings().await,
             Request::SetSettings(settings) => self.set_settings(client, settings).await,
             Request::CancelPostAction => self.cancel_post_action().await,
@@ -2659,10 +2962,7 @@ mod tests {
     }
 
     /// Reads the settings out, lets the caller change them, puts them back.
-    async fn put_settings(
-        engine: &Arc<Engine>,
-        change: impl FnOnce(&mut Settings),
-    ) -> Response {
+    async fn put_settings(engine: &Arc<Engine>, change: impl FnOnce(&mut Settings)) -> Response {
         let mut settings = match engine.handle(&desktop(), Request::GetSettings).await {
             Response::Settings(settings) => settings,
             other => panic!("expected settings, got {other:?}"),
@@ -2746,6 +3046,260 @@ mod tests {
     async fn cancelling_an_unknown_job_is_refused_not_panicked() {
         let (_dir, engine) = engine();
         assert!(matches!(engine.cancel(JobId(42)).await, Response::Rejected { .. }));
+    }
+
+    /// An engine with a database of its own, which queues need.
+    ///
+    /// Never the real one: `Engine::new` opens the live database in
+    /// `%LOCALAPPDATA%`, and a test that wrote queues into it would leave
+    /// them in the running app.
+    fn engine_with_queues() -> (tempfile::TempDir, Arc<Engine>) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(idm_store::Store::in_memory().unwrap());
+        let engine = engine_with_store(dir.path(), store);
+        (dir, engine)
+    }
+
+    /// Makes a queue through the same path the window uses.
+    async fn make_queue(engine: &Arc<Engine>, name: &str, at_once: u32) -> i64 {
+        let response = engine
+            .handle(&desktop(), Request::SetQueue { name: name.into(), max_concurrent: at_once })
+            .await;
+        let Response::Queues { queues } = response else {
+            panic!("expected the queues back, got {response:?}");
+        };
+        queues.iter().find(|queue| queue.name == name).expect("the new queue").id
+    }
+
+    async fn queued_request(url: &str, queue: i64) -> DownloadRequest {
+        DownloadRequest { queue: Some(queue), ..request(url) }
+    }
+
+    #[tokio::test]
+    async fn a_queue_holds_its_downloads_to_its_own_limit() {
+        let (_dir, engine) = engine_with_queues();
+        // Room for far more than the queue allows, so it is the queue doing
+        // the holding back and not the global limit.
+        set_limit(&engine, 8).await;
+        let overnight = make_queue(&engine, "overnight", 2).await;
+
+        for n in 0..5 {
+            let request =
+                queued_request(&format!("http://127.0.0.1:9/big-{n}.bin"), overnight).await;
+            engine.enqueue(&desktop(), request).await;
+        }
+
+        assert_eq!(engine.outstanding().await, 2, "the queue allows two");
+        assert_eq!(engine.waiting().await, 3);
+    }
+
+    #[tokio::test]
+    async fn a_full_queue_does_not_hold_up_an_unqueued_download() {
+        // The head-of-line case, end to end: the queued jobs are older, so
+        // a scheduler that took simply the oldest waiting job would never
+        // reach the unqueued one and the app would look frozen.
+        let (_dir, engine) = engine_with_queues();
+        set_limit(&engine, 8).await;
+        let overnight = make_queue(&engine, "overnight", 1).await;
+
+        for n in 0..3 {
+            let request = queued_request(&format!("http://127.0.0.1:9/q-{n}.bin"), overnight).await;
+            engine.enqueue(&desktop(), request).await;
+        }
+        engine.enqueue(&desktop(), request("http://127.0.0.1:9/free.bin")).await;
+
+        assert_eq!(engine.outstanding().await, 2, "one from the queue, plus the unqueued one");
+    }
+
+    #[tokio::test]
+    async fn switching_a_queue_off_starts_nothing_more() {
+        let (_dir, engine) = engine_with_queues();
+        set_limit(&engine, 8).await;
+        let overnight = make_queue(&engine, "overnight", 4).await;
+        engine.handle(&desktop(), Request::EnableQueue { id: overnight, enabled: false }).await;
+
+        for n in 0..3 {
+            let request = queued_request(&format!("http://127.0.0.1:9/q-{n}.bin"), overnight).await;
+            engine.enqueue(&desktop(), request).await;
+        }
+
+        assert_eq!(engine.outstanding().await, 0, "a switched-off queue starts nothing");
+        assert_eq!(engine.waiting().await, 3);
+
+        engine.handle(&desktop(), Request::EnableQueue { id: overnight, enabled: true }).await;
+        assert_eq!(engine.outstanding().await, 3, "switching it on releases them");
+    }
+
+    #[tokio::test]
+    async fn raising_a_queue_limit_releases_what_was_waiting() {
+        let (_dir, engine) = engine_with_queues();
+        set_limit(&engine, 8).await;
+        let overnight = make_queue(&engine, "overnight", 1).await;
+        for n in 0..3 {
+            let request = queued_request(&format!("http://127.0.0.1:9/q-{n}.bin"), overnight).await;
+            engine.enqueue(&desktop(), request).await;
+        }
+        assert_eq!(engine.outstanding().await, 1);
+
+        // Nothing finished here. Without a pump on the change, these would
+        // sit waiting until some unrelated download happened to end.
+        make_queue(&engine, "overnight", 3).await;
+        assert_eq!(engine.outstanding().await, 3);
+    }
+
+    #[tokio::test]
+    async fn taking_a_download_out_of_a_queue_lets_it_start() {
+        let (_dir, engine) = engine_with_queues();
+        set_limit(&engine, 8).await;
+        let overnight = make_queue(&engine, "overnight", 1).await;
+
+        let first = queued_request("http://127.0.0.1:9/a.bin", overnight).await;
+        engine.enqueue(&desktop(), first).await;
+        let second = queued_request("http://127.0.0.1:9/b.bin", overnight).await;
+        let Response::Accepted { id } = engine.enqueue(&desktop(), second).await else {
+            panic!("the second should be accepted");
+        };
+        assert_eq!(engine.waiting().await, 1);
+
+        engine.handle(&desktop(), Request::AssignQueue { id, queue: None }).await;
+        assert_eq!(engine.waiting().await, 0, "out of the queue, the global limit governs it");
+    }
+
+    #[tokio::test]
+    async fn removing_a_queue_keeps_its_downloads_and_releases_them() {
+        let (_dir, engine) = engine_with_queues();
+        set_limit(&engine, 8).await;
+        let overnight = make_queue(&engine, "overnight", 1).await;
+        for n in 0..3 {
+            let request = queued_request(&format!("http://127.0.0.1:9/q-{n}.bin"), overnight).await;
+            engine.enqueue(&desktop(), request).await;
+        }
+
+        engine.handle(&desktop(), Request::RemoveQueue { id: overnight }).await;
+
+        let Response::Status { jobs } = engine.status(None).await else { panic!("status") };
+        assert_eq!(jobs.len(), 3, "tidying a queue away must not take its downloads with it");
+        assert!(jobs.iter().all(|job| job.queue.is_none()), "they should be unqueued");
+        assert_eq!(engine.outstanding().await, 3, "and free to start");
+    }
+
+    #[tokio::test]
+    async fn a_download_says_which_queue_it_is_in() {
+        let (_dir, engine) = engine_with_queues();
+        let overnight = make_queue(&engine, "overnight", 2).await;
+        let request = queued_request("http://127.0.0.1:9/a.bin", overnight).await;
+        engine.enqueue(&desktop(), request).await;
+
+        let Response::Status { jobs } = engine.status(None).await else { panic!("status") };
+        assert_eq!(jobs[0].queue, Some(overnight));
+        assert_eq!(
+            jobs[0].queue_name.as_deref(),
+            Some("overnight"),
+            "the name is filled in on the way out, not stored on the job"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_queue_that_does_not_exist_is_refused_rather_than_ignored() {
+        // Ignoring it would start the download at once, which is the
+        // opposite of what naming a queue asked for.
+        let (_dir, engine) = engine_with_queues();
+        let request = queued_request("http://127.0.0.1:9/a.bin", 404).await;
+        assert!(matches!(engine.enqueue(&desktop(), request).await, Response::Rejected { .. }));
+    }
+
+    #[tokio::test]
+    async fn a_nameless_queue_and_an_oversized_one_are_refused() {
+        let (_dir, engine) = engine_with_queues();
+        for bad in [
+            Request::SetQueue { name: "   ".into(), max_concurrent: 2 },
+            Request::SetQueue { name: "ok".into(), max_concurrent: 0 },
+            Request::SetQueue {
+                name: "ok".into(),
+                max_concurrent: crate::queues::MOST_AT_ONCE + 1,
+            },
+        ] {
+            assert!(
+                matches!(engine.handle(&desktop(), bad).await, Response::Rejected { .. }),
+                "should be refused"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_browser_cannot_manage_queues() {
+        let (_dir, engine) = engine_with_queues();
+        let browser = browser();
+        pair(&engine, &browser).await;
+
+        for request in [
+            Request::ListQueues,
+            Request::SetQueue { name: "theirs".into(), max_concurrent: 4 },
+            Request::EnableQueue { id: 1, enabled: false },
+            Request::RemoveQueue { id: 1 },
+            Request::AssignQueue { id: JobId(1), queue: Some(1) },
+        ] {
+            assert!(
+                matches!(engine.handle(&browser, request).await, Response::Rejected { .. }),
+                "a browser must not decide what runs and when"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_browser_cannot_name_a_queue_on_a_download() {
+        let request = DownloadRequest {
+            url: "https://example.invalid/a.bin".into(),
+            queue: Some(1),
+            ..Default::default()
+        };
+        assert!(request.validate().is_err(), "refused for a browser");
+        assert!(request.validate_with(true).is_ok(), "allowed for the app");
+    }
+
+    #[tokio::test]
+    async fn queues_without_a_database_are_refused_rather_than_forgotten() {
+        // The engine runs without the store on purpose, but a queue that did
+        // not survive a restart would be a worse lie than a refusal.
+        let (_dir, engine) = engine();
+        let response = engine
+            .handle(&desktop(), Request::SetQueue { name: "x".into(), max_concurrent: 2 })
+            .await;
+        let Response::Rejected { reason } = response else { panic!("expected a refusal") };
+        assert!(reason.contains("database"), "{reason}");
+    }
+
+    #[tokio::test]
+    async fn a_queue_survives_a_restart_with_its_downloads_still_in_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(idm_store::Store::in_memory().unwrap());
+
+        let first = engine_with_store(dir.path(), Arc::clone(&store));
+        set_limit(&first, 8).await;
+        let overnight = make_queue(&first, "overnight", 1).await;
+        for n in 0..2 {
+            let request = queued_request(&format!("http://127.0.0.1:9/q-{n}.bin"), overnight).await;
+            first.enqueue(&desktop(), request).await;
+        }
+
+        // A second engine over the same rows, as a restart would be.
+        let second = engine_with_store(dir.path(), store);
+        set_limit(&second, 8).await;
+        set_resume_on_start(&second, true).await;
+        second.restore_interrupted().await;
+
+        let Response::Queues { queues } = second.handle(&desktop(), Request::ListQueues).await
+        else {
+            panic!("expected the queues");
+        };
+        assert_eq!(queues.len(), 1, "the queue should still be there");
+        assert_eq!(queues[0].max_concurrent, 1);
+        assert_eq!(
+            queues[0].running + queues[0].waiting,
+            2,
+            "both downloads should come back in it"
+        );
+        assert_eq!(second.outstanding().await, 1, "and still be held to its limit");
     }
 
     #[tokio::test]

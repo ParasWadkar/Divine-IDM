@@ -1866,3 +1866,142 @@ button.icon svg {
   display: block;
   flex: none;
 }
+
+/* ----------------------------------------------------------------- queues */
+
+/* Sits in the add form between the address and the Download button, so the
+   choice is made where the download is started rather than somewhere else
+   that has to be remembered. */
+.queue-pick select {
+  max-width: 14rem;
+  padding: 8px 10px;
+  color: var(--text);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  font: inherit;
+  font-size: 13px;
+}
+
+.queues-note {
+  max-width: 68ch;
+  margin: 0 0 16px;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.queue-add {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 18px;
+}
+
+.queue-add input.text-input {
+  min-width: 16rem;
+  padding: 8px 12px;
+  color: var(--text);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  font: inherit;
+  user-select: text;
+}
+
+/* Shared by the form above and every queue below, so one queue's limit and
+   a new queue's limit are visibly the same control. */
+.queue-at-once {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--muted);
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.queue-at-once input {
+  width: 4.5rem;
+  padding: 8px 10px;
+  color: var(--text);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  font: inherit;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+.queue-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.queue {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 14px 16px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+
+/* A switched-off queue is still holding downloads, so it stays legible
+   rather than being greyed out of the way. The left edge says which it is. */
+.queue.is-off {
+  border-left: 3px solid var(--muted);
+}
+
+.queue-title {
+  font-weight: 600;
+  /* A long name takes the room it needs; the controls keep theirs. */
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.queue-counts {
+  flex: 1;
+  color: var(--muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.queue-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: none;
+}
+
+button.queue-remove:hover {
+  color: var(--bad);
+  border-color: var(--bad);
+}
+
+.queues-empty {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+/* On the job's own row, among the figures, because which queue holds a
+   download is a fact about it like its speed. Small and quiet: it is there
+   to be found when wanted, not to compete with the name. */
+.job-foot .job-queue {
+  max-width: 12rem;
+  padding: 3px 6px;
+  color: var(--muted);
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  font: inherit;
+  font-size: 11px;
+}
+
+.job-foot .job-queue:hover {
+  color: var(--text);
+  border-color: var(--accent-dim);
+}
