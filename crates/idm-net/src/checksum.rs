@@ -470,7 +470,10 @@ mod tests {
     fn a_query_string_does_not_become_part_of_a_sibling_name() {
         let url = Url::parse("https://example.test/d/debian.iso?token=abc").unwrap();
         let built: Vec<String> = candidates(&url).iter().map(Url::to_string).collect();
-        assert!(built.contains(&"https://example.test/d/debian.iso.sha256".to_owned()), "{built:?}");
+        assert!(
+            built.contains(&"https://example.test/d/debian.iso.sha256".to_owned()),
+            "{built:?}"
+        );
     }
 
     #[test]

@@ -152,7 +152,10 @@ mod tests {
     #[test]
     fn a_single_number_range_is_still_a_range() {
         assert_eq!(expand("https://example.invalid/p[7-7].bin").unwrap().len(), 1);
-        assert_eq!(expand("https://example.invalid/p[7-7].bin").unwrap()[0], "https://example.invalid/p7.bin");
+        assert_eq!(
+            expand("https://example.invalid/p[7-7].bin").unwrap()[0],
+            "https://example.invalid/p7.bin"
+        );
     }
 
     #[test]

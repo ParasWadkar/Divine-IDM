@@ -204,9 +204,11 @@ pub async fn vet(
 /// serving something else entirely", and whoever reads the log will want to
 /// know which.
 fn first_difference(left: &[u8], right: &[u8]) -> Option<u64> {
-    left.iter().zip(right).position(|(a, b)| a != b).map(|at| at as u64).or_else(|| {
-        (left.len() != right.len()).then_some(left.len().min(right.len()) as u64)
-    })
+    left.iter()
+        .zip(right)
+        .position(|(a, b)| a != b)
+        .map(|at| at as u64)
+        .or_else(|| (left.len() != right.len()).then_some(left.len().min(right.len()) as u64))
 }
 
 /// One address a download may take bytes from.

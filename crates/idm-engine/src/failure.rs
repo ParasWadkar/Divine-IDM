@@ -122,12 +122,7 @@ impl Failure {
     /// `{0}` passthroughs with nothing inside to classify.
     pub fn from_transport(error: impl std::fmt::Display) -> Self {
         let detail = error.to_string();
-        Self {
-            kind: Kind::Unclassified,
-            summary: first_sentence(&detail),
-            detail,
-            transient: true,
-        }
+        Self { kind: Kind::Unclassified, summary: first_sentence(&detail), detail, transient: true }
     }
 
     /// A download that stopped sending without anyone saying why.
@@ -164,9 +159,7 @@ fn classify(error: &DownloadError) -> (Kind, String) {
         // The one error that already knows the number the reader wants. The
         // shortfall is what they have to act on; `needed` and `available` are
         // only how it was worked out, and are left for Technical details.
-        DownloadError::Prealloc(PreallocError::InsufficientSpace {
-            needed, available, ..
-        }) => (
+        DownloadError::Prealloc(PreallocError::InsufficientSpace { needed, available, .. }) => (
             Kind::StorageInsufficientSpace,
             format!("{} more space required", human(needed.saturating_sub(*available))),
         ),
@@ -175,28 +168,26 @@ fn classify(error: &DownloadError) -> (Kind, String) {
         DownloadError::Io(io) => from_io(io),
         DownloadError::Fetch(FetchError::Write(io)) => from_io(io),
 
-        DownloadError::NoRangeSupport => (
-            Kind::ServerRangesUnsupported,
-            "Server doesn't support parallel downloads".into(),
-        ),
-        DownloadError::UnknownLength | DownloadError::Unusable(ProbeOutcome::SingleStreamUnknownLength) => {
+        DownloadError::NoRangeSupport => {
+            (Kind::ServerRangesUnsupported, "Server doesn't support parallel downloads".into())
+        }
+        DownloadError::UnknownLength
+        | DownloadError::Unusable(ProbeOutcome::SingleStreamUnknownLength) => {
             (Kind::DownloadUnknownSize, "Unable to determine file size".into())
         }
 
         DownloadError::Unusable(outcome) => from_probe(outcome),
 
-        DownloadError::RepresentationChanged => (
-            Kind::DownloadIntegrity,
-            "The file changed on the server mid-download".into(),
-        ),
+        DownloadError::RepresentationChanged => {
+            (Kind::DownloadIntegrity, "The file changed on the server mid-download".into())
+        }
         DownloadError::Journal(_) => {
             (Kind::DownloadIntegrity, "The resume record did not match the file".into())
         }
 
-        DownloadError::Stalled { attempts } => (
-            Kind::DownloadInterrupted,
-            format!("Gave up after {attempts} attempts"),
-        ),
+        DownloadError::Stalled { attempts } => {
+            (Kind::DownloadInterrupted, format!("Gave up after {attempts} attempts"))
+        }
 
         // `is_connect` is the one distinction worth drawing here: nothing
         // answered at all, versus a conversation that started and broke.
@@ -224,9 +215,7 @@ fn classify(error: &DownloadError) -> (Kind, String) {
 fn from_io(error: &std::io::Error) -> (Kind, String) {
     use std::io::ErrorKind;
     match error.kind() {
-        ErrorKind::StorageFull => {
-            (Kind::StorageInsufficientSpace, "Ran out of disk space".into())
-        }
+        ErrorKind::StorageFull => (Kind::StorageInsufficientSpace, "Ran out of disk space".into()),
         ErrorKind::PermissionDenied => {
             (Kind::StoragePermissionDenied, "Windows would not allow writing there".into())
         }
@@ -256,10 +245,9 @@ fn from_probe(outcome: &ProbeOutcome) -> (Kind, String) {
             (Kind::ServerUnavailable, "The server asked us to slow down".into())
         }
         ProbeOutcome::Restart(RestartReason::UnexpectedStatus(code)) => from_status(*code),
-        ProbeOutcome::Restart(RestartReason::RangeStartMismatch { .. }) => (
-            Kind::ServerRangesUnsupported,
-            "The server sent the wrong part of the file".into(),
-        ),
+        ProbeOutcome::Restart(RestartReason::RangeStartMismatch { .. }) => {
+            (Kind::ServerRangesUnsupported, "The server sent the wrong part of the file".into())
+        }
         ProbeOutcome::Restart(_) => {
             (Kind::DownloadIntegrity, "The server's answer did not make sense".into())
         }

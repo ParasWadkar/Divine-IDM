@@ -467,8 +467,7 @@ mod tests {
         let path = dir.path().join("made.torrent");
         std::fs::write(&path, made.as_bytes().unwrap()).unwrap();
 
-        let session =
-            Torrents::offline(dir.path(), dir.path().join("out")).await.unwrap();
+        let session = Torrents::offline(dir.path(), dir.path().join("out")).await.unwrap();
         let source = Source::parse(path.to_str().unwrap()).unwrap();
         let listing = session.inspect(&source).await.unwrap();
         session.stop().await;
@@ -529,10 +528,7 @@ mod tests {
     fn a_failure_carries_the_reason_it_gave() {
         let mut failing = stats(TorrentStatsState::Error, false);
         failing.error = Some("no peers would talk to us".into());
-        assert_eq!(
-            translate(failing).phase,
-            Phase::Failed("no peers would talk to us".into())
-        );
+        assert_eq!(translate(failing).phase, Phase::Failed("no peers would talk to us".into()));
     }
 
     #[test]

@@ -171,8 +171,7 @@ fn split_mirrors(stored: Option<&str>) -> Vec<String> {
 
 /// The stored form: one address per line, or nothing at all.
 fn join_mirrors(mirrors: &[String]) -> Option<String> {
-    if mirrors.is_empty() { None } else { Some(mirrors.join("
-")) }
+    if mirrors.is_empty() { None } else { Some(mirrors.join("\n")) }
 }
 
 pub(crate) fn read(row: &Row<'_>) -> rusqlite::Result<StoredJob> {
@@ -416,10 +415,8 @@ mod tests {
     #[test]
     fn mirrors_survive_a_round_trip() {
         let store = Store::in_memory().unwrap();
-        let mirrors = vec![
-            "https://a.invalid/big.bin".to_owned(),
-            "https://b.invalid/big.bin".to_owned(),
-        ];
+        let mirrors =
+            vec!["https://a.invalid/big.bin".to_owned(), "https://b.invalid/big.bin".to_owned()];
         let id = store.add_job(&NewJob { mirrors: mirrors.clone(), ..a_job() }).unwrap();
         assert_eq!(store.job(id).unwrap().unwrap().mirrors, mirrors);
     }

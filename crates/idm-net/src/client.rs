@@ -239,9 +239,7 @@ impl LanePool {
         for index in 0..count {
             lanes.push(Lane {
                 id: LaneId(index),
-                client: base_builder(config, Role::Segment)?
-                    .build()
-                    .map_err(ClientError::Build)?,
+                client: base_builder(config, Role::Segment)?.build().map_err(ClientError::Build)?,
                 pinned: None,
             });
         }

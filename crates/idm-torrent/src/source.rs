@@ -130,7 +130,8 @@ fn info_hash(address: &str) -> Option<String> {
         if !key.eq_ignore_ascii_case("xt") {
             continue;
         }
-        let Some(hash) = value.strip_prefix("urn:btih:").or_else(|| value.strip_prefix("urn:btmh:"))
+        let Some(hash) =
+            value.strip_prefix("urn:btih:").or_else(|| value.strip_prefix("urn:btmh:"))
         else {
             continue;
         };
@@ -250,8 +251,10 @@ mod tests {
         assert!(matches!(Source::parse(&wrapped), Some(Source::Magnet(_))));
         assert_eq!(Source::parse(&wrapped).unwrap().provisional_name(), "Thing");
 
-        let newlined = format!("magnet:?xt=urn:btih:{HASH}
-&dn=Thing");
+        let newlined = format!(
+            "magnet:?xt=urn:btih:{HASH}
+&dn=Thing"
+        );
         assert!(matches!(Source::parse(&newlined), Some(Source::Magnet(_))));
     }
 

@@ -97,7 +97,11 @@ pub fn check(path: &Path, expected: &str) -> Result<Verdict, String> {
     Ok(Verdict { matched: actual == wanted, algorithm, actual })
 }
 
-fn digest_file<D: Digest>(file: &mut File, buffer: &mut [u8], path: &Path) -> Result<String, String> {
+fn digest_file<D: Digest>(
+    file: &mut File,
+    buffer: &mut [u8],
+    path: &Path,
+) -> Result<String, String> {
     let mut digest = D::new();
     loop {
         let read = file.read(buffer).map_err(|error| format!("{}: {error}", path.display()))?;
