@@ -79,6 +79,18 @@ impl AppState {
         }
     }
 
+    /// The way out the engine is currently configured to take.
+    ///
+    /// Read through the engine rather than kept here, so the window cannot
+    /// drift from what downloads are actually doing. A failure to read falls
+    /// back to the default, which honours the machine's own configuration.
+    pub async fn proxy(&self) -> idm_engine::proxy::ProxyMode {
+        match self.request(Request::GetSettings).await {
+            Response::Settings(settings) => idm_engine::proxy::mode(&settings),
+            _ => idm_engine::proxy::ProxyMode::default(),
+        }
+    }
+
     /// Jobs and settings together, from one instant.
     pub async fn snapshot(&self) -> Result<serde_json::Value, String> {
         let jobs = match self.request(Request::Status { id: None }).await {

@@ -37,6 +37,7 @@ pub async fn published(
     url: &str,
     referrer: Option<&str>,
     filename: &str,
+    proxy: idm_net::client::ProxyMode,
 ) -> Option<Published> {
     // Tighter than the engine's own timeouts, which are sized for a segment
     // of a large file over a slow link. This is a few lines of hex; waiting
@@ -44,6 +45,11 @@ pub async fn published(
     let config = idm_net::client::HttpConfig {
         connect_timeout: Duration::from_secs(5),
         request_timeout: Duration::from_secs(8),
+        // The same way out as the download itself took. A lookup that
+        // ignored the proxy would not merely fail on a network that
+        // requires one -- it would reach nothing, time out, and report
+        // "no published hash", which reads as the publisher's fault.
+        proxy,
         ..Default::default()
     };
     let client = idm_net::client::redirect_resolver(&config).ok()?;

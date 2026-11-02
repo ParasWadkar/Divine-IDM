@@ -555,7 +555,13 @@ pub async fn download_with_progress<F: FnMut(Progress)>(
     let mut http = config.http.clone();
     http.streams_per_lane = streams;
 
-    let pool = Arc::new(match (&host, config.pin_edges) {
+    // Edge pinning is dropped under a proxy we were told to use. Pinning
+    // works by overriding this client's own DNS, and through a proxy the
+    // client resolves nothing -- every lane opens to the proxy, which
+    // resolves the host itself. The addresses would be looked up and then
+    // ignored, so the only effect left would be the lookup.
+    let pin_edges = config.pin_edges && !http.proxy.is_manual();
+    let pool = Arc::new(match (&host, pin_edges) {
         (Some(host), true) => LanePool::pinned_to_edges(&http, host, port, lane_count)
             .await
             .unwrap_or(LanePool::new(&http, lane_count)?),

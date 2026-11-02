@@ -207,6 +207,26 @@ pub enum PostActionSetting {
     Shutdown,
 }
 
+/// Where the engine's own requests go on their way out.
+///
+/// Three choices rather than an optional address, because "no proxy" and
+/// "whatever the machine is set up for" are genuinely different answers and
+/// the second is what happens by default: the HTTP client reads `HTTP_PROXY`
+/// and friends from the environment unless told not to. Without a `Direct`
+/// to pick, a user on a machine with those set would have no way to ask for
+/// a plain connection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProxySetting {
+    /// Whatever the environment says.
+    #[default]
+    System,
+    /// Straight out, whatever the environment says.
+    Direct,
+    /// Through [`Settings::proxy_address`].
+    Manual,
+}
+
 /// Settings a client may read, and the desktop app may change.
 ///
 /// `serde(default)` on the whole struct, so a field missing from the file is
@@ -289,6 +309,20 @@ pub struct Settings {
     /// rather than as a flag on each row because most of these browsers are
     /// not paired with anything, so there is no row of ours to hang it on.
     pub hidden_browsers: Vec<String>,
+    pub proxy: ProxySetting,
+    /// The proxy to use when [`Settings::proxy`] is `Manual`.
+    ///
+    /// A whole address rather than a host and a port, because the scheme is
+    /// what picks between an HTTP proxy and a SOCKS one:
+    /// `http://host:3128`, `socks5://host:1080`, or `socks5h://host:1080` to
+    /// have the proxy resolve names too.
+    ///
+    /// Credentials are deliberately not accepted here. This string is kept
+    /// in `settings.json` in the clear, and a proxy password belongs in
+    /// Windows Credential Manager -- so an address carrying one is refused
+    /// rather than quietly written to a file the user does not know is
+    /// holding it. Authenticated proxies wait for that to be wired up.
+    pub proxy_address: String,
 }
 
 impl Default for Settings {
@@ -317,6 +351,12 @@ impl Default for Settings {
             speed_limit_bytes_per_sec: 0,
             download_dir: String::new(),
             hidden_browsers: Vec::new(),
+            // Not Direct: honouring the machine's own proxy configuration is
+            // what every other program on it does, and a download manager
+            // that quietly ignored it would look broken on exactly the
+            // networks where a proxy is mandatory.
+            proxy: ProxySetting::System,
+            proxy_address: String::new(),
         }
     }
 }

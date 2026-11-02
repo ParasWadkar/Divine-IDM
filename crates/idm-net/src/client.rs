@@ -47,6 +47,36 @@ impl std::fmt::Display for LaneId {
     }
 }
 
+/// Where requests go on their way out.
+///
+/// Worth being explicit about, because the default is not "straight out".
+/// `reqwest` reads `HTTP_PROXY`, `HTTPS_PROXY` and `ALL_PROXY` from the
+/// environment unless told not to, so a machine with those set was already
+/// being proxied by this app with nothing anywhere saying so. Naming the
+/// three possibilities means that behaviour is a choice rather than a
+/// surprise, and that "no proxy" is something a user can actually ask for.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum ProxyMode {
+    /// Whatever the environment says, which is what happens unasked.
+    #[default]
+    System,
+    /// Straight out, whatever the environment says.
+    Direct,
+    /// Through this one, whatever the environment says.
+    Manual(String),
+}
+
+impl ProxyMode {
+    /// Whether this mode sends requests through a proxy we chose.
+    ///
+    /// Asked by the lane topology: pinning lanes to resolved edge addresses
+    /// is pointless once a proxy is doing the resolving, since every lane
+    /// then opens to the same proxy whatever address it was given.
+    pub fn is_manual(&self) -> bool {
+        matches!(self, Self::Manual(_))
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct HttpConfig {
     pub user_agent: String,
@@ -70,6 +100,7 @@ pub struct HttpConfig {
     /// lifts single-stream throughput on a high-latency path.
     pub h2_adaptive_window: bool,
     pub pool_idle_timeout: Duration,
+    pub proxy: ProxyMode,
 }
 
 impl Default for HttpConfig {
@@ -85,6 +116,7 @@ impl Default for HttpConfig {
             h2_keep_alive: Duration::from_secs(20),
             h2_adaptive_window: true,
             pool_idle_timeout: Duration::from_secs(90),
+            proxy: ProxyMode::default(),
         }
     }
 }
@@ -102,6 +134,12 @@ pub enum ClientError {
     },
     #[error("{host} resolved to no addresses")]
     NoAddresses { host: String },
+    #[error("{address} is not a usable proxy address: {source}")]
+    Proxy {
+        address: String,
+        #[source]
+        source: reqwest::Error,
+    },
 }
 
 /// What a lane's requests are for, which determines redirect handling.
@@ -113,7 +151,7 @@ enum Role {
     Segment,
 }
 
-fn base_builder(config: &HttpConfig, role: Role) -> ClientBuilder {
+fn base_builder(config: &HttpConfig, role: Role) -> Result<ClientBuilder, ClientError> {
     let mut headers = HeaderMap::new();
     // Belt and braces alongside the disabled features: this also tells the
     // server not to encode, rather than merely declining to decode.
@@ -140,19 +178,31 @@ fn base_builder(config: &HttpConfig, role: Role) -> ClientBuilder {
         .connect_timeout(config.connect_timeout)
         .timeout(config.request_timeout);
 
-    match role {
+    let builder = match role {
         // Follow redirects once, to learn where the file really lives.
         Role::Resolver => builder.redirect(reqwest::redirect::Policy::limited(10)),
         // Segment requests go to the already-pinned URL. A redirect here would
         // mean the server moved the resource mid-download, which must surface
         // as a validator problem rather than be followed silently.
         Role::Segment => builder.redirect(reqwest::redirect::Policy::none()),
-    }
+    };
+
+    Ok(match &config.proxy {
+        ProxyMode::System => builder,
+        ProxyMode::Direct => builder.no_proxy(),
+        // `no_proxy` first, then the one we were given. Adding a proxy is
+        // additive in reqwest, so without clearing the environment's first
+        // the result would depend on what happened to be set.
+        ProxyMode::Manual(address) => builder.no_proxy().proxy(
+            reqwest::Proxy::all(address)
+                .map_err(|source| ClientError::Proxy { address: address.clone(), source })?,
+        ),
+    })
 }
 
 /// A client that follows redirects, used once to resolve the user's URL.
 pub fn redirect_resolver(config: &HttpConfig) -> Result<Client, ClientError> {
-    base_builder(config, Role::Resolver).build().map_err(ClientError::Build)
+    base_builder(config, Role::Resolver)?.build().map_err(ClientError::Build)
 }
 
 /// One independent connection lane.
@@ -189,7 +239,9 @@ impl LanePool {
         for index in 0..count {
             lanes.push(Lane {
                 id: LaneId(index),
-                client: base_builder(config, Role::Segment).build().map_err(ClientError::Build)?,
+                client: base_builder(config, Role::Segment)?
+                    .build()
+                    .map_err(ClientError::Build)?,
                 pinned: None,
             });
         }
@@ -214,7 +266,7 @@ impl LanePool {
 
         for index in 0..count {
             let address = addresses[index as usize % addresses.len()];
-            let client = base_builder(config, Role::Segment)
+            let client = base_builder(config, Role::Segment)?
                 .resolve(host, address)
                 .build()
                 .map_err(ClientError::Build)?;

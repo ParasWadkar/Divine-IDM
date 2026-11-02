@@ -191,16 +191,20 @@ async fn verify_file(path: String, expected: String) -> Result<verify::Verdict, 
 
 /// Looks for a hash the download's publisher put somewhere findable.
 ///
-/// Not a `Result`: there being no published hash is the ordinary outcome and
-/// says nothing went wrong, so it is `None` rather than an error the window
-/// would have to decide not to show.
+/// `Ok(None)` rather than an error when nothing is found: that is the
+/// ordinary outcome and says nothing went wrong, so the window falls back to
+/// asking rather than having to decide which failures not to show. The
+/// `Result` is Tauri's requirement for an async command borrowing state, not
+/// a second channel for "no hash".
 #[tauri::command]
 async fn published_hash(
+    state: State<'_, AppState>,
     url: String,
     filename: String,
     referrer: Option<String>,
-) -> Option<idm_engine::checksum::Published> {
-    idm_engine::checksum::published(&url, referrer.as_deref(), &filename).await
+) -> Result<Option<idm_engine::checksum::Published>, String> {
+    let proxy = state.proxy().await;
+    Ok(idm_engine::checksum::published(&url, referrer.as_deref(), &filename, proxy).await)
 }
 
 /// The icon the shell shows for a kind of file, as raw pixels.

@@ -16,3 +16,7 @@ pub mod ftp;
 pub mod limiter;
 pub mod sftp;
 pub mod stream;
+
+/// The URL type this crate speaks, so callers can parse one without taking
+/// a direct dependency on the HTTP client.
+pub use reqwest::Url;

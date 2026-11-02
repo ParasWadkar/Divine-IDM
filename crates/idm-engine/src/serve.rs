@@ -381,7 +381,12 @@ impl Engine {
             && request.filename.is_none()
             && !has_extension(&filename)
         {
-            name_from_server(&request).await.unwrap_or(filename)
+            // The proxy goes with it: this is a real request to the origin,
+            // and a network where downloads must be proxied is one where
+            // this probe would otherwise hang until its timeout and then
+            // silently fall back to guessing from the URL.
+            let proxy = crate::proxy::mode(&self.inner.settings.lock().await.clone());
+            name_from_server(&request, proxy).await.unwrap_or(filename)
         } else {
             filename
         };
@@ -455,6 +460,7 @@ impl Engine {
         config.referrer = request.referrer.clone();
         config.cookies = request.cookies.clone();
         config.fetch.limiter = Some(Arc::clone(&self.inner.limiter));
+        config.http.proxy = crate::proxy::mode(&self.inner.settings.lock().await.clone());
         config.profiles =
             self.inner.store.clone().map(|store| store as Arc<dyn idm_core::sched::ProfileStore>);
 
@@ -635,6 +641,7 @@ impl Engine {
         config.conn.per_host_max = self.inner.max_connections;
         config.referrer = row.referrer.clone();
         config.fetch.limiter = Some(Arc::clone(&self.inner.limiter));
+        config.http.proxy = crate::proxy::mode(&self.inner.settings.lock().await.clone());
         config.profiles =
             self.inner.store.clone().map(|store| store as Arc<dyn idm_core::sched::ProfileStore>);
 
@@ -712,6 +719,8 @@ impl Engine {
             config.conn.per_host_max = self.inner.max_connections;
             config.referrer = row.referrer.clone();
             config.fetch.limiter = Some(Arc::clone(&self.inner.limiter));
+            config.http.proxy = crate::proxy::mode(&self.inner.settings.lock().await.clone());
+        config.http.proxy = crate::proxy::mode(&self.inner.settings.lock().await.clone());
             config.profiles = self
                 .inner
                 .store
@@ -1139,10 +1148,14 @@ fn has_extension(name: &str) -> bool {
 /// nothing and is trusted as before. Any failure -- a slow server, a refusal,
 /// no header -- falls back to the URL's own guess, so this can make a name
 /// better and cannot make a download fail.
-async fn name_from_server(request: &DownloadRequest) -> Option<String> {
+async fn name_from_server(
+    request: &DownloadRequest,
+    proxy: idm_net::client::ProxyMode,
+) -> Option<String> {
     let mut config = idm_net::download::DownloadConfig::new(request.url.clone(), PathBuf::new());
     config.referrer = request.referrer.clone();
     config.cookies = request.cookies.clone();
+    config.http.proxy = proxy;
 
     // Bounded: an unresponsive server must not hold up accepting the job.
     let target =
@@ -1858,6 +1871,18 @@ impl Engine {
         match crate::folder::vet_download_dir(&settings.download_dir) {
             Ok(vetted) => settings.download_dir = vetted,
             Err(reason) => return Response::Rejected { reason },
+        }
+
+        // Same reasoning, and the same moment: a mistyped proxy otherwise
+        // surfaces as every download failing to connect, which looks nothing
+        // like the typo that caused it. Only checked when it is going to be
+        // used, so a stale address left behind by switching back to System
+        // is not an error.
+        if settings.proxy == idm_ipc::ProxySetting::Manual {
+            match crate::proxy::vet(&settings.proxy_address) {
+                Ok(vetted) => settings.proxy_address = vetted,
+                Err(reason) => return Response::Rejected { reason },
+            }
         }
 
         // The hidden list is plain text from the window. Capped and trimmed so
@@ -2625,6 +2650,84 @@ mod tests {
             maybe_arm(&engine.inner).await.is_none(),
             "must not arm while a download is still running"
         );
+    }
+
+    /// Reads the settings out, lets the caller change them, puts them back.
+    async fn put_settings(
+        engine: &Arc<Engine>,
+        change: impl FnOnce(&mut Settings),
+    ) -> Response {
+        let mut settings = match engine.handle(&desktop(), Request::GetSettings).await {
+            Response::Settings(settings) => settings,
+            other => panic!("expected settings, got {other:?}"),
+        };
+        change(&mut settings);
+        engine.handle(&desktop(), Request::SetSettings(settings)).await
+    }
+
+    #[tokio::test]
+    async fn a_proxy_address_carrying_a_password_is_refused() {
+        // The unit tests cover the vetting; this covers it being *wired in*,
+        // which is the half that silently stops working.
+        let (_dir, engine) = engine();
+        let reply = put_settings(&engine, |settings| {
+            settings.proxy = idm_ipc::ProxySetting::Manual;
+            settings.proxy_address = "http://someone:hunter2@127.0.0.1:3128".into();
+        })
+        .await;
+
+        match reply {
+            Response::Rejected { reason } => {
+                assert!(reason.contains("plain text"), "should say why: {reason}");
+            }
+            other => panic!("a password in a proxy address should be refused, got {other:?}"),
+        }
+
+        // And nothing was kept from the refused change.
+        match engine.handle(&desktop(), Request::GetSettings).await {
+            Response::Settings(settings) => {
+                assert_eq!(settings.proxy, idm_ipc::ProxySetting::System);
+                assert_eq!(settings.proxy_address, "");
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_usable_proxy_is_accepted_and_kept() {
+        let (_dir, engine) = engine();
+        let reply = put_settings(&engine, |settings| {
+            settings.proxy = idm_ipc::ProxySetting::Manual;
+            settings.proxy_address = "  socks5://127.0.0.1:1080  ".into();
+        })
+        .await;
+        assert!(!matches!(reply, Response::Rejected { .. }), "should be accepted: {reply:?}");
+
+        match engine.handle(&desktop(), Request::GetSettings).await {
+            // Tidied on the way in, so what comes back is what will be used.
+            Response::Settings(settings) => {
+                assert_eq!(settings.proxy_address, "socks5://127.0.0.1:1080");
+                assert_eq!(
+                    crate::proxy::mode(&settings),
+                    crate::proxy::ProxyMode::Manual("socks5://127.0.0.1:1080".to_owned())
+                );
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn an_address_left_behind_does_not_block_going_back_to_the_system_proxy() {
+        // Switching away from Manual must not be refused by whatever is
+        // still sitting in the address box -- including something invalid
+        // that was never accepted in the first place.
+        let (_dir, engine) = engine();
+        let reply = put_settings(&engine, |settings| {
+            settings.proxy = idm_ipc::ProxySetting::System;
+            settings.proxy_address = "nonsense".into();
+        })
+        .await;
+        assert!(!matches!(reply, Response::Rejected { .. }), "should be accepted: {reply:?}");
     }
 
     #[tokio::test]
