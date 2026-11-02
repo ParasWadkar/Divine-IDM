@@ -46,6 +46,7 @@ use crate::budget::AsyncBudget;
 use crate::client::{HttpConfig, LanePool, lane_topology};
 use crate::facts::OwnedFacts;
 use crate::fetch::{FetchConfig, FetchOutcome, FetchStop, SegmentRequest, fetch_claim};
+use crate::mirror::{Source, Sources};
 
 /// The probe reads this much, and it doubles as the first segment, so no round
 /// trip is wasted learning the file's shape.
@@ -54,6 +55,13 @@ const PROBE_BYTES: u64 = 1 << 20;
 #[derive(Clone)]
 pub struct DownloadConfig {
     pub url: String,
+    /// Other addresses serving the same file, to fetch from at the same time.
+    ///
+    /// Each is vetted against the primary before it is allowed to contribute
+    /// a byte — see [`crate::mirror`] — and one that fails is dropped with a
+    /// note rather than failing the download. A mirror is an optimisation,
+    /// and an optimisation that could corrupt the file is not one.
+    pub mirrors: Vec<String>,
     pub output_dir: PathBuf,
     /// Overrides the server-supplied and URL-derived name.
     pub filename: Option<String>,
@@ -94,6 +102,7 @@ impl std::fmt::Debug for DownloadConfig {
         // the cookies field must never reach a log line.
         f.debug_struct("DownloadConfig")
             .field("url", &self.url)
+            .field("mirrors", &self.mirrors)
             .field("output_dir", &self.output_dir)
             .field("filename", &self.filename)
             .field("fixed_connections", &self.fixed_connections)
@@ -114,6 +123,7 @@ impl DownloadConfig {
     pub fn new(url: impl Into<String>, output_dir: impl Into<PathBuf>) -> Self {
         Self {
             url: url.into(),
+            mirrors: Vec::new(),
             output_dir: output_dir.into(),
             filename: None,
             fixed_connections: None,
@@ -170,7 +180,14 @@ pub struct DownloadReport {
     pub connections_settled_at: u32,
     pub settle_reason: Option<SettleReason>,
     pub write_mode: WriteMode,
+    /// Lanes across every address, not per address.
     pub lanes: usize,
+    /// How many mirrors cleared vetting and contributed, beside the primary.
+    ///
+    /// Worth reporting rather than inferring from `lanes`: a mirror that was
+    /// configured and then refused is the interesting case, and the only way
+    /// to see it from the outside is that this did not go up.
+    pub mirrors_used: usize,
     pub stats: DownloadStats,
     pub resumed_bytes: u64,
 }
@@ -561,12 +578,29 @@ pub async fn download_with_progress<F: FnMut(Progress)>(
     // resolves the host itself. The addresses would be looked up and then
     // ignored, so the only effect left would be the lookup.
     let pin_edges = config.pin_edges && !http.proxy.is_manual();
-    let pool = Arc::new(match (&host, pin_edges) {
-        (Some(host), true) => LanePool::pinned_to_edges(&http, host, port, lane_count)
-            .await
-            .unwrap_or(LanePool::new(&http, lane_count)?),
-        _ => LanePool::new(&http, lane_count)?,
-    });
+
+    // One lane pool per address, with the connection budget divided between
+    // them rather than multiplied by them. The controller decides how many
+    // fetches may be in flight at once; the sources only decide where each
+    // one goes. Multiplying would mean adding a mirror quietly doubled the
+    // load this download puts on everything, which is not what asking for a
+    // second address means.
+    let mirrors = usable_mirrors(config, &target).await;
+    let per_source = (lane_count / (1 + mirrors.len() as u16)).max(1);
+
+    let mut built = Vec::with_capacity(1 + mirrors.len());
+    built.push(Source::new(
+        &target,
+        lanes_for(&http, host.as_deref(), port, per_source, pin_edges).await?,
+    ));
+    for mirror in &mirrors {
+        let (mirror_host, mirror_port) = host_port(&mirror.pinned_url);
+        built.push(Source::new(
+            mirror,
+            lanes_for(&http, mirror_host.as_deref(), mirror_port, per_source, pin_edges).await?,
+        ));
+    }
+    let sources = Arc::new(Sources::new(built));
 
     let (writer, acks) = Writer::spawn(&part_path, WriterConfig::new(1, target.total))?;
     let handle = writer.handle();
@@ -674,10 +708,7 @@ pub async fn download_with_progress<F: FnMut(Progress)>(
 
             let handle = handle.clone();
             let budget = budget.clone();
-            let pool = Arc::clone(&pool);
-            let url = target.pinned_url.clone();
-            let etag =
-                target.etag.clone().filter(|_| target.validator == ValidatorKind::StrongETag);
+            let sources = Arc::clone(&sources);
             let referrer = config.referrer.clone();
             let cookies = config.cookies.clone();
             let fetch_config = config.fetch.clone();
@@ -685,11 +716,16 @@ pub async fn download_with_progress<F: FnMut(Progress)>(
             tracing::debug!(%id, ?range, kind, "issuing claim");
 
             tasks.spawn(async move {
-                let lane = pool.next_lane().clone();
+                // Which address, and therefore which ETag. Both come from
+                // the same source: an ETag belongs to the origin that
+                // issued it, and pairing one address's with another's would
+                // turn a healthy mirror into a stream of refusals.
+                let source = sources.next();
+                let lane = source.lanes.next_lane().clone();
                 let request = SegmentRequest {
-                    url: &url,
+                    url: &source.url,
                     generation: 1,
-                    if_match: etag.as_deref(),
+                    if_match: source.etag.as_deref(),
                     referrer: referrer.as_deref(),
                     cookies: cookies.as_deref(),
                 };
@@ -893,8 +929,14 @@ pub async fn download_with_progress<F: FnMut(Progress)>(
     // Only when the controller settled: an unsettled count is wherever the
     // ramp had got to when the bytes ran out, and storing that would teach a
     // number nothing actually measured.
+    // Nothing is learned from a multi-source run. The count the controller
+    // settled on governed fetches spread across several hosts, so attributing
+    // it to the primary would teach that one host a number it never
+    // demonstrated -- and the next single-source download from it would start
+    // from a figure two other servers helped earn.
     if let (Some(store), Some(key), Some(reason)) =
         (config.profiles.as_ref(), host_key.as_ref(), controller.settled())
+        && sources.len() == 1
         && tuning_applies
         && fingerprint != 0
         && !config.fetch.limiter.as_ref().is_some_and(|limiter| limiter.waits() > waits_before)
@@ -922,10 +964,83 @@ pub async fn download_with_progress<F: FnMut(Progress)>(
         connections_settled_at: target_connections,
         settle_reason: controller.settled(),
         write_mode,
-        lanes: pool.len(),
+        lanes: sources.total_lanes(),
+        mirrors_used: sources.len().saturating_sub(1),
         stats,
         resumed_bytes,
     })
+}
+
+/// Host and port of an address, for pinning lanes across its edges.
+fn host_port(url: &str) -> (Option<String>, u16) {
+    let parsed = reqwest::Url::parse(url).ok();
+    let host = parsed.as_ref().and_then(|url| url.host_str().map(str::to_owned));
+    let port = parsed.and_then(|url| url.port_or_known_default()).unwrap_or(443);
+    (host, port)
+}
+
+/// Lanes for one address, spread across its edges where that is possible.
+async fn lanes_for(
+    http: &crate::client::HttpConfig,
+    host: Option<&str>,
+    port: u16,
+    count: u16,
+    pin_edges: bool,
+) -> Result<LanePool, crate::client::ClientError> {
+    match (host, pin_edges) {
+        (Some(host), true) => match LanePool::pinned_to_edges(http, host, port, count).await {
+            Ok(pool) => Ok(pool),
+            // Resolution failed, which is not fatal: unpinned lanes work,
+            // they just share whatever edge the resolver picks.
+            Err(_) => LanePool::new(http, count),
+        },
+        _ => LanePool::new(http, count),
+    }
+}
+
+/// Vets every configured mirror, keeping the ones that agree with the primary.
+///
+/// Sequential rather than concurrent. There are rarely more than a handful,
+/// each costs a probe and two small windows, and running them together would
+/// point several simultaneous window reads at the one server already busy
+/// serving this download.
+async fn usable_mirrors(config: &DownloadConfig, target: &Target) -> Vec<Target> {
+    if config.mirrors.is_empty() {
+        return Vec::new();
+    }
+
+    let sample = match crate::mirror::fingerprint(config, target).await {
+        Ok(sample) => sample,
+        Err(why) => {
+            // With nothing to compare against, no mirror can be cleared, so
+            // the download proceeds on the primary alone rather than on
+            // faith. Multi-source is an optimisation; this is the one thing
+            // it must never do to earn it.
+            tracing::warn!(%why, "could not sample the primary, so no mirror can be vetted");
+            return Vec::new();
+        }
+    };
+
+    let mut accepted: Vec<Target> = Vec::new();
+    for url in &config.mirrors {
+        match crate::mirror::vet(config, &sample, url).await {
+            Ok(mirror) => {
+                // Two mirror hostnames aliased to one CDN resolve to the
+                // same place, and counting that twice would split the
+                // connection budget between a server and itself.
+                if mirror.pinned_url == target.pinned_url
+                    || accepted.iter().any(|kept| kept.pinned_url == mirror.pinned_url)
+                {
+                    tracing::debug!(%url, "mirror leads to an address already in use");
+                    continue;
+                }
+                tracing::info!(%url, "mirror agrees with the primary and will be used");
+                accepted.push(mirror);
+            }
+            Err(refusal) => tracing::warn!(%url, "not using this mirror: {refusal}"),
+        }
+    }
+    accepted
 }
 
 /// Wall-clock milliseconds, for judging how old a stored profile is.

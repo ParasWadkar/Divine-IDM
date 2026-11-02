@@ -157,6 +157,15 @@ struct Args {
     #[arg(long)]
     no_edge_pinning: bool,
 
+    /// Another address serving the same file, to fetch from at the same
+    /// time. Repeatable.
+    ///
+    /// Each is checked against the first before it contributes a byte: same
+    /// length, and the same bytes at both ends of the file. One that
+    /// disagrees is reported and dropped, never blended in.
+    #[arg(long = "mirror", value_name = "URL")]
+    mirrors: Vec<String>,
+
     #[arg(long)]
     referrer: Option<String>,
 
@@ -341,6 +350,7 @@ async fn main() -> std::process::ExitCode {
         config.http.h2_connection_window = window.saturating_mul(4).max(window);
     }
     config.pin_edges = !args.no_edge_pinning;
+    config.mirrors = args.mirrors.clone();
     config.referrer = args.referrer.clone();
     config.cookies = args.cookies.clone();
 

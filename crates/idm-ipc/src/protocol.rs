@@ -56,6 +56,15 @@ impl std::fmt::Display for JobId {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DownloadRequest {
     pub url: String,
+    /// Other addresses serving the same file, fetched from at the same time.
+    ///
+    /// Each is checked against the first before it is allowed to contribute
+    /// a byte, and one that disagrees is dropped rather than failing the
+    /// download. Only the app and the command line ever set these: a browser
+    /// extension has no way to know that two addresses are one file, and a
+    /// page that could claim it could aim half a download anywhere it liked.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mirrors: Vec<String>,
     /// A *suggested* leaf name. Sanitised by the engine, and overridden by the
     /// user's own rules; never a path.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -75,6 +84,9 @@ pub struct DownloadRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mime: Option<String>,
 }
+
+/// Most addresses one download may be told to fetch from at once.
+pub const MAX_MIRRORS: usize = 8;
 
 impl DownloadRequest {
     /// Rejects anything the engine should not act on.
@@ -126,6 +138,29 @@ impl DownloadRequest {
                 "only http, https and magnet addresses are accepted".to_owned()
             });
         }
+        // Mirrors are http/https only, whatever `file_transfer` says. A
+        // mirror contributes byte ranges over HTTP, so there is no sense in
+        // which a magnet or an sftp address could be one, and accepting one
+        // here would only produce a refusal later with further to fall.
+        if !self.mirrors.is_empty() {
+            // Capped because every mirror costs a probe and two sampled
+            // windows before the first byte of the download is fetched, so
+            // an unbounded list is an unbounded wait with nothing on screen.
+            if self.mirrors.len() > MAX_MIRRORS {
+                return Err(format!("at most {MAX_MIRRORS} mirrors"));
+            }
+            for mirror in &self.mirrors {
+                let mirror = mirror.trim();
+                if mirror.is_empty() || mirror.len() > 8192 {
+                    return Err("a mirror address is empty or implausibly long".into());
+                }
+                let lower = mirror.to_ascii_lowercase();
+                if !(lower.starts_with("http://") || lower.starts_with("https://")) {
+                    return Err("a mirror must be an http or https address".into());
+                }
+            }
+        }
+
         if let Some(name) = &self.filename {
             if name.len() > 512 {
                 return Err("filename is implausibly long".into());
@@ -597,6 +632,47 @@ mod tests {
 
     fn request(url: &str) -> DownloadRequest {
         DownloadRequest { url: url.into(), ..Default::default() }
+    }
+
+    fn with_mirrors(mirrors: &[&str]) -> DownloadRequest {
+        DownloadRequest {
+            url: "https://example.invalid/a.bin".into(),
+            mirrors: mirrors.iter().map(|m| (*m).to_owned()).collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn http_mirrors_are_accepted() {
+        assert!(
+            with_mirrors(&["https://b.invalid/a.bin", "http://c.invalid/a.bin"]).validate().is_ok()
+        );
+    }
+
+    #[test]
+    fn a_mirror_must_be_an_http_address_even_from_the_command_line() {
+        // Unlike the main address, which may be a magnet or an sftp URL.
+        // A mirror contributes byte ranges over HTTP, so there is no sense
+        // in which either of those could be one.
+        for wrong in ["magnet:?xt=urn:btih:abc", "sftp://b.invalid/a.bin", "file:///C:/a.bin", ""] {
+            let request = with_mirrors(&[wrong]);
+            assert!(request.validate().is_err(), "{wrong} should be refused");
+            assert!(
+                request.validate_with(true).is_err(),
+                "{wrong} should be refused from the command line too"
+            );
+        }
+    }
+
+    #[test]
+    fn there_is_a_ceiling_on_how_many_mirrors_may_be_given() {
+        // Each costs a probe and two sampled windows before the download
+        // starts, so an unbounded list is an unbounded wait.
+        let many: Vec<String> =
+            (0..=MAX_MIRRORS).map(|n| format!("https://m{n}.invalid/a.bin")).collect();
+        let refs: Vec<&str> = many.iter().map(String::as_str).collect();
+        assert!(with_mirrors(&refs[..MAX_MIRRORS]).validate().is_ok());
+        assert!(with_mirrors(&refs).validate().is_err());
     }
 
     #[test]

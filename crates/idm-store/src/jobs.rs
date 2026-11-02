@@ -116,6 +116,8 @@ pub struct NewJob {
     /// so this is the only trace of them, and it exists so that a job which
     /// needed them is not silently resumed into a 403 after a restart.
     pub needs_browser_auth: bool,
+    /// Other addresses serving the same file.
+    pub mirrors: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -142,12 +144,36 @@ pub struct StoredJob {
     pub error_kind: Option<String>,
     /// The short line. `error` keeps the full text behind it.
     pub error_summary: Option<String>,
+    /// Other addresses this job may be fetched from. Empty for a row
+    /// written before they were recorded, which is also what no mirrors
+    /// looks like -- the two need not be told apart.
+    pub mirrors: Vec<String>,
 }
 
 pub(crate) const COLUMNS: &str = "id, url, filename, output_dir, state, downloaded, total, error, category, \
                        referrer, user_agent, mime, queue_id, position, created_at_ms, \
                        updated_at_ms, finished_at_ms, needs_browser_auth, error_kind, \
-                       error_summary";
+                       error_summary, mirrors";
+
+/// Splits the stored form back into addresses.
+///
+/// Blank lines are dropped rather than becoming empty mirrors: an empty
+/// address would be probed, refused and logged on every resume.
+fn split_mirrors(stored: Option<&str>) -> Vec<String> {
+    stored
+        .unwrap_or_default()
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+/// The stored form: one address per line, or nothing at all.
+fn join_mirrors(mirrors: &[String]) -> Option<String> {
+    if mirrors.is_empty() { None } else { Some(mirrors.join("
+")) }
+}
 
 pub(crate) fn read(row: &Row<'_>) -> rusqlite::Result<StoredJob> {
     Ok(StoredJob {
@@ -175,6 +201,7 @@ pub(crate) fn read(row: &Row<'_>) -> rusqlite::Result<StoredJob> {
         needs_browser_auth: row.get::<_, i64>(17)? != 0,
         error_kind: row.get(18)?,
         error_summary: row.get(19)?,
+        mirrors: split_mirrors(row.get::<_, Option<String>>(20)?.as_deref()),
     })
 }
 
@@ -186,10 +213,10 @@ impl Store {
         conn.prepare_cached(
             "INSERT INTO jobs (url, filename, output_dir, state, total, category, referrer,
                                user_agent, mime, queue_id, position, created_at_ms,
-                               updated_at_ms, needs_browser_auth)
+                               updated_at_ms, needs_browser_auth, mirrors)
              VALUES (?1, ?2, ?3, 'queued', ?4, ?5, ?6, ?7, ?8, ?9,
                      COALESCE((SELECT MAX(position) + 1 FROM jobs WHERE queue_id IS ?9), 0),
-                     ?10, ?10, ?11)",
+                     ?10, ?10, ?11, ?12)",
         )?
         .execute(params![
             job.url,
@@ -203,6 +230,7 @@ impl Store {
             job.queue_id,
             now as i64,
             job.needs_browser_auth as i64,
+            join_mirrors(&job.mirrors),
         ])?;
         Ok(conn.last_insert_rowid())
     }
@@ -383,6 +411,38 @@ mod tests {
             total: Some(1 << 20),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn mirrors_survive_a_round_trip() {
+        let store = Store::in_memory().unwrap();
+        let mirrors = vec![
+            "https://a.invalid/big.bin".to_owned(),
+            "https://b.invalid/big.bin".to_owned(),
+        ];
+        let id = store.add_job(&NewJob { mirrors: mirrors.clone(), ..a_job() }).unwrap();
+        assert_eq!(store.job(id).unwrap().unwrap().mirrors, mirrors);
+    }
+
+    #[test]
+    fn a_job_with_no_mirrors_reads_back_as_none_rather_than_one_empty_one() {
+        // An empty string in the column would come back as a single blank
+        // address, which would then be probed and refused on every resume.
+        let store = Store::in_memory().unwrap();
+        let id = store.add_job(&a_job()).unwrap();
+        assert!(store.job(id).unwrap().unwrap().mirrors.is_empty());
+    }
+
+    #[test]
+    fn the_stored_form_is_one_address_per_line() {
+        assert_eq!(join_mirrors(&[]), None);
+        assert_eq!(join_mirrors(&["a".to_owned()]), Some("a".to_owned()));
+        assert_eq!(join_mirrors(&["a".to_owned(), "b".to_owned()]), Some("a\nb".to_owned()));
+
+        assert!(split_mirrors(None).is_empty());
+        assert!(split_mirrors(Some("")).is_empty());
+        // Blank and whitespace-only lines are not addresses.
+        assert_eq!(split_mirrors(Some("a\n\n  \nb\n")), vec!["a".to_owned(), "b".to_owned()]);
     }
 
     #[test]

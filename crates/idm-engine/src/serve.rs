@@ -459,6 +459,7 @@ impl Engine {
         config.conn.per_host_max = self.inner.max_connections;
         config.referrer = request.referrer.clone();
         config.cookies = request.cookies.clone();
+        config.mirrors = request.mirrors.clone();
         config.fetch.limiter = Some(Arc::clone(&self.inner.limiter));
         config.http.proxy = crate::proxy::mode(&self.inner.settings.lock().await.clone());
         config.profiles =
@@ -480,6 +481,9 @@ impl Engine {
                 // Not the cookies themselves — only that there were some,
                 // so a later restart knows this one cannot just be retried.
                 needs_browser_auth: request.cookies.is_some(),
+                // Kept so that pausing and resuming does not quietly turn a
+                // multi-source download into a single-source one.
+                mirrors: request.mirrors.clone(),
                 ..Default::default()
             };
             match store.add_job(&row) {
@@ -640,6 +644,7 @@ impl Engine {
         config.filename = Some(row.filename.clone());
         config.conn.per_host_max = self.inner.max_connections;
         config.referrer = row.referrer.clone();
+        config.mirrors = row.mirrors.clone();
         config.fetch.limiter = Some(Arc::clone(&self.inner.limiter));
         config.http.proxy = crate::proxy::mode(&self.inner.settings.lock().await.clone());
         config.profiles =
@@ -718,6 +723,7 @@ impl Engine {
             config.filename = Some(row.filename.clone());
             config.conn.per_host_max = self.inner.max_connections;
             config.referrer = row.referrer.clone();
+            config.mirrors = row.mirrors.clone();
             config.fetch.limiter = Some(Arc::clone(&self.inner.limiter));
             config.http.proxy = crate::proxy::mode(&self.inner.settings.lock().await.clone());
         config.http.proxy = crate::proxy::mode(&self.inner.settings.lock().await.clone());

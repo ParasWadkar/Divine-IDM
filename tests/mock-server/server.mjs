@@ -116,8 +116,13 @@ function sendUnsatisfiable(res, total) {
   res.end();
 }
 
-/** The well-behaved baseline: strong ETag, honours Range, accurate lengths. */
-function serveHonestly(req, res, total, extraHeaders = {}) {
+/**
+ * The well-behaved baseline: strong ETag, honours Range, accurate lengths.
+ *
+ * `body` lets a route serve a different sequence at the same length, which is
+ * what a mirror holding a different build looks like from outside.
+ */
+function serveHonestly(req, res, total, extraHeaders = {}, body = bodyFor) {
   const range = parseRange(req.headers.range, total);
   if (range === "unsatisfiable") return sendUnsatisfiable(res, total);
 
@@ -133,7 +138,7 @@ function serveHonestly(req, res, total, extraHeaders = {}) {
   if (!range) {
     res.writeHead(200, { ...headers, "Content-Length": String(total) });
     if (req.method === "HEAD") return res.end();
-    return res.end(bodyFor(0, total));
+    return res.end(body(0, total));
   }
 
   res.writeHead(206, {
@@ -142,7 +147,7 @@ function serveHonestly(req, res, total, extraHeaders = {}) {
     "Content-Length": String(range.end - range.start),
   });
   if (req.method === "HEAD") return res.end();
-  return res.end(bodyFor(range.start, range.end));
+  return res.end(body(range.start, range.end));
 }
 
 const routes = {
@@ -292,6 +297,49 @@ const routes = {
   "/honest": {
     description: "Well-behaved baseline: honours Range, strong ETag, truthful lengths.",
     handler: (req, res, url) => serveHonestly(req, res, sizeFromQuery(url)),
+  },
+
+  // --- mirrors ---------------------------------------------------------
+  //
+  // For vetting a second address before it is allowed to contribute bytes.
+  // All three are honest servers: the question is not whether they behave,
+  // it is whether they are serving the same file.
+
+  "/mirror-agrees": {
+    description:
+      "Byte-identical to /honest, but with its own ETag -- which is what a real " +
+      "second mirror looks like. An ETag is opaque and per-origin, so two mirrors " +
+      "serving the same bytes disagree about it, and that is evidence of nothing.",
+    handler: (req, res, url) =>
+      serveHonestly(req, res, sizeFromQuery(url), { ETag: '"other-origin"' }),
+  },
+
+  "/mirror-tail-differs": {
+    description:
+      "Same length as /honest and the same first megabyte, but the last megabyte " +
+      "differs: two builds of one release sharing a header. A check that samples " +
+      "only the head accepts this and then silently blends the two.",
+    handler: (req, res, url) => {
+      const total = sizeFromQuery(url);
+      const from = Math.max(0, total - MIB);
+      serveHonestly(req, res, total, { ETag: '"other-origin"' }, (start, end) => {
+        const buffer = bodyFor(start, end);
+        for (let i = 0; i < buffer.length; i += 1) {
+          if (start + i >= from) buffer[i] ^= 0xff;
+        }
+        return buffer;
+      });
+    },
+  },
+
+  "/mirror-shorter": {
+    description:
+      "Honest, but one byte shorter than /honest at the same `?size=`. The cheap " +
+      "half of the check: different lengths cannot be the same file.",
+    handler: (req, res, url) =>
+      serveHonestly(req, res, Math.max(1, sizeFromQuery(url) - 1), {
+        ETag: '"other-origin"',
+      }),
   },
 
   "/named": {

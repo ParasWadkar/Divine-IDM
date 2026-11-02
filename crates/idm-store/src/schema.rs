@@ -89,6 +89,19 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE jobs ADD COLUMN error_kind TEXT;
     ALTER TABLE jobs ADD COLUMN error_summary TEXT;
     "#,
+    // v4 — the other addresses a job may be fetched from.
+    //
+    // Newline-separated rather than JSON, because a URL cannot contain a
+    // raw newline and this crate has no JSON of its own to pull in for one
+    // column. Nullable with no default: a row written before this existed
+    // has no mirrors, which is exactly what absent means.
+    //
+    // Kept at all so that pausing a multi-source download and resuming it
+    // does not quietly turn it into a single-source one -- a degradation
+    // nothing would report and only a throughput graph would show.
+    r#"
+    ALTER TABLE jobs ADD COLUMN mirrors TEXT;
+    "#,
 ];
 
 pub const LATEST: u32 = MIGRATIONS.len() as u32;
@@ -153,7 +166,7 @@ mod tests {
             // would have: the point is that an upgrade preserves data that
             // predates the columns it adds. Every column added since has to
             // come off, or replaying that migration hits a duplicate.
-            for column in ["needs_browser_auth", "error_kind", "error_summary"] {
+            for column in ["needs_browser_auth", "error_kind", "error_summary", "mirrors"] {
                 conn.execute(&format!("ALTER TABLE jobs DROP COLUMN {column}"), []).unwrap();
             }
             conn.pragma_update(None, "user_version", 1).unwrap();
@@ -177,6 +190,9 @@ mod tests {
         // claim the old failure had been understood.
         assert!(job.error_kind.is_none(), "an old row must not claim a classification");
         assert!(job.error_summary.is_none());
+        // Same reasoning: absent and "no mirrors" are the same thing here,
+        // and neither is one blank address.
+        assert!(job.mirrors.is_empty(), "an old row has no mirrors");
     }
 
     #[test]

@@ -215,6 +215,12 @@ impl Bridge {
                     user_agent,
                     size_hint,
                     mime,
+                    // Never from a browser, and spelled out rather than
+                    // defaulted so it stays a decision. A page has no way to
+                    // know that two addresses are one file, and one that
+                    // could claim it could aim half of a download at a
+                    // server of its choosing.
+                    mirrors: Vec::new(),
                 };
                 match self.ask_waking(Request::Enqueue(request)).await {
                     Ok(Response::Accepted { id }) => ToExtension::Accepted { id: id.0 },
