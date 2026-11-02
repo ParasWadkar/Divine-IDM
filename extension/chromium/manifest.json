@@ -19,7 +19,8 @@
     "alarms"
   ],
   "optional_permissions": [
-    "cookies"
+    "cookies",
+    "webRequest"
   ],
   "optional_host_permissions": [
     "<all_urls>"

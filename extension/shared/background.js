@@ -28,6 +28,10 @@ const DEFAULT_SETTINGS = {
   enabled: true,
   minSizeBytes: 2 * 1024 * 1024,
   forwardCookies: false,
+  // Watching responses go past is how a stream that only ever plays gets
+  // noticed, and it is also a great deal more access than the main job needs.
+  // Off until asked for, like cookies.
+  findStreams: false,
   // Types the browser handles perfectly well itself; taking these over just
   // adds a round trip and surprises the user.
   skipExtensions: ["html", "htm", "css", "js", "json", "xml", "txt", "svg", "ico"],
@@ -453,6 +457,186 @@ api.contextMenus?.onClicked.addListener(async (info) => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// Streams noticed on a page
+// ---------------------------------------------------------------------------
+//
+// A video that merely plays is never a download, so nothing above ever sees
+// it. `onDeterminingFilename` fires when the browser decides where to put a
+// file, and a page streaming HLS never asks it to: the manifest goes past as
+// an ordinary fetch, the player asks for segments itself, and by the time
+// anybody wants the video there is nothing left to intercept.
+//
+// So this watches responses instead and remembers the manifests it sees, per
+// tab. Nothing is taken over, cancelled or rewritten -- the page carries on
+// playing exactly as it was. The address is only kept, so the popup can offer
+// it to the engine, which can fetch the segments in parallel and join them.
+//
+// # Why it is opt-in
+//
+// Reading the headers of every response on every site is far more than this
+// extension needs for its main job, and asking at install time would put
+// "read your browsing history" on the prompt for a feature most people will
+// never turn on. So `webRequest` and host access are optional and requested
+// at the moment of use, exactly as cookie access is.
+
+const STREAMS_KEY = "idmStreams";
+
+/** Most addresses worth remembering for one tab. */
+const MAX_STREAMS_PER_TAB = 12;
+
+/** Content types that mean "a playlist", whatever the address looks like. */
+const MANIFEST_TYPES = new Set([
+  "application/vnd.apple.mpegurl",
+  "application/x-mpegurl",
+  "audio/mpegurl",
+  "audio/x-mpegurl",
+  "application/dash+xml",
+  "video/vnd.mpeg.dash.mpd",
+]);
+
+/**
+ * Serialises read-modify-write on the remembered streams.
+ *
+ * A page opening a player fires several of these within a few milliseconds.
+ * Without this each one reads the same list and writes its own addition back
+ * over the others, so a page with three variants remembers one of them.
+ */
+let streamQueue = Promise.resolve();
+
+function withStreams(mutate) {
+  streamQueue = streamQueue
+    .catch(() => {})
+    .then(async () => {
+      const all = (await api.storage.session.get(STREAMS_KEY))[STREAMS_KEY] ?? {};
+      const result = await mutate(all);
+      await api.storage.session.set({ [STREAMS_KEY]: all });
+      return result;
+    });
+  return streamQueue;
+}
+
+async function streamsFor(tabId) {
+  const all = (await api.storage.session.get(STREAMS_KEY))[STREAMS_KEY] ?? {};
+  return all[String(tabId)] ?? [];
+}
+
+/**
+ * How many streams this tab has, on the toolbar.
+ *
+ * Per-tab, which takes precedence over the global badge, so a tab with a
+ * stream shows a count while every other tab goes on showing the connection
+ * status. Clearing it with an empty string is what hands a tab back to
+ * `paintIcon`.
+ */
+async function paintStreamBadge(tabId, count) {
+  try {
+    await api.action.setBadgeText({ tabId, text: count ? String(count) : "" });
+    if (count) {
+      await api.action.setBadgeBackgroundColor({ tabId, color: "#6d28d9" });
+    }
+  } catch {
+    // The tab went away between noticing and painting.
+  }
+}
+
+function headerValue(headers, name) {
+  const wanted = name.toLowerCase();
+  for (const header of headers ?? []) {
+    if (header.name?.toLowerCase() === wanted) return header.value ?? "";
+  }
+  return "";
+}
+
+/** What kind of stream a response is, or `null` if it is not one. */
+function streamKind(url, headers, settings) {
+  const type = headerValue(headers, "content-type").split(";")[0].trim().toLowerCase();
+
+  if (isManifest(url) || MANIFEST_TYPES.has(type)) {
+    const dash = type.includes("dash") || /\.mpd(?:[?#]|$)/i.test(url);
+    return dash ? "DASH" : "HLS";
+  }
+
+  // A progressive video served whole. Offered only when it is big enough to
+  // be the thing somebody came for, rather than a preview loop or an advert.
+  if (type.startsWith("video/")) {
+    const length = Number(headerValue(headers, "content-length"));
+    if (Number.isFinite(length) && length >= settings.minSizeBytes) return "Video";
+  }
+  return null;
+}
+
+/**
+ * Notices a stream going past. Observational: returns nothing, blocks
+ * nothing, and leaves the page's own fetch completely alone.
+ */
+function onHeaders(details) {
+  void (async () => {
+    const { tabId } = details;
+    if (typeof tabId !== "number" || tabId < 0) return; // not in a tab at all
+
+    // A new page in this tab, which is also the one navigation signal that
+    // needs no permission beyond the one already granted to be here.
+    // Whatever was found belongs to the page being left.
+    if (details.type === "main_frame") {
+      await withStreams((all) => {
+        delete all[String(tabId)];
+      });
+      await paintStreamBadge(tabId, 0);
+      return;
+    }
+
+    const settings = await getSettings();
+    if (!settings.findStreams) return;
+    const kind = streamKind(details.url, details.responseHeaders, settings);
+    if (!kind) return;
+
+    const count = await withStreams((all) => {
+      const key = String(tabId);
+      const list = all[key] ?? [];
+      // A player re-requests its playlist as it goes; the same address
+      // arriving again is the same stream, not another one.
+      if (list.some((entry) => entry.url === details.url)) return list.length;
+      list.unshift({ url: details.url, kind, at: Date.now() });
+      all[key] = list.slice(0, MAX_STREAMS_PER_TAB);
+      return all[key].length;
+    });
+    await paintStreamBadge(tabId, count);
+  })();
+}
+
+/**
+ * Starts watching, if the user has granted what that takes.
+ *
+ * Called on every wake, because an MV3 worker loses its listeners when it
+ * sleeps, and again immediately after the permission is granted so the
+ * switch takes effect rather than waiting for the next nap.
+ */
+async function watchForStreams() {
+  if (!api.webRequest?.onHeadersReceived) return;
+  if (api.webRequest.onHeadersReceived.hasListener(onHeaders)) return;
+  try {
+    const granted = await api.permissions.contains({
+      permissions: ["webRequest"],
+      origins: ["<all_urls>"],
+    });
+    if (!granted) return;
+    api.webRequest.onHeadersReceived.addListener(
+      onHeaders,
+      { urls: ["http://*/*", "https://*/*"] },
+      ["responseHeaders"],
+    );
+  } catch {
+    // Not granted, or the browser does not offer it. Tried again next wake.
+  }
+}
+
+api.tabs?.onRemoved.addListener((tabId) => {
+  void withStreams((all) => {
+    delete all[String(tabId)];
+  });
+});
+
 /** Messages from the popup. */
 api.runtime.onMessage.addListener((message, _sender, respond) => {
   (async () => {
@@ -480,6 +664,42 @@ api.runtime.onMessage.addListener((message, _sender, respond) => {
         const updated = await setSettings(message.settings ?? {});
         await paintIcon(await getState());
         respond({ settings: updated });
+        break;
+      }
+      case "getStreams": {
+        // `tabs.query` needs no `tabs` permission to return an id, which is
+        // all this wants. The url comes with it once host access is granted,
+        // which it must have been for anything to have been noticed at all.
+        const [tab] = await api.tabs.query({ active: true, currentWindow: true });
+        respond({ streams: tab ? await streamsFor(tab.id) : [], pageUrl: tab?.url });
+        break;
+      }
+      case "grabStream": {
+        const settings = await getSettings();
+        const reply = await sendToHost({
+          type: "download",
+          url: message.url,
+          // Hotlink-protected CDNs check this, and a stream is exactly the
+          // kind of address that tends to be behind one.
+          referrer: message.pageUrl || undefined,
+          user_agent: navigator.userAgent,
+          cookies: await cookieHeaderFor(message.url, settings),
+        });
+        respond({ ok: reply.type === "accepted", reason: reply.reason });
+        break;
+      }
+      case "requestStreamAccess": {
+        const granted = await api.permissions.request({
+          permissions: ["webRequest"],
+          origins: ["<all_urls>"],
+        });
+        if (granted) {
+          await setSettings({ findStreams: true });
+          // Without this the switch would appear to do nothing until the
+          // worker next slept and woke.
+          await watchForStreams();
+        }
+        respond({ granted });
         break;
       }
       case "requestCookieAccess": {
@@ -535,6 +755,8 @@ api.alarms?.onAlarm.addListener(async (alarm) => {
   }
 });
 
-// Every wake: say hello, and let go of anything a previous wake left paused.
+// Every wake: say hello, let go of anything a previous wake left paused, and
+// re-register the stream watcher the nap took away.
 greet();
 releaseOrphanedPauses();
+watchForStreams();

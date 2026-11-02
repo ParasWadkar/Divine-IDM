@@ -43,6 +43,30 @@
       input[type="number"] { width: 72px; }
       button { margin-top: 10px; width: 100%; padding: 6px; }
       .hint { opacity: .75; font-size: 11px; margin-top: 4px; }
+      h2 {
+        font-size: 11px; margin: 14px 0 6px; opacity: .8;
+        text-transform: uppercase; letter-spacing: .05em;
+      }
+      #stream-list {
+        list-style: none; margin: 0; padding: 0;
+        display: flex; flex-direction: column; gap: 6px;
+      }
+      #stream-list li {
+        display: flex; align-items: center; gap: 8px;
+        padding: 6px 8px; border-radius: 6px;
+        background: color-mix(in srgb, CanvasText 8%, Canvas);
+      }
+      .kind {
+        flex: none; font-size: 10px; font-weight: 700; letter-spacing: .04em;
+        padding: 2px 6px; border-radius: 999px; background: #6d28d9; color: #fff;
+      }
+      /* min-width: 0 is what lets a long address shrink instead of pushing
+         the button off the edge of the popup. */
+      .where {
+        flex: 1; min-width: 0; font-size: 11px;
+        overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      }
+      button.grab { margin: 0; width: auto; flex: none; padding: 4px 10px; font-size: 11px; }
     </style>
   </head>
   <body>
@@ -69,6 +93,20 @@
     </label>
     <div class="hint">
       Asks for cookie access only when you turn this on.
+    </div>
+    <label>
+      <input type="checkbox" id="findStreams" />
+      Notice video streams on pages
+    </label>
+    <div class="hint">
+      Asks to see page requests only when you turn this on.
+    </div>
+
+    <!-- Hidden until something is found, so the popup does not carry an
+         empty heading around on every page that has no video. -->
+    <div id="streams" hidden>
+      <h2>On this page</h2>
+      <ul id="stream-list"></ul>
     </div>
 
     <button id="pair" hidden>Request pairing</button>

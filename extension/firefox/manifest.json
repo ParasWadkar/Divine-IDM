@@ -27,6 +27,7 @@
   ],
   "optional_permissions": [
     "cookies",
+    "webRequest",
     "<all_urls>"
   ]
 }

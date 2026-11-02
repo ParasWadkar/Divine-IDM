@@ -57,6 +57,60 @@ function render({ state = {}, settings = {} }) {
   if (settings.forwardCookies !== undefined) {
     $("forwardCookies").checked = settings.forwardCookies;
   }
+  if (settings.findStreams !== undefined) {
+    $("findStreams").checked = settings.findStreams;
+  }
+}
+
+/** The last part of an address, which is the only readable part of most. */
+function fileOf(url) {
+  try {
+    return new URL(url).pathname.split("/").filter(Boolean).pop() || url;
+  } catch {
+    return url;
+  }
+}
+
+/**
+ * Lists the streams noticed on the page in front of you.
+ *
+ * Every string here came off a web page, so all of it goes in through
+ * `textContent`. The popup is a privileged context and must not become a
+ * place where a page's own text can write markup.
+ */
+function renderStreams({ streams = [], pageUrl } = {}) {
+  const list = $("stream-list");
+  list.replaceChildren();
+  $("streams").hidden = streams.length === 0;
+
+  for (const stream of streams) {
+    const row = document.createElement("li");
+
+    const kind = document.createElement("span");
+    kind.className = "kind";
+    kind.textContent = stream.kind;
+
+    const where = document.createElement("span");
+    where.className = "where";
+    where.textContent = fileOf(stream.url);
+    where.title = stream.url;
+
+    const grab = document.createElement("button");
+    grab.className = "grab";
+    grab.textContent = "Grab";
+    grab.addEventListener("click", async () => {
+      grab.disabled = true;
+      grab.textContent = "…";
+      const reply = await ask({ type: "grabStream", url: stream.url, pageUrl });
+      // Said on the button itself: the popup usually closes before any
+      // other kind of notice could be read.
+      grab.textContent = reply?.ok ? "Sent" : "Failed";
+      if (!reply?.ok) grab.title = reply?.reason ?? "";
+    });
+
+    row.append(kind, where, grab);
+    list.append(row);
+  }
 }
 
 $("enabled").addEventListener("change", async (event) => {
@@ -83,9 +137,22 @@ $("forwardCookies").addEventListener("change", async (event) => {
   }
 });
 
+$("findStreams").addEventListener("change", async (event) => {
+  if (event.target.checked) {
+    // Seeing page requests is asked for here, not at install time.
+    const { granted } = await ask({ type: "requestStreamAccess" });
+    event.target.checked = Boolean(granted);
+    if (!granted) return;
+    renderStreams(await ask({ type: "getStreams" }));
+  } else {
+    await ask({ type: "setSettings", settings: { findStreams: false } });
+  }
+});
+
 $("pair").addEventListener("click", async () => {
   await ask({ type: "pair" });
   render(await ask({ type: "getStatus" }));
 });
 
 ask({ type: "getStatus" }).then(render);
+ask({ type: "getStreams" }).then(renderStreams);
