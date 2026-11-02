@@ -1170,7 +1170,7 @@ async function verifyDownload(job) {
   toast("Checking…");
   try {
     const verdict = await invoke("verify_file", {
-      path: `${job.output_dir}\${job.filename}`,
+      path: `${job.output_dir}\\${job.filename}`,
       expected,
     });
     if (verdict.matched) {
