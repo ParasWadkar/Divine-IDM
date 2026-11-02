@@ -189,6 +189,20 @@ async fn verify_file(path: String, expected: String) -> Result<verify::Verdict, 
         .map_err(|error| error.to_string())?
 }
 
+/// Looks for a hash the download's publisher put somewhere findable.
+///
+/// Not a `Result`: there being no published hash is the ordinary outcome and
+/// says nothing went wrong, so it is `None` rather than an error the window
+/// would have to decide not to show.
+#[tauri::command]
+async fn published_hash(
+    url: String,
+    filename: String,
+    referrer: Option<String>,
+) -> Option<idm_engine::checksum::Published> {
+    idm_engine::checksum::published(&url, referrer.as_deref(), &filename).await
+}
+
 /// The icon the shell shows for a kind of file, as raw pixels.
 ///
 /// Asked once per extension and kept by the window, because the answer is
@@ -438,6 +452,7 @@ fn main() {
             open_file,
             file_icon,
             verify_file,
+            published_hash,
             choose_folder,
             browser_setup,
             opened_files,

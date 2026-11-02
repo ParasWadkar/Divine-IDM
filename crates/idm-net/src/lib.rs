@@ -7,6 +7,7 @@
 //! into write jobs.
 
 pub mod budget;
+pub mod checksum;
 pub mod client;
 pub mod download;
 pub mod facts;

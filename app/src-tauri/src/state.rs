@@ -125,6 +125,9 @@ impl AppState {
                         "error": job.error,
                         "error_kind": job.error_kind,
                         "error_summary": job.error_summary,
+                        // The page the link was followed from, which is one
+                        // of the two places a published hash is looked for.
+                        "referrer": job.referrer,
                         "finished_at_ms": job.finished_at_ms,
                         // When to file it under. A download that was stopped
                         // and left never finished, so it has no finish time

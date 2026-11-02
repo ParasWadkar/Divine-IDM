@@ -9,6 +9,7 @@
 pub mod batch;
 pub mod browsers;
 pub mod category;
+pub mod checksum;
 pub mod failure;
 pub mod folder;
 pub mod pairing;

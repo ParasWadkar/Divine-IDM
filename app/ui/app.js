@@ -1585,6 +1585,15 @@ function askFor(message, { placeholder = "", value = "", confirm = "OK" } = {}) 
   });
 }
 
+/** Just the host of an address, which is the part worth reading aloud. */
+function sourceLabel(url) {
+  try {
+    return new URL(url).hostname;
+  } catch {
+    return url;
+  }
+}
+
 /**
  * Checks a finished file against a hash published where the link was.
  *
@@ -1592,22 +1601,44 @@ function askFor(message, { placeholder = "", value = "", confirm = "OK" } = {}) 
  * that the bytes are the publisher's and not a mirror's older build, and
  * a mismatch is worth more than a red toast -- so it reports what the
  * file actually hashes to.
+ *
+ * The hash is looked for before it is asked for. Being made to go and find
+ * the figure by hand is the whole reason this check normally goes unused,
+ * and it is usually published a few metres from the link. Where it was found
+ * is always said, because a hash is worth exactly what its source is worth
+ * and a figure compared against silently could have come from anywhere.
  */
 async function verifyDownload(job) {
-  const expected = await askFor(`Paste the hash published for ${job.filename}:`, {
-    placeholder: "SHA-256, SHA-1 or MD5",
-    confirm: "Check it",
-  });
+  const path = `${job.output_dir}\\${job.filename}`;
+
+  toast("Looking for a published hash…");
+  let found = null;
+  try {
+    found = await invoke("published_hash", {
+      url: job.url,
+      filename: job.filename,
+      referrer: job.referrer ?? null,
+    });
+  } catch {
+    // A lookup that fell over is not a reason to refuse the check; the
+    // paste path below does not need it.
+  }
+
+  const expected =
+    found?.hash ??
+    (await askFor(`Paste the hash published for ${job.filename}:`, {
+      placeholder: "SHA-256, SHA-1 or MD5",
+      confirm: "Check it",
+    }));
   if (!expected) return;
 
-  toast("Checking…");
+  const where = found ? sourceLabel(found.source) : null;
+  toast(where ? `Found one at ${where}. Checking…` : "Checking…");
   try {
-    const verdict = await invoke("verify_file", {
-      path: `${job.output_dir}\\${job.filename}`,
-      expected,
-    });
+    const verdict = await invoke("verify_file", { path, expected });
+    const algorithm = verdict.algorithm.toUpperCase();
     if (verdict.matched) {
-      toast(`Matches the published ${verdict.algorithm.toUpperCase()}.`);
+      toast(where ? `Matches the ${algorithm} published at ${where}.` : `Matches the published ${algorithm}.`);
     } else {
       toast(`Does not match. This file is ${verdict.actual}`, true);
     }
