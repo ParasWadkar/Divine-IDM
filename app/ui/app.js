@@ -621,7 +621,17 @@ function renderSettings(settings) {
   $("resume-on-start").checked = settings.resume_on_start;
   $("post-action").value = settings.post_action;
   $("countdown").value = String(settings.post_action_countdown_secs);
+  $("proxy-mode").value = settings.proxy ?? "system";
+  $("proxy-address").value = settings.proxy_address ?? "";
+  showProxyAddress();
   showFolder();
+}
+
+/** The address box is only meaningful for the one choice that uses it. */
+function showProxyAddress() {
+  const manual = $("proxy-mode").value === "manual";
+  $("proxy-address-row").hidden = !manual;
+  $("proxy-note").hidden = !manual;
 }
 
 
@@ -800,6 +810,8 @@ async function saveSettings(overrides = {}) {
     resume_on_start: $("resume-on-start").checked,
     post_action: $("post-action").value,
     post_action_countdown_secs: Number($("countdown").value),
+    proxy: $("proxy-mode").value,
+    proxy_address: $("proxy-address").value.trim(),
     ...overrides,
   };
   showSpeedInBits = $("speed-in-bits").getAttribute("aria-pressed") === "true";
@@ -1334,9 +1346,18 @@ $("add").addEventListener("submit", async (event) => {
   const field = $("url");
   const url = field.value.trim();
   if (!url) return;
+  const box = $("mirrors");
+  const mirrors = box.value
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
   try {
-    const queued = await invoke("add_download", { url, filename: null });
+    const queued = await invoke("add_download", { url, filename: null, mirrors });
     field.value = "";
+    // Cleared along with the address, since they belonged to it. Left
+    // behind, they would silently attach to whatever was typed next.
+    box.value = "";
+    $("mirrors-wrap").open = false;
     // Said only when one address stood for several, since otherwise the
     // download appearing in the list below says it already.
     if (queued > 1) toast(`Queued ${queued} downloads`);
@@ -1470,6 +1491,24 @@ for (const id of [
   // settings.
   $(id).addEventListener("change", () => saveSettings());
 }
+
+// Not in the list above: choosing "through a proxy" reveals a box that is
+// still empty, and the engine rightly refuses an empty proxy address. Saving
+// on the spot would answer a half-finished action with an error, so the save
+// waits until there is something to save.
+$("proxy-mode").addEventListener("change", () => {
+  showProxyAddress();
+  if ($("proxy-mode").value === "manual" && !$("proxy-address").value.trim()) {
+    $("proxy-address").focus();
+    return;
+  }
+  saveSettings();
+});
+
+$("proxy-address").addEventListener("change", () => {
+  if ($("proxy-mode").value !== "manual" || !$("proxy-address").value.trim()) return;
+  saveSettings();
+});
 
 $("choose-folder").addEventListener("click", async () => {
   const picked = await invoke("choose_folder", { start: downloadDir || null }).catch(() => null);

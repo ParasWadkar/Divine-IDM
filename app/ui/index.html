@@ -94,6 +94,28 @@
           </div>
         </header>
 
+        <!-- Behind a disclosure, and closed by default: having two addresses
+             for one file is a rare thing to have, and this must not be
+             mistaken for the URL field's own `[1-100]` expansion, which makes
+             a hundred *different* downloads rather than one faster one. -->
+        <details id="mirrors-wrap" class="mirrors">
+          <summary>Fetch one file from several addresses</summary>
+          <label class="sr-only" for="mirrors">Other addresses, one per line</label>
+          <textarea
+            id="mirrors"
+            rows="2"
+            placeholder="One address per line, each serving the same file as the one above."
+            spellcheck="false"
+            autocomplete="off"
+          ></textarea>
+          <p class="mirrors-note">
+            Each is checked against the address above before any of them is
+            used: the same length, and the same bytes at both ends of the
+            file. One that disagrees is reported and left out rather than
+            mixed in.
+          </p>
+        </details>
+
         <!-- Pairing is a security decision, so it interrupts rather than sitting
              in a settings pane the user may never open. -->
         <section id="pairing" class="pairing" hidden></section>
@@ -295,6 +317,43 @@
                 <span class="toggle-label">MB/s</span>
               </button>
             </div>
+
+            <h2>Connection</h2>
+
+            <!-- Three choices rather than an address box with a switch,
+                 because "however the machine is set up" is what happens by
+                 default and is genuinely different from "straight out". The
+                 HTTP client reads HTTP_PROXY from the environment unless it
+                 is told not to, so without a Direct to pick there would be
+                 no way to ask for a plain connection. -->
+            <label
+              class="row"
+              title="Applies to downloads, to the request that asks a server what a file is called, and to looking up a published hash. Torrents and FTP go their own way."
+            >
+              <span>Send requests</span>
+              <select id="proxy-mode">
+                <option value="system">however this machine is set up</option>
+                <option value="direct">straight out, ignoring any system proxy</option>
+                <option value="manual">through a proxy I name</option>
+              </select>
+            </label>
+
+            <label class="row" id="proxy-address-row" hidden>
+              <span>Proxy address</span>
+              <input
+                id="proxy-address"
+                class="text-input"
+                type="text"
+                placeholder="http://127.0.0.1:3128"
+                spellcheck="false"
+                autocomplete="off"
+              />
+            </label>
+            <p class="proxy-note" id="proxy-note" hidden>
+              http, https, socks5 or socks5h. A username or password cannot be
+              accepted here, because this file is kept in the clear — an
+              authenticated proxy is not supported yet.
+            </p>
 
             <h2>Starting up</h2>
             <label class="row switch" title="Comes up in the tray, not as a window.">

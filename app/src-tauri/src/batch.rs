@@ -82,6 +82,20 @@ fn split(input: &str) -> Option<(&str, &str, &str)> {
     Some((&input[..open], &input[open + 1..close], &input[close + 1..]))
 }
 
+/// Refuses mirrors for an address that stands for more than one file.
+///
+/// Mirrors say "all of these addresses serve *this* file". A `[1-100]` range
+/// says "these are a hundred different files". Attaching one set of mirrors
+/// to all of them would claim every mirror holds every file, which the
+/// vetting would then reject a hundred times over -- so it is refused once,
+/// here, while there is still somebody to tell.
+pub fn mirrors_allowed(addresses: usize, mirrors: &[String]) -> Result<(), String> {
+    if !mirrors.is_empty() && addresses > 1 {
+        return Err(format!("mirrors describe one file, but that address expands to {addresses}"));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -174,5 +188,27 @@ mod tests {
     #[test]
     fn the_widest_allowed_range_is_allowed() {
         assert_eq!(expand("https://example.invalid/f[1-1000].bin").unwrap().len(), MOST);
+    }
+
+    fn one_mirror() -> Vec<String> {
+        vec!["https://mirror.invalid/f.bin".to_owned()]
+    }
+
+    #[test]
+    fn mirrors_are_fine_for_a_single_address() {
+        assert!(mirrors_allowed(1, &one_mirror()).is_ok());
+    }
+
+    #[test]
+    fn mirrors_are_refused_for_an_address_that_expands() {
+        let count = expand("https://example.invalid/f[1-20].bin").unwrap().len();
+        let error = mirrors_allowed(count, &one_mirror()).unwrap_err();
+        assert!(error.contains("20"), "how many it became should be said: {error}");
+    }
+
+    #[test]
+    fn an_expanding_address_with_no_mirrors_is_still_fine() {
+        // The ordinary batch download, which this must not get in the way of.
+        assert!(mirrors_allowed(100, &[]).is_ok());
     }
 }

@@ -56,8 +56,17 @@ async fn add_download(
     state: State<'_, AppState>,
     url: String,
     filename: Option<String>,
+    mirrors: Option<Vec<String>>,
 ) -> Result<usize, String> {
     let addresses = batch::expand(url.trim())?;
+    let mirrors: Vec<String> = mirrors
+        .unwrap_or_default()
+        .into_iter()
+        .map(|mirror| mirror.trim().to_owned())
+        .filter(|mirror| !mirror.is_empty())
+        .collect();
+
+    batch::mirrors_allowed(addresses.len(), &mirrors)?;
 
     // A name was chosen for one file, so it cannot be given to all of
     // them; past the first the server's own name is the only one left.
@@ -65,7 +74,8 @@ async fn add_download(
     let mut failed: Option<String> = None;
     for (index, address) in addresses.iter().enumerate() {
         let name = if index == 0 { filename.clone() } else { None };
-        match state.add_download(address.clone(), name).await {
+        let mirrors = if index == 0 { mirrors.clone() } else { Vec::new() };
+        match state.add_download(address.clone(), name, mirrors).await {
             Ok(_) => queued += 1,
             Err(error) => failed = failed.or(Some(error)),
         }

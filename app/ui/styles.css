@@ -1380,6 +1380,80 @@ select {
   font: inherit;
 }
 
+/* The only free-text setting there is. Matched to the selects beside it
+   rather than to the address bar, which is a different size and sits on a
+   different background. */
+.row input.text-input {
+  min-width: 15rem;
+  padding: 6px 10px;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  font: inherit;
+  user-select: text;
+}
+
+/* Lines up under the address bar it belongs to, sharing the topbar's own
+   side padding so the two read as one control. */
+.mirrors {
+  padding: 0 20px 12px;
+}
+
+.mirrors > summary {
+  width: fit-content;
+  color: var(--muted);
+  font-size: 12px;
+  list-style: none;
+  cursor: pointer;
+}
+
+.mirrors > summary::-webkit-details-marker {
+  display: none;
+}
+
+.mirrors > summary:hover {
+  color: var(--text);
+}
+
+.mirrors textarea {
+  display: block;
+  width: 100%;
+  margin-top: 8px;
+  padding: 9px 12px;
+  color: var(--text);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  font: inherit;
+  /* Addresses are long and wrapping them mid-path makes them unreadable;
+     a scrollbar is kinder than a wrap. */
+  white-space: pre;
+  overflow-wrap: normal;
+  overflow-x: auto;
+  resize: vertical;
+  user-select: text;
+}
+
+.mirrors-note {
+  max-width: 60ch;
+  margin: 6px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+/* Sits under the row it belongs to, pulled up so the two read as one
+   thing rather than as a row and an unrelated paragraph. */
+.proxy-note {
+  max-width: 52ch;
+  margin: -4px 0 10px;
+  padding: 0 14px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
 .paired .hrow {
   border-radius: var(--radius);
   margin-bottom: 8px;

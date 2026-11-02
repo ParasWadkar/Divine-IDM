@@ -69,8 +69,13 @@ impl AppState {
         }
     }
 
-    pub async fn add_download(&self, url: String, filename: Option<String>) -> Result<u64, String> {
-        let request = DownloadRequest { url, filename, ..Default::default() };
+    pub async fn add_download(
+        &self,
+        url: String,
+        filename: Option<String>,
+        mirrors: Vec<String>,
+    ) -> Result<u64, String> {
+        let request = DownloadRequest { url, filename, mirrors, ..Default::default() };
         match self.request(Request::Enqueue(request)).await {
             Response::Accepted { id } => Ok(id.0),
             Response::Rejected { reason } => Err(reason),
