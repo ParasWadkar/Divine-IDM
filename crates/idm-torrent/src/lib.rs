@@ -584,4 +584,53 @@ mod tests {
             assert_eq!(limits(limit).upload_bps, None);
         }
     }
+
+    /// A `.torrent` for a folder that already holds its content, which is
+    /// also exactly what a part-finished torrent looks like on disk.
+    async fn torrent_of(dir: &Path, name: &str, file: &str, size: usize) -> PathBuf {
+        let content = dir.join(name);
+        std::fs::create_dir_all(&content).unwrap();
+        std::fs::write(content.join(file), vec![b'x'; size]).unwrap();
+
+        let made = librqbit::create_torrent(
+            &content,
+            librqbit::CreateTorrentOptions::default(),
+            &librqbit::spawn_utils::BlockingSpawner::new(1),
+        )
+        .await
+        .unwrap();
+        let path = dir.join("made.torrent");
+        std::fs::write(&path, made.as_bytes().unwrap()).unwrap();
+        path
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_torrent_does_not_take_its_files_with_it() {
+        // The one place a cancelled torrent parts company with a cancelled
+        // download. A download's `.idmpart` is scratch work nothing else
+        // could want, so cancelling deletes it. A torrent writes its real
+        // files, in their real place, under names that came from the
+        // metadata — and because resuming means writing into files that are
+        // already there, some of them may have belonged to somebody else
+        // before this job existed. Reclaiming disk is not worth that risk,
+        // so `remove(false)` is the call, and this is the test that it stays
+        // that way.
+        let dir = tempfile::tempdir().unwrap();
+        let torrent_file = torrent_of(dir.path(), "Some.Release.2024", "film.mkv", 40_000).await;
+        let film = dir.path().join("Some.Release.2024").join("film.mkv");
+
+        let session = Torrents::offline(dir.path(), dir.path().to_path_buf()).await.unwrap();
+        let source = Source::parse(torrent_file.to_str().unwrap()).unwrap();
+        let torrent = session.add(&source, dir.path()).await.unwrap();
+
+        torrent.remove(false).await.unwrap();
+
+        assert!(film.exists(), "cancelling a torrent must leave its files alone");
+        assert_eq!(
+            std::fs::metadata(&film).unwrap().len(),
+            40_000,
+            "and must leave them whole, not truncated"
+        );
+        session.stop().await;
+    }
 }
