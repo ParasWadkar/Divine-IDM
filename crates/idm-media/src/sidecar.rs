@@ -59,12 +59,22 @@ pub struct Sidecar {
 
 /// Where sidecars are looked for, in order.
 ///
-/// The bundled directory first, so a pinned, known build wins over whatever
+/// The trusted directory first, so a pinned, known build wins over whatever
 /// happens to be on `PATH` — the opposite order would let an unrelated
 /// ffmpeg somewhere in the user's environment silently take over.
-pub fn search_paths(bundled: Option<&Path>) -> Vec<PathBuf> {
+///
+/// # What `trusted` must never be
+///
+/// Anywhere this program writes files it did not choose the names of, and
+/// above all a download folder. Whatever is here is preferred over every
+/// other candidate and then executed, so a directory a web page can put an
+/// `ffmpeg.exe` into is a directory a web page can run code from. It is for
+/// a location the installer controls, or a temporary directory a test made;
+/// `None` is right everywhere else, because the two directories next to the
+/// executable are already searched below.
+pub fn search_paths(trusted: Option<&Path>) -> Vec<PathBuf> {
     let mut paths = Vec::new();
-    if let Some(dir) = bundled {
+    if let Some(dir) = trusted {
         paths.push(dir.to_path_buf());
     }
     if let Some(exe) = std::env::current_exe().ok().and_then(|p| p.parent().map(Path::to_path_buf))
@@ -76,10 +86,12 @@ pub fn search_paths(bundled: Option<&Path>) -> Vec<PathBuf> {
 }
 
 /// Finds `tool`, preferring a bundled copy, falling back to `PATH`.
-pub fn find(tool: Tool, bundled: Option<&Path>) -> Option<PathBuf> {
+///
+/// See [`search_paths`] for what `trusted` may and may not be.
+pub fn find(tool: Tool, trusted: Option<&Path>) -> Option<PathBuf> {
     let name = format!("{}{}", tool.executable(), std::env::consts::EXE_SUFFIX);
 
-    for directory in search_paths(bundled) {
+    for directory in search_paths(trusted) {
         let candidate = directory.join(&name);
         if candidate.is_file() {
             return Some(candidate);
@@ -101,8 +113,8 @@ pub fn find(tool: Tool, bundled: Option<&Path>) -> Option<PathBuf> {
 /// execute — a stub, a truncated download, something built for another
 /// architecture — fails here, in one place, rather than halfway through a
 /// mux with a diagnostic about the video.
-pub fn probe(tool: Tool, bundled: Option<&Path>) -> Result<Sidecar> {
-    let Some(path) = find(tool, bundled) else {
+pub fn probe(tool: Tool, trusted: Option<&Path>) -> Result<Sidecar> {
+    let Some(path) = find(tool, trusted) else {
         return Err(MediaError::Sidecar(format!(
             "{} was not found, and it is needed for {}",
             tool.executable(),
@@ -348,6 +360,26 @@ mod tests {
 
         let found = find(Tool::Ffmpeg, Some(&bundled)).expect("the bundled copy");
         assert_eq!(found, bundled.join(&name));
+    }
+
+    #[test]
+    fn nothing_but_the_install_location_is_searched_by_default() {
+        // The invariant the `trusted` parameter exists to let tests bend,
+        // and that production code must not. It was bent once in earnest:
+        // the stream assembler passed the user's download folder, which
+        // put a directory full of files named by web pages at the front of
+        // the search -- and the thing found there is then executed. Anything
+        // added to this list later has to come from the install location
+        // too, or this fails.
+        let here = std::env::current_exe().unwrap();
+        let here = here.parent().unwrap();
+        for path in search_paths(None) {
+            assert!(
+                path.starts_with(here),
+                "{} is not beside the executable, so something can write to it",
+                path.display(),
+            );
+        }
     }
 
     #[test]

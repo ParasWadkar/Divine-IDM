@@ -339,7 +339,12 @@ fn finish(
         return Ok((plain, false, None));
     }
 
-    match sidecar::probe(Tool::Ffmpeg, Some(&options.output_dir)) {
+    // `None`, emphatically. This used to pass the download folder, which
+    // `search_paths` then preferred over every other candidate -- so an
+    // `ffmpeg.exe` that arrived there would be the one that ran, and
+    // arriving there is what files in that folder do. The copy beside the
+    // executable is already searched without being named here.
+    match sidecar::probe(Tool::Ffmpeg, None) {
         Ok(ffmpeg) => {
             ffmpeg.run(sidecar::mux_arguments(video, audio, &target))?;
             Ok((target, true, None))
