@@ -511,7 +511,14 @@ function jobCard(job) {
     refresh.textContent = "New link";
     refresh.title = "Paste a fresh address and carry on from here";
     refresh.onclick = async () => {
-      const url = window.prompt(`A fresh address for ${job.filename}:`, job.url);
+      // Not window.prompt: the webview draws that one itself, titled
+      // "tauri.localhost says", in the system's light colours -- the app
+      // looking for a moment like a web page that got loose.
+      const url = await askFor(`A fresh address for ${job.filename}:`, {
+        value: job.url,
+        placeholder: "https://…",
+        confirm: "Use this address",
+      });
       if (url && url.trim()) await act("refresh_link", { id: job.id, url: url.trim() });
     };
     foot.append(refresh);
