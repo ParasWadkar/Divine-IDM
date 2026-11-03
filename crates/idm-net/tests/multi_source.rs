@@ -84,6 +84,46 @@ async fn a_mirror_holding_a_different_build_is_dropped_and_costs_nothing() {
 }
 
 #[tokio::test]
+async fn a_dropped_mirror_is_said_out_loud() {
+    // Dropping it is right. Dropping it without a word is not: somebody
+    // typed that address expecting it to help, and silence is
+    // indistinguishable from the feature not working.
+    let server = MockServer::start();
+    let dir = tempfile::tempdir().unwrap();
+    let bad = server.url(&format!("/mirror-tail-differs?size={SIZE}"));
+
+    let (notes, mut said) = tokio::sync::mpsc::unbounded_channel();
+    let mut config = config_for(&server, dir.path());
+    config.mirrors = vec![bad.clone()];
+    config.notes = Some(notes);
+
+    let report = download(&config).await.expect("the download should still finish");
+    assert_eq!(report.mirrors_used, 0);
+    drop(config);
+
+    let note = said.recv().await.expect("the refusal should have been passed on");
+    assert!(note.contains(&bad), "it should name the address that was left out: {note}");
+    assert!(note.contains("not being used"), "and say plainly that it is not being used: {note}",);
+}
+
+#[tokio::test]
+async fn a_download_with_nothing_to_say_says_nothing() {
+    let server = MockServer::start();
+    let dir = tempfile::tempdir().unwrap();
+
+    let (notes, mut said) = tokio::sync::mpsc::unbounded_channel();
+    let mut config = config_for(&server, dir.path());
+    config.mirrors = vec![server.url(&format!("/mirror-agrees?size={SIZE}"))];
+    config.notes = Some(notes);
+
+    let report = download(&config).await.expect("the download should finish");
+    assert_eq!(report.mirrors_used, 1, "the agreeing mirror should be used");
+    drop(config);
+
+    assert!(said.recv().await.is_none(), "a mirror that was used is not worth remarking on");
+}
+
+#[tokio::test]
 async fn a_mirror_that_cannot_be_reached_is_dropped_and_costs_nothing() {
     let server = MockServer::start();
     let dir = tempfile::tempdir().unwrap();

@@ -607,6 +607,15 @@ pub struct JobStatus {
     /// Shown so a wait looks like a wait rather than a stall.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry_in_secs: Option<u64>,
+    /// Something the download decided quietly that the person should know.
+    ///
+    /// Not an error: the download is fine and is carrying on. This is for
+    /// what was asked for and is not being used -- an extra address that
+    /// turned out to serve different bytes, say. Dropping it is right;
+    /// dropping it without a word leaves somebody who typed that address
+    /// with no way to tell whether it did anything at all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
     /// The queue holding this download, if any.
     ///
     /// Both the id and the name, because the window needs each: the id to

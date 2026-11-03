@@ -94,6 +94,29 @@ pub struct DownloadConfig {
     /// Optional because the engine must run without one — a download does
     /// not depend on it, it only starts better informed.
     pub profiles: Option<Arc<dyn ProfileStore>>,
+    /// Somewhere to say what was asked for and is not being used.
+    ///
+    /// For the things a download decides quietly and correctly, where the
+    /// deciding is invisible and the person would otherwise conclude the
+    /// feature does not work. A mirror that serves different bytes is the
+    /// case this exists for: dropping it is right, and dropping it without
+    /// a word means somebody types a second address, sees no change and no
+    /// explanation, and stops using mirrors.
+    ///
+    /// A channel rather than a callback because the receiver has to take a
+    /// lock the sender cannot wait on, and a note is worth delivering late
+    /// rather than not at all. Unbounded because there are at most a handful
+    /// per download and dropping one would defeat the point.
+    pub notes: Option<tokio::sync::mpsc::UnboundedSender<String>>,
+}
+
+impl DownloadConfig {
+    /// Passes a note on, if anyone is listening. Never fails a download.
+    fn note(&self, what: impl std::fmt::Display) {
+        if let Some(notes) = &self.notes {
+            let _ = notes.send(what.to_string());
+        }
+    }
 }
 
 impl std::fmt::Debug for DownloadConfig {
@@ -138,6 +161,7 @@ impl DownloadConfig {
             referrer: None,
             cookies: None,
             profiles: None,
+            notes: None,
         }
     }
 }
@@ -1017,6 +1041,12 @@ async fn usable_mirrors(config: &DownloadConfig, target: &Target) -> Vec<Target>
             // faith. Multi-source is an optimisation; this is the one thing
             // it must never do to earn it.
             tracing::warn!(%why, "could not sample the primary, so no mirror can be vetted");
+            config.note(format!(
+                "The extra {} being used, because the first address could not be \
+                 sampled to check {} against: {why}",
+                if config.mirrors.len() == 1 { "address is not" } else { "addresses are not" },
+                if config.mirrors.len() == 1 { "it" } else { "them" },
+            ));
             return Vec::new();
         }
     };
@@ -1037,7 +1067,10 @@ async fn usable_mirrors(config: &DownloadConfig, target: &Target) -> Vec<Target>
                 tracing::info!(%url, "mirror agrees with the primary and will be used");
                 accepted.push(mirror);
             }
-            Err(refusal) => tracing::warn!(%url, "not using this mirror: {refusal}"),
+            Err(refusal) => {
+                tracing::warn!(%url, "not using this mirror: {refusal}");
+                config.note(format!("{url} is not being used: {refusal}"));
+            }
         }
     }
     accepted

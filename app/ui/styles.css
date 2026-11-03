@@ -1041,6 +1041,16 @@ canvas {
   user-select: text;
 }
 
+/* Something worth knowing, not something that went wrong -- so the warn
+   colour rather than the bad one, and no icon. The download it sits under
+   is running perfectly well. */
+.job-note {
+  margin-top: 6px;
+  color: var(--warn);
+  font-size: 12px;
+  user-select: text;
+}
+
 .empty {
   padding: 40px 0;
   color: var(--muted);

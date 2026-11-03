@@ -534,6 +534,16 @@ function jobCard(job) {
     main.append(error);
   }
 
+  // Not an error, and styled so it does not read as one: the download is
+  // fine. This is where a second address that turned out to serve different
+  // bytes gets said out loud, rather than being dropped in silence.
+  if (job.note) {
+    const note = document.createElement("div");
+    note.className = "job-note";
+    note.textContent = job.note;
+    main.append(note);
+  }
+
   const controls = document.createElement("div");
   controls.className = "job-controls";
 

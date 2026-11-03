@@ -547,6 +547,7 @@ impl Engine {
             connections: 0,
             error: None,
             retry_in_secs: None,
+            note: None,
             queue,
             // Filled in by `status`, from the queue table as it stands when
             // the window asks.
@@ -620,6 +621,9 @@ impl Engine {
                     job.status.retry_in_secs = None;
                     job.status.state = JobState::Queued;
                     job.status.error = None;
+                    // A fresh attempt vets the extra addresses again, so
+                    // whatever it decided last time is not evidence now.
+                    job.status.note = None;
                     job.waiting = true;
                     true
                 }
@@ -734,6 +738,7 @@ impl Engine {
             connections: 0,
             error: None,
             retry_in_secs: None,
+            note: None,
             queue,
             // Filled in by `status`, from the queue table as it stands when
             // the window asks.
@@ -826,6 +831,7 @@ impl Engine {
                     "this download was authorised by your browser; start it there again".to_owned()
                 }),
                 retry_in_secs: None,
+                note: None,
                 queue: row.queue_id,
                 queue_name: None,
             };
@@ -999,6 +1005,8 @@ impl Engine {
                     job.status.state = JobState::Queued;
                     job.status.error = None;
                     job.status.retry_in_secs = None;
+                    // Said about the address that has just been replaced.
+                    job.status.note = None;
                     job.waiting = true;
                     job.attempts = 0;
                 }
@@ -1322,11 +1330,34 @@ async fn run_file(
     id: JobId,
     config: &DownloadConfig,
 ) -> std::result::Result<Option<u64>, Failure> {
+    // A place for the download to say what it decided quietly. Read by a
+    // task of its own rather than from the progress callback, because that
+    // one only ever gets the job lock on a `try_lock` -- right for a figure
+    // that arrives again in two seconds, wrong for something said once.
+    let (notes, mut incoming) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let notes_inner = Arc::clone(inner);
+    let reader = tokio::spawn(async move {
+        while let Some(note) = incoming.recv().await {
+            let mut jobs = notes_inner.jobs.lock().await;
+            if let Some(record) = jobs.get_mut(&id) {
+                record.status.note = Some(note);
+            }
+        }
+    });
+
+    let mut config = config.clone();
+    config.notes = Some(notes);
+
     let progress_inner = Arc::clone(inner);
-    let report = download_with_progress(config, move |progress: Progress| {
+    let report = download_with_progress(&config, move |progress: Progress| {
         record_progress(&progress_inner, id, &progress);
     })
-    .await?;
+    .await;
+
+    // Dropping the config drops the sender, which ends the reader.
+    drop(config);
+    let _ = reader.await;
+    let report = report?;
 
     if report.resumed_bytes > 0 {
         // Worth saying out loud: it is the difference between picking a
