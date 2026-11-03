@@ -762,6 +762,15 @@ function hideGraphTip() {
 // notification for something that happened before anyone was watching.
 const lastJobState = new Map();
 
+/**
+ * Whether a snapshot has been seen yet.
+ *
+ * The first one describes whatever was already going when the window opened,
+ * including anything the engine picked up from a previous run. None of that
+ * is news, so it is recorded without being announced.
+ */
+let snapshotsSeen = false;
+
 function requestNotificationPermission() {
   if (typeof Notification === "undefined") return;
   if (Notification.permission === "default") Notification.requestPermission();
@@ -775,7 +784,26 @@ function notifyOnStateChange(jobs) {
     seen.add(job.id);
     const was = lastJobState.get(job.id);
     lastJobState.set(job.id, job.state);
-    if (!canNotify || was === undefined || was === job.state) continue;
+    const fresh = was === undefined;
+    if (was === job.state) continue;
+
+    // A failed download is dropped from the list above the moment it fails,
+    // because a stopped progress bar is worse than no bar. That left the
+    // panel the person was watching with nothing on it and nothing said --
+    // a pasted link that failed looked like a link that was never taken.
+    // So the toast is not conditional on desktop notifications being
+    // allowed: it is the only word they get in the window itself.
+    //
+    // A job seen for the first time already failed counts. A link that is
+    // refused outright fails well inside the half second between snapshots,
+    // so there is no earlier state to have changed from -- and that is
+    // exactly the case worth saying something about. Only on the opening
+    // snapshot is it held back, where it would be old news.
+    if (job.state === "failed" && (!fresh || snapshotsSeen)) {
+      toast(`${job.filename} — ${job.error ?? "stopped unexpectedly"}`, true);
+    }
+
+    if (!canNotify || fresh) continue;
 
     if (job.state === "completed") {
       new Notification("Download finished", {
@@ -796,6 +824,8 @@ function notifyOnStateChange(jobs) {
   for (const id of lastJobState.keys()) {
     if (!seen.has(id)) lastJobState.delete(id);
   }
+
+  snapshotsSeen = true;
 }
 
 // ---------------------------------------------------------------------------
