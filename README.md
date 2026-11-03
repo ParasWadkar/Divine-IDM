@@ -11,7 +11,7 @@ account, and nothing phones home.
 
 ## Installing
 
-1. Run `DivinePulse_0.1.0_x64-setup.exe`.
+1. Run the installer — `DivinePulse_<version>_x64-setup.exe`.
 2. Windows will almost certainly warn you ("Windows protected your PC"). The
    installer is not code-signed, which is what that warning means — not that
    anything is wrong with it. Click **More info**, then **Run anyway**.
@@ -62,6 +62,12 @@ an extension you have not approved.
 - **Pause and resume.** The buttons next to a download's status. Closing the
   app or losing your connection is also safe: it picks up where it left off,
   and verifies what it already has before adding to it.
+- **Torrents and magnet links.** Paste a magnet link in the same box, or
+  double-click a `.torrent`. A torrent is usually a folder of files rather than
+  one file, so that folder is what appears in the list, and where other
+  downloads show connections a torrent shows how many peers it has found. A
+  magnet link does not know its own name until the swarm tells it, so a new one
+  sits briefly under whatever name the link carried.
 - **A link that has expired.** Big downloads often use links that stop working
   after an hour or two. Click **New link** on the stopped download, paste a
   fresh address for the same file, and it carries on from where it was
@@ -71,8 +77,10 @@ an extension you have not approved.
 
 Being straight about this so nothing surprises you:
 
-- **BitTorrent.** Double-clicking a `.torrent` opens DivinePulse, but it will
-  tell you it cannot download it. HTTP, HTTPS, FTP and SFTP only for now.
+- **Seeding.** A torrent uploads while it is downloading, because that is how
+  you get peers to send to you. Once it finishes it stops. Leaving your
+  connection seeding indefinitely is not something to start doing without
+  being asked.
 - **DRM-protected video** (Netflix, Prime Video and the like). Not a missing
   feature — it is not possible without the studio's decryption module.
 - **Video that comes as separate picture and sound tracks** needs `ffmpeg` on
