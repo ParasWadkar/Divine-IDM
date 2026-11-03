@@ -82,18 +82,25 @@
       <div class="content">
         <header class="topbar">
           <form id="add" class="add">
-            <svg class="add-mark" viewBox="0 0 24 24" aria-hidden="true"><path d="M10 13a5 5 0 0 0 7.1.1l3-3a5 5 0 0 0-7.1-7.1L11.3 4.7" /><path d="M14 11a5 5 0 0 0-7.1-.1l-3 3a5 5 0 0 0 7.1 7.1l1.7-1.7" /></svg>
-            <input
-              id="url"
-              type="url"
-              placeholder="Paste a URL, or drop a file here…"
-              spellcheck="false"
-              autocomplete="off"
-            />
-            <button type="button" id="paste" class="in-field" title="Paste from the clipboard">
-              <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="3" width="8" height="4" rx="1" /><path d="M16 5h2a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h2" /></svg>
-              <span class="sr-only">Paste from the clipboard</span>
-            </button>
+            <!-- The field and the two marks that sit inside it, wrapped so
+                 they are positioned against the field rather than the form.
+                 The form's right-hand edge is not a fixed thing: the queue
+                 picker appears there the moment a queue exists, and a button
+                 placed by eye from that edge landed on top of it. -->
+            <span class="add-field">
+              <svg class="add-mark" viewBox="0 0 24 24" aria-hidden="true"><path d="M10 13a5 5 0 0 0 7.1.1l3-3a5 5 0 0 0-7.1-7.1L11.3 4.7" /><path d="M14 11a5 5 0 0 0-7.1-.1l-3 3a5 5 0 0 0 7.1 7.1l1.7-1.7" /></svg>
+              <input
+                id="url"
+                type="url"
+                placeholder="Paste a URL, or drop a file here…"
+                spellcheck="false"
+                autocomplete="off"
+              />
+              <button type="button" id="paste" class="in-field" title="Paste from the clipboard">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="3" width="8" height="4" rx="1" /><path d="M16 5h2a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h2" /></svg>
+                <span class="sr-only">Paste from the clipboard</span>
+              </button>
+            </span>
             <!-- Hidden until there is a queue to choose. Somebody who never
                  makes one should never see a control asking which they want. -->
             <label id="queue-pick-wrap" class="queue-pick" hidden>

@@ -248,6 +248,15 @@ body {
   min-width: 0;
 }
 
+/* What the URL field's two marks are positioned against. See index.html. */
+.add-field {
+  display: flex;
+  position: relative;
+  flex: 1;
+  align-items: center;
+  min-width: 0;
+}
+
 .add-mark {
   position: absolute;
   left: 14px;
@@ -278,10 +287,12 @@ body {
   border-color: var(--accent-dim);
 }
 
-/* Sits inside the field it belongs to, so the row reads as one control. */
+/* Sits inside the field it belongs to, so the row reads as one control.
+   Offset from the field's own right edge, not the form's -- the input
+   reserves 46px of right padding for exactly this. */
 .in-field {
   position: absolute;
-  right: 160px;
+  right: 8px;
   display: flex;
   padding: 7px;
   color: var(--muted);
