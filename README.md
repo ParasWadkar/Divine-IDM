@@ -83,9 +83,11 @@ Being straight about this so nothing surprises you:
   being asked.
 - **DRM-protected video** (Netflix, Prime Video and the like). Not a missing
   feature — it is not possible without the studio's decryption module.
-- **Video that comes as separate picture and sound tracks** needs `ffmpeg` on
-  your PATH to join them. Single-track video, and every ordinary file
-  download, works without it.
+- **Video that comes as separate picture and sound tracks** needs `ffmpeg` to
+  join them, and the installer does not include one: it is 105 MB on its own,
+  for something most downloads never touch. Put `ffmpeg` on your PATH and it
+  will be used. Single-track video, and every ordinary file download, work
+  without it.
 - **macOS and Linux.** Windows only.
 
 ## If something goes wrong
@@ -115,6 +117,14 @@ Needs the Rust MSVC toolchain and Node.
 ```
 
 The installer lands in `target\release\bundle\nsis\`.
+
+`tools\fetch-sidecars.ps1` fetches ffmpeg and yt-dlp into `sidecars\`,
+checking each against the SHA-256 its publisher states before unpacking it
+and recording the hash of the program itself in `sidecars\sidecars.lock`.
+That second hash is checked again every time one of them is about to run,
+so a copy replaced after it was installed is not the one that executes. The
+two together come to about 130 MB, which is why they are fetched rather than
+kept in the repository, and why the installer does not carry them either.
 
 For development, `register-browser.ps1` points the installed browsers at your
 build in `target\release` instead of the installed copy. Run it from an

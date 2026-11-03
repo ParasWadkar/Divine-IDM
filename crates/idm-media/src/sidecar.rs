@@ -57,6 +57,43 @@ pub struct Sidecar {
     pub version: String,
 }
 
+/// The bytes each bundled sidecar is supposed to have.
+///
+/// Written by `tools/fetch-sidecars.ps1` when it fetches them, and compiled
+/// in here so the check needs nothing at runtime. Deliberately not the
+/// hashes in `manifest.json`: those are the publisher's, and they are of
+/// the archive. This is the other end of that chain -- the archive was
+/// checked against the publisher, these came out of that archive -- and it
+/// is the end that can be compared against the file actually about to run.
+///
+/// One name, one hash, one version per line; `#` starts a comment.
+const LOCK: &str = include_str!("../../../sidecars/sidecars.lock");
+
+/// The pinned SHA-256 for a bundled file, if there is one.
+fn pinned_hash(file_name: &str) -> Option<&'static str> {
+    LOCK.lines().map(str::trim).filter(|line| !line.is_empty() && !line.starts_with('#')).find_map(
+        |line| {
+            let mut parts = line.split_whitespace();
+            let name = parts.next()?;
+            let hash = parts.next()?;
+            name.eq_ignore_ascii_case(file_name).then_some(hash)
+        },
+    )
+}
+
+/// Whether this is a copy that shipped with the app, rather than one the
+/// user already had.
+///
+/// Only a shipped copy has a pinned hash to be held to. Somebody's own
+/// ffmpeg on `PATH` is theirs, and refusing to run it because it is not the
+/// build we happened to pin would be taking their machine off them.
+fn is_shipped(path: &Path) -> bool {
+    let Some(parent) = path.parent() else { return false };
+    let Ok(exe) = std::env::current_exe() else { return false };
+    let Some(beside) = exe.parent() else { return false };
+    parent == beside || parent == beside.join("sidecars")
+}
+
 /// Where sidecars are looked for, in order.
 ///
 /// The trusted directory first, so a pinned, known build wins over whatever
@@ -121,6 +158,15 @@ pub fn probe(tool: Tool, trusted: Option<&Path>) -> Result<Sidecar> {
             tool.purpose()
         )));
     };
+
+    // Before it runs, not when it was installed: the point is to notice a
+    // replacement in between, and a check that happened earlier cannot.
+    if is_shipped(&path)
+        && let Some(name) = path.file_name().and_then(|name| name.to_str())
+        && let Some(expected) = pinned_hash(name)
+    {
+        verify_checksum(&path, expected)?;
+    }
 
     let output = Command::new(&path)
         .arg(match tool {
@@ -360,6 +406,32 @@ mod tests {
 
         let found = find(Tool::Ffmpeg, Some(&bundled)).expect("the bundled copy");
         assert_eq!(found, bundled.join(&name));
+    }
+
+    #[test]
+    fn the_lock_names_a_hash_for_every_sidecar_that_ships() {
+        // An empty lock would make the check below pass by having nothing
+        // to check, which is the quiet way for this to stop working.
+        for name in ["ffmpeg.exe", "yt-dlp.exe"] {
+            let hash = pinned_hash(name).unwrap_or_else(|| panic!("{name} is not in the lock"));
+            assert_eq!(hash.len(), 64, "{name}: {hash} is not a SHA-256");
+            assert!(hash.chars().all(|c| c.is_ascii_hexdigit()), "{name}: {hash}");
+        }
+    }
+
+    #[test]
+    fn the_lock_skips_its_own_comments() {
+        assert!(LOCK.lines().any(|line| line.trim_start().starts_with('#')), "no comments to skip");
+        assert_eq!(pinned_hash("#"), None);
+        assert_eq!(pinned_hash("Generated"), None);
+        assert_eq!(pinned_hash("nothing-by-that-name.exe"), None);
+    }
+
+    #[test]
+    fn a_sidecars_name_is_matched_however_it_is_capitalised() {
+        // Windows hands back whatever case the filesystem has, which is not
+        // always the case it was written in.
+        assert_eq!(pinned_hash("FFmpeg.EXE"), pinned_hash("ffmpeg.exe"));
     }
 
     #[test]

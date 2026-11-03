@@ -3,6 +3,7 @@
 /sidecars/*
 !/sidecars/.gitkeep
 !/sidecars/manifest.json
+!/sidecars/sidecars.lock
 /app/ui/node_modules
 /app/ui/dist
 /app/src-tauri/gen
