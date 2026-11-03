@@ -1363,6 +1363,31 @@ async function retryFromHistory(job) {
 }
 
 /**
+ * Picks it up again from a different address, keeping the bytes it has.
+ *
+ * The same thing Try again does, with one field more. The engine treats a
+ * replacement address exactly as it treats a new download's -- it is no more
+ * trustworthy for having been typed in here -- and then carries on from what
+ * is already on disk, which it verifies against the journal's block
+ * checksums before adding to.
+ */
+async function relinkFromHistory(job) {
+  const url = await askFor(`A fresh address for ${job.filename}:`, {
+    value: job.url,
+    placeholder: "https://\u2026",
+    confirm: "Use this address",
+  });
+  if (!url || !url.trim()) return;
+  try {
+    await invoke("resume_from_history", { id: job.id, url: url.trim() });
+    toast("Started \u2014 check the Downloads tab");
+    showHistory();
+  } catch (error) {
+    toast(String(error), true);
+  }
+}
+
+/**
  * Fetches it again from scratch.
  *
  * A finished download has nothing to resume, so this is a new job from the
@@ -1429,6 +1454,14 @@ function historyMenuItems(job, outcome) {
       label: outcome === "failed" ? "Try again" : "Download again",
       run: () => retryFromHistory(job),
     });
+    // The reason most big downloads fail is that their address stopped
+    // working, and Try again on its own fails the same way for the same
+    // reason. New link exists for exactly this and could not be reached
+    // from here: the button that offers it lives on a download's card, and
+    // a failed download is taken off that list the moment it fails.
+    if (outcome === "failed") {
+      items.push({ label: "New link…", run: () => relinkFromHistory(job) });
+    }
   }
 
   items.push({ label: "Open folder", run: shell("reveal") });

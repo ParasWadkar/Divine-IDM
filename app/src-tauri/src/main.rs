@@ -158,8 +158,12 @@ async fn resume_job(state: State<'_, AppState>, id: u64) -> Result<(), String> {
 /// `resume_job` takes — History outlives any single run of the engine, so
 /// it has to be addressed by something that does too.
 #[tauri::command]
-async fn resume_from_history(state: State<'_, AppState>, id: i64) -> Result<(), String> {
-    state.simple(Request::ResumeFromHistory { row_id: id }).await
+async fn resume_from_history(
+    state: State<'_, AppState>,
+    id: i64,
+    url: Option<String>,
+) -> Result<(), String> {
+    state.simple(Request::ResumeFromHistory { row_id: id, url }).await
 }
 
 /// Holds a download where it is, keeping every byte it already has.

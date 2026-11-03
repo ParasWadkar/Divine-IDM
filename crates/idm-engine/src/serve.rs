@@ -643,7 +643,17 @@ impl Engine {
     /// disk regardless, exactly as they are for a paused download, so this
     /// rebuilds the same in-memory record `restore_interrupted` would have
     /// built, directly from the row, and hands it a fresh id.
-    async fn resume_history(&self, row_id: i64) -> Response {
+    async fn resume_history(&self, row_id: i64, fresh_url: Option<String>) -> Response {
+        // Vetted exactly as a new download would be, the same way
+        // `refresh_url` vets its replacement. A fresh address is no more
+        // trustworthy for having been typed into a window.
+        if let Some(url) = &fresh_url {
+            let probe = DownloadRequest { url: url.clone(), ..Default::default() };
+            if let Err(reason) = probe.validate_with(true) {
+                return Response::Rejected { reason };
+            }
+        }
+
         let Some(store) = self.inner.store.clone() else {
             return Response::Rejected { reason: "there is no download history".into() };
         };
@@ -684,8 +694,21 @@ impl Engine {
             };
         }
 
+        // The replacement wins from here on, and is written back to the row:
+        // a download picked up from History a second time should start from
+        // the address that worked, not the one that expired.
+        let url = match &fresh_url {
+            Some(url) => {
+                if let Err(error) = store.set_job_url(row.id, url) {
+                    tracing::warn!(%error, "could not record the new address");
+                }
+                url.clone()
+            }
+            None => row.url.clone(),
+        };
+
         let id = JobId(self.inner.next_id.fetch_add(1, Ordering::SeqCst));
-        let mut config = DownloadConfig::new(row.url.clone(), PathBuf::from(&row.output_dir));
+        let mut config = DownloadConfig::new(url.clone(), PathBuf::from(&row.output_dir));
         config.filename = Some(row.filename.clone());
         config.conn.per_host_max = self.inner.max_connections;
         config.referrer = row.referrer.clone();
@@ -701,7 +724,7 @@ impl Engine {
         let queue = row.queue_id;
         let status = JobStatus {
             id,
-            url: row.url.clone(),
+            url: url.clone(),
             filename: row.filename.clone(),
             output_dir: row.output_dir.clone(),
             state: JobState::Queued,
@@ -2358,7 +2381,7 @@ impl Handler for Engine {
             Request::Status { id } => self.status(id).await,
             Request::Cancel { id } => self.cancel(id).await,
             Request::Resume { id } => self.resume(id).await,
-            Request::ResumeFromHistory { row_id } => self.resume_history(row_id).await,
+            Request::ResumeFromHistory { row_id, url } => self.resume_history(row_id, url).await,
             Request::Pause { id } => self.pause(id).await,
             Request::RefreshUrl { id, url } => self.refresh_url(id, url).await,
             Request::RequestPairing { label } => self.request_pairing(client, label).await,
@@ -3472,9 +3495,86 @@ mod tests {
 
         assert!(matches!(engine.cancel(id).await, Response::Accepted { .. }));
         assert!(
-            matches!(engine.resume_history(row).await, Response::Accepted { .. }),
+            matches!(engine.resume_history(row, None).await, Response::Accepted { .. }),
             "a cancelled download must be resumable from the row it left in History",
         );
+    }
+
+    /// Makes a failed row in History, the way an expired link leaves one.
+    fn failed_row(dir: &std::path::Path, store: &idm_store::Store, url: &str) -> i64 {
+        let row = store
+            .add_job(&idm_store::NewJob {
+                url: url.into(),
+                filename: "big.bin".into(),
+                output_dir: dir.join("downloads").display().to_string(),
+                ..Default::default()
+            })
+            .unwrap();
+        store.set_job_state(row, idm_store::JobState::Failed, None).unwrap();
+        row
+    }
+
+    #[tokio::test]
+    async fn a_failed_download_can_be_picked_up_at_a_new_address() {
+        // The case the whole refresh-address feature exists for: the bytes
+        // on disk are fine and only the way back to the rest of them has
+        // gone stale. Reachable from History, because a download that failed
+        // is not in the job list any more -- and after a restart was never
+        // in it.
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(idm_store::Store::open(&dir.path().join("state.sqlite3")).unwrap());
+        let row = failed_row(dir.path(), &store, "http://127.0.0.1:9/expired.bin?sig=old");
+
+        let engine = engine_with_store(dir.path(), Arc::clone(&store));
+        let fresh = "http://127.0.0.1:9/expired.bin?sig=new".to_owned();
+        assert!(matches!(
+            engine.resume_history(row, Some(fresh.clone())).await,
+            Response::Accepted { .. }
+        ));
+
+        let Response::Status { jobs } = engine.status(None).await else { panic!("status") };
+        assert_eq!(jobs[0].url, fresh, "it should be going to the new address");
+        assert_eq!(
+            store.job(row).unwrap().unwrap().url,
+            fresh,
+            "and the row should keep it, so a second go does not use the dead one",
+        );
+    }
+
+    #[tokio::test]
+    async fn a_new_address_from_history_is_vetted_like_any_other() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(idm_store::Store::open(&dir.path().join("state.sqlite3")).unwrap());
+        let row = failed_row(dir.path(), &store, "http://127.0.0.1:9/expired.bin");
+
+        let engine = engine_with_store(dir.path(), Arc::clone(&store));
+        for bad in ["", "javascript:alert(1)", "not a url at all"] {
+            assert!(
+                matches!(
+                    engine.resume_history(row, Some(bad.into())).await,
+                    Response::Rejected { .. }
+                ),
+                "{bad} should be refused",
+            );
+        }
+        assert_eq!(
+            store.job(row).unwrap().unwrap().url,
+            "http://127.0.0.1:9/expired.bin",
+            "a refused address must not have been written to the row",
+        );
+    }
+
+    #[tokio::test]
+    async fn picking_up_from_history_without_an_address_keeps_the_old_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(idm_store::Store::open(&dir.path().join("state.sqlite3")).unwrap());
+        let row = failed_row(dir.path(), &store, "http://127.0.0.1:9/still-good.bin");
+
+        let engine = engine_with_store(dir.path(), Arc::clone(&store));
+        assert!(matches!(engine.resume_history(row, None).await, Response::Accepted { .. }));
+
+        let Response::Status { jobs } = engine.status(None).await else { panic!("status") };
+        assert_eq!(jobs[0].url, "http://127.0.0.1:9/still-good.bin");
     }
 
     #[tokio::test]

@@ -476,6 +476,16 @@ pub enum Request {
     /// keyed by the store row rather than a session-local job id.
     ResumeFromHistory {
         row_id: i64,
+        /// A replacement address, for a download whose link expired.
+        ///
+        /// Here rather than in [`Request::RefreshUrl`] because that one needs
+        /// a live job to change, and a download that failed is not live: the
+        /// registry drops it, and after a restart it was never in the
+        /// registry at all. The bytes and the journal are still on disk
+        /// either way, so reviving the row and reviving it at a new address
+        /// are the same operation with one field different.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        url: Option<String>,
     },
     /// Stops a running download, keeping its bytes so it can go on later.
     Pause {

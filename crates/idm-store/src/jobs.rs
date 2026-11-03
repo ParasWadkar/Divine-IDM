@@ -278,6 +278,19 @@ impl Store {
         Ok(())
     }
 
+    /// Records a new address for a download whose old one stopped working.
+    ///
+    /// The address is the one thing about a stored download that can go stale
+    /// on its own: a signed CDN link is good for an hour or two and the bytes
+    /// on disk outlive it by days. Writing the replacement here means a
+    /// download picked up from History a second time starts from the address
+    /// that worked rather than the one that expired.
+    pub fn set_job_url(&self, id: i64, url: &str) -> Result<()> {
+        self.conn()
+            .execute("UPDATE jobs SET url = ?1 WHERE id = ?2", rusqlite::params![url, id])?;
+        Ok(())
+    }
+
     /// Moves a job to a new state, with what stopped it if anything did.
     ///
     /// Passing `None` clears all three failure columns, which is what a retry
