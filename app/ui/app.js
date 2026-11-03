@@ -625,12 +625,12 @@ function showFolder() {
   $("reset-folder").hidden = !downloadDir;
 }
 
-function renderSettings(settings) {
+function renderSettings(settings, force = false) {
   // Always, even mid-interaction: this is the value the next save will
   // carry, and a stale one would revert the folder.
   downloadDir = settings?.download_dir ?? downloadDir;
   hiddenBrowsers = settings?.hidden_browsers ?? hiddenBrowsers;
-  if (!settings || document.activeElement?.closest("#panel-settings")) {
+  if (!settings || (!force && document.activeElement?.closest("#panel-settings"))) {
     // Not while the user is in the middle of changing something: a tick
     // landing mid-interaction would reset the control under their cursor.
     return;
@@ -1066,6 +1066,17 @@ async function saveSettings(overrides = {}) {
     toast("Settings saved");
   } catch (error) {
     toast(String(error), true);
+    // Put every control back to what the engine actually holds.
+    //
+    // This save carried the whole settings object, built from the panel, so
+    // one field the engine refuses takes the rest down with it. Leaving the
+    // refused value sitting in the control meant the next unrelated change
+    // -- a checkbox three groups away -- rebuilt the same bad object and was
+    // refused for the same reason, with an error naming a field the person
+    // had not touched. Meanwhile every control showed a state the engine had
+    // never accepted. Snapping back costs the text they just typed and is
+    // worth it: the window should not show settings that are not in force.
+    renderSettings(latest?.settings, true);
   }
 }
 
