@@ -112,12 +112,24 @@ impl AppState {
             Response::Pairings { paired, pending } => (paired, pending),
             _ => (Vec::new(), Vec::new()),
         };
+        // Here rather than only when the Queues panel is opened, because the
+        // numbers on it are what it is for: how many of a queue's downloads
+        // are going and how many are held back. Asked for once per tick
+        // alongside everything else, so the engine stays the only thing
+        // counting them -- it counts a job that has been handed a slot as
+        // running, which the window cannot tell from its own job list.
+        // Refused when there is no database, which is not an error here.
+        let queues = match self.request(Request::ListQueues).await {
+            Response::Queues { queues } => queues,
+            _ => Vec::new(),
+        };
 
         Ok(serde_json::json!({
             "jobs": jobs,
             "settings": settings,
             "paired": paired,
             "pending": pending,
+            "queues": queues,
         }))
     }
 

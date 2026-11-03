@@ -298,6 +298,7 @@ function askShellForIcon(extension) {
 
 function render(snapshot) {
   latest = snapshot;
+  takeQueues(snapshot.queues ?? []);
   renderPairing(snapshot.pending ?? []);
   renderJobs(snapshot.jobs ?? []);
   renderSettings(snapshot.settings);
@@ -829,6 +830,44 @@ async function refreshQueues() {
   refresh();
 }
 
+/**
+ * What the pickers were last built from, so they are only rebuilt when the
+ * thing they show changed.
+ *
+ * The snapshot arrives twice a second and the running and waiting counts
+ * move with it, but none of those numbers appear on an option. Rebuilding a
+ * `<select>`'s options closes it if it happens to be open, which on a list
+ * that changes twice a second means a dropdown that cannot be used at all.
+ */
+let pickerSignature = "";
+
+/**
+ * Takes the queues the snapshot carried and redraws what shows them.
+ *
+ * The panel is redrawn whenever anything changed, counts included -- that is
+ * what the panel is for. The pickers are left alone unless a name, a limit
+ * or an on/off changed, since nothing else reaches an option's label.
+ */
+function takeQueues(fresh) {
+  queues = fresh;
+
+  const signature = JSON.stringify(
+    fresh.map((queue) => [queue.id, queue.name, queue.max_concurrent, queue.enabled]),
+  );
+  if (signature !== pickerSignature) {
+    pickerSignature = signature;
+    // Every job card carries one of these too, but those are rebuilt with
+    // the card, so only the one in the top bar needs saying here.
+    showQueuePicker();
+  }
+  // Unconditionally, like the job list beside it. Skipping this when the
+  // queues themselves had not changed left the panel showing whatever it
+  // last managed to draw: a queue added while the Add button still held
+  // focus was blocked once by the guard below and then never redrawn,
+  // because nothing had "changed" by the time focus moved away.
+  renderQueues();
+}
+
 /** Fills a select with the queues, keeping `chosen` selected if it is still there. */
 function fillQueueOptions(select, chosen) {
   select.replaceChildren();
@@ -862,6 +901,15 @@ function showQueuePicker() {
 
 function renderQueues() {
   const list = $("queue-list");
+  // Mid-edit, leave it be. This redraws twice a second now, and each card
+  // holds a number field: rebuilding one while somebody is typing a new
+  // limit into it takes the cursor away mid-digit.
+  //
+  // A field, not the whole panel. A button keeps focus after it is clicked,
+  // so guarding on the panel meant pressing Add queue froze the very list
+  // the press had just added to.
+  const editing = document.activeElement;
+  if (editing?.tagName === "INPUT" && editing.closest("#panel-queues")) return;
   list.replaceChildren();
 
   if (queues.length === 0) {
