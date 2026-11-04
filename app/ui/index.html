@@ -401,11 +401,13 @@
                 <option value="system">however this machine is set up</option>
                 <option value="direct">straight out, ignoring any system proxy</option>
                 <option value="manual">through a proxy I name</option>
+                <option value="auto">through whichever proxy the network says</option>
+                <option value="pac">through the proxy a script I name decides</option>
               </select>
             </label>
 
             <label class="row" id="proxy-address-row" hidden>
-              <span>Proxy address</span>
+              <span id="proxy-address-label">Proxy address</span>
               <input
                 id="proxy-address"
                 class="text-input"
@@ -415,6 +417,11 @@
                 autocomplete="off"
               />
             </label>
+            <p class="proxy-note" id="proxy-script-note" hidden>
+              A proxy auto-config script decides which proxy to use for each
+              address. Windows fetches and runs it, so DivinePulse gets the
+              same answer every other program on this machine does.
+            </p>
             <p class="proxy-note" id="proxy-note" hidden>
               http, https, socks5 or socks5h. Put the address alone here —
               this setting is kept in the clear, so a password typed into it

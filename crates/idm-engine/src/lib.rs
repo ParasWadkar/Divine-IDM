@@ -13,6 +13,7 @@ pub mod checksum;
 pub mod credentials;
 pub mod failure;
 pub mod folder;
+pub mod pac;
 pub mod pairing;
 pub mod proxy;
 pub mod queues;

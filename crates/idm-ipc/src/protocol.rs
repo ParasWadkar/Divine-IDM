@@ -300,6 +300,18 @@ pub enum ProxySetting {
     Direct,
     /// Through [`Settings::proxy_address`].
     Manual,
+    /// Whichever proxy a script decides, per address.
+    ///
+    /// The script's location is discovered the way the rest of the machine
+    /// discovers it -- DHCP, then DNS -- which is what WPAD means. Nothing
+    /// is read from [`Settings::proxy_address`].
+    Auto,
+    /// The same, with the script fetched from [`Settings::proxy_address`].
+    ///
+    /// Sharing that field rather than taking one of its own: it holds "the
+    /// address this mode needs" in both cases, and a second field would be
+    /// one more thing for `saveSettings` to drop.
+    Pac,
 }
 
 /// Settings a client may read, and the desktop app may change.

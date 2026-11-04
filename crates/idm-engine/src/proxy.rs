@@ -69,11 +69,54 @@ pub fn vet(address: &str) -> Result<String, String> {
     Ok(trimmed.to_owned())
 }
 
-/// What these settings mean to an HTTP client.
+/// Checks the address of a proxy script.
+///
+/// Its own function rather than a branch of [`vet`], because the two accept
+/// different things: a proxy is named by host and port and may speak SOCKS,
+/// while a script is a document and is therefore fetched over http or
+/// https and nothing else.
+pub fn vet_script(address: &str) -> Result<String, String> {
+    let trimmed = address.trim();
+    if trimmed.is_empty() {
+        return Err("a proxy script needs an address, such as http://wpad/wpad.dat".into());
+    }
+    let Ok(parsed) = Url::parse(trimmed) else {
+        return Err(format!("{trimmed} is not an address a script can be fetched from"));
+    };
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(format!(
+            "a proxy script is fetched over http or https, not {}",
+            parsed.scheme()
+        ));
+    }
+    if parsed.host_str().is_none_or(str::is_empty) {
+        return Err(format!("{trimmed} names no host to fetch the script from"));
+    }
+    // Refused for the same reason a proxy address is: this goes into
+    // settings.json in the clear.
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err("a script address must not carry a username or password: this file is kept \
+                    in the clear"
+            .into());
+    }
+    Ok(trimmed.to_owned())
+}
+
+/// What these settings mean to an HTTP client, without an address in hand.
+///
+/// The automatic modes cannot be answered here: a script decides per
+/// address, so with no address there is no answer to give. They resolve to
+/// `Direct`, which is the same fallback [`resolve`] uses when a lookup
+/// fails, and for the same reason -- `System` would quietly start proxying
+/// through whatever the environment named, which is the one thing choosing
+/// automatic configuration rules out.
+///
+/// Every caller that has a URL should use [`mode_for`] instead.
 pub fn mode(settings: &Settings) -> ProxyMode {
     match settings.proxy {
         ProxySetting::System => ProxyMode::System,
         ProxySetting::Direct => ProxyMode::Direct,
+        ProxySetting::Auto | ProxySetting::Pac => ProxyMode::Direct,
         ProxySetting::Manual => match vet(&settings.proxy_address) {
             Ok(address) => ProxyMode::Manual(address),
             // A settings file edited by hand can still hold nonsense, and
@@ -84,6 +127,23 @@ pub fn mode(settings: &Settings) -> ProxyMode {
             // is the one thing choosing `Manual` rules out.
             Err(_) => ProxyMode::Direct,
         },
+    }
+}
+
+/// The same, for a caller that knows which address it is about to fetch.
+///
+/// Only this form can answer the automatic modes, because a proxy script is
+/// asked per URL. Evaluated once per download rather than once per request:
+/// every segment of a download goes to one origin, so the answer cannot
+/// differ between them, and the lookup may fetch a script over the network.
+pub async fn mode_for(settings: &Settings, url: &str) -> ProxyMode {
+    match settings.proxy {
+        ProxySetting::Auto => crate::pac::resolve(crate::pac::AutoConfig::Discover, url).await,
+        ProxySetting::Pac => match vet_script(&settings.proxy_address) {
+            Ok(script) => crate::pac::resolve(crate::pac::AutoConfig::Script(script), url).await,
+            Err(_) => ProxyMode::Direct,
+        },
+        _ => mode(settings),
     }
 }
 
@@ -149,6 +209,51 @@ mod tests {
         ] {
             let error = vet(address).unwrap_err();
             assert!(error.contains("kept in the clear"), "{address}: {error}");
+        }
+    }
+
+    #[test]
+    fn a_script_address_is_a_document_address() {
+        // Different from a proxy address, which is a host and a port and
+        // may speak SOCKS. A script is fetched, so it is http or https.
+        for address in ["http://wpad/wpad.dat", "https://intranet.example.test/proxy.pac"] {
+            assert_eq!(vet_script(address).as_deref(), Ok(address), "{address}");
+        }
+        for address in ["socks5://wpad:1080", "ftp://wpad/wpad.dat", "wpad/wpad.dat"] {
+            assert!(vet_script(address).is_err(), "{address} should be refused");
+        }
+        assert!(vet_script("").is_err());
+        assert!(vet_script("http://me:pw@wpad/wpad.dat").is_err(), "same plain-file problem");
+    }
+
+    #[tokio::test]
+    async fn the_automatic_modes_have_no_answer_without_an_address() {
+        // A script decides per address, so asking with none is a question
+        // with no answer. Direct rather than System, so the environment's
+        // proxy cannot creep back in.
+        for setting in [ProxySetting::Auto, ProxySetting::Pac] {
+            assert_eq!(mode(&with(setting, "http://wpad/wpad.dat")), ProxyMode::Direct);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_script_address_that_is_nonsense_sends_downloads_straight_out() {
+        // Rather than failing them, and rather than quietly using whatever
+        // the environment named.
+        let settings = with(ProxySetting::Pac, "not-an-address");
+        assert_eq!(mode_for(&settings, "https://example.com/a.bin").await, ProxyMode::Direct);
+    }
+
+    #[tokio::test]
+    async fn the_settled_modes_answer_the_same_either_way() {
+        // `mode_for` must not quietly change what the three non-automatic
+        // modes mean; it only adds an answer for the two that need a URL.
+        for settings in [
+            with(ProxySetting::System, ""),
+            with(ProxySetting::Direct, ""),
+            with(ProxySetting::Manual, "http://127.0.0.1:3128"),
+        ] {
+            assert_eq!(mode_for(&settings, "https://example.com/a.bin").await, mode(&settings));
         }
     }
 

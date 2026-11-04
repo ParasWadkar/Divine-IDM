@@ -345,7 +345,7 @@ async fn published_hash(
     filename: String,
     referrer: Option<String>,
 ) -> Result<Option<idm_engine::checksum::Published>, String> {
-    let proxy = state.proxy().await;
+    let proxy = state.proxy(&url).await;
     Ok(idm_engine::checksum::published(&url, referrer.as_deref(), &filename, proxy).await)
 }
 

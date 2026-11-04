@@ -90,9 +90,11 @@ impl AppState {
     /// Read through the engine rather than kept here, so the window cannot
     /// drift from what downloads are actually doing. A failure to read falls
     /// back to the default, which honours the machine's own configuration.
-    pub async fn proxy(&self) -> idm_engine::proxy::ProxyMode {
+    /// Takes the address it is about to fetch, because a proxy script
+    /// decides per address and cannot be asked without one.
+    pub async fn proxy(&self, url: &str) -> idm_engine::proxy::ProxyMode {
         match self.request(Request::GetSettings).await {
-            Response::Settings(settings) => idm_engine::proxy::mode(&settings),
+            Response::Settings(settings) => idm_engine::proxy::mode_for(&settings, url).await,
             _ => idm_engine::proxy::ProxyMode::default(),
         }
     }

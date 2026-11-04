@@ -663,9 +663,20 @@ function renderSettings(settings, force = false) {
 
 /** The address box is only meaningful for the one choice that uses it. */
 function showProxyAddress() {
-  const manual = $("proxy-mode").value === "manual";
-  $("proxy-address-row").hidden = !manual;
+  // Three modes, three shapes. `manual` and `pac` share the address box
+  // because they both need one; what they need is not the same thing, so
+  // the label and the note beside it change with the mode rather than
+  // leaving somebody to guess which is wanted.
+  const mode = $("proxy-mode").value;
+  const manual = mode === "manual";
+  const script = mode === "pac";
+  $("proxy-address-row").hidden = !manual && !script;
+  $("proxy-address-label").textContent = script ? "Script address" : "Proxy address";
+  $("proxy-address").placeholder = script ? "http://wpad/wpad.dat" : "http://127.0.0.1:3128";
   $("proxy-note").hidden = !manual;
+  // Shown for both automatic modes: it explains what is happening, and
+  // `auto` has no box of its own to explain itself with.
+  $("proxy-script-note").hidden = !script && mode !== "auto";
 }
 
 
@@ -1838,13 +1849,16 @@ for (const id of [
   $(id).addEventListener("change", () => saveSettings());
 }
 
-// Not in the list above: choosing "through a proxy" reveals a box that is
-// still empty, and the engine rightly refuses an empty proxy address. Saving
-// on the spot would answer a half-finished action with an error, so the save
-// waits until there is something to save.
+// Not in the list above: choosing a mode that needs an address reveals a box
+// that is still empty, and the engine rightly refuses an empty one. Saving on
+// the spot would answer a half-finished action with an error, so the save
+// waits until there is something to save. Both "manual" and "pac" are in that
+// position -- one wants a proxy, the other a script, and neither has it yet.
+const NEEDS_ADDRESS = ["manual", "pac"];
+
 $("proxy-mode").addEventListener("change", () => {
   showProxyAddress();
-  if ($("proxy-mode").value === "manual" && !$("proxy-address").value.trim()) {
+  if (NEEDS_ADDRESS.includes($("proxy-mode").value) && !$("proxy-address").value.trim()) {
     $("proxy-address").focus();
     return;
   }
@@ -1852,7 +1866,7 @@ $("proxy-mode").addEventListener("change", () => {
 });
 
 $("proxy-address").addEventListener("change", () => {
-  if ($("proxy-mode").value !== "manual" || !$("proxy-address").value.trim()) return;
+  if (!NEEDS_ADDRESS.includes($("proxy-mode").value) || !$("proxy-address").value.trim()) return;
   saveSettings();
 });
 

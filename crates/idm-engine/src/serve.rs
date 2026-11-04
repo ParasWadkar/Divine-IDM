@@ -409,7 +409,9 @@ impl Engine {
                 // and a network where downloads must be proxied is one where
                 // this probe would otherwise hang until its timeout and then
                 // silently fall back to guessing from the URL.
-                let proxy = crate::proxy::mode(&self.inner.settings.lock().await.clone());
+                let proxy =
+                    crate::proxy::mode_for(&self.inner.settings.lock().await.clone(), &request.url)
+                        .await;
                 name_from_server(&request, proxy).await.unwrap_or(filename)
             } else {
                 filename
@@ -500,7 +502,8 @@ impl Engine {
         config.cookies = request.cookies.clone();
         config.mirrors = request.mirrors.clone();
         config.fetch.limiter = Some(Arc::clone(&self.inner.limiter));
-        config.http.proxy = crate::proxy::mode(&self.inner.settings.lock().await.clone());
+        config.http.proxy =
+            crate::proxy::mode_for(&self.inner.settings.lock().await.clone(), &config.url).await;
         self.attach_credential(&mut config).await;
         config.profiles =
             self.inner.store.clone().map(|store| store as Arc<dyn idm_core::sched::ProfileStore>);
@@ -728,7 +731,8 @@ impl Engine {
         config.referrer = row.referrer.clone();
         config.mirrors = row.mirrors.clone();
         config.fetch.limiter = Some(Arc::clone(&self.inner.limiter));
-        config.http.proxy = crate::proxy::mode(&self.inner.settings.lock().await.clone());
+        config.http.proxy =
+            crate::proxy::mode_for(&self.inner.settings.lock().await.clone(), &config.url).await;
         self.attach_credential(&mut config).await;
         config.profiles =
             self.inner.store.clone().map(|store| store as Arc<dyn idm_core::sched::ProfileStore>);
@@ -818,7 +822,9 @@ impl Engine {
             config.referrer = row.referrer.clone();
             config.mirrors = row.mirrors.clone();
             config.fetch.limiter = Some(Arc::clone(&self.inner.limiter));
-            config.http.proxy = crate::proxy::mode(&self.inner.settings.lock().await.clone());
+            config.http.proxy =
+                crate::proxy::mode_for(&self.inner.settings.lock().await.clone(), &config.url)
+                    .await;
             self.attach_credential(&mut config).await;
             config.profiles = self
                 .inner

@@ -841,6 +841,34 @@ const routes = {
     handler: (_req, res) => sendChallenge(res, 'Basic realm="' + AUTH_REALM + '"'),
   },
 
+
+  "/proxy.pac": {
+    description:
+      "A proxy auto-config script, served so Windows' own PAC evaluator can be driven for " +
+      "real. Both branches matter: a host that should be proxied and one that should not, " +
+      "decided by shExpMatch so a genuine PAC host function is exercised rather than a " +
+      "constant being returned.",
+    handler: (_req, res) => {
+      const script = [
+        "function FindProxyForURL(url, host) {",
+        '  if (shExpMatch(host, "*.proxied.test")) {',
+        '    return "PROXY pac-proxy.example.test:8888";',
+        "  }",
+        '  return "DIRECT";',
+        "}",
+        "",
+      ].join("\n");
+      res.writeHead(200, {
+        // The type WinHTTP expects. Served as text/plain it is fetched and
+        // then ignored, which would make this test pass for the wrong
+        // reason -- every lookup would come back DIRECT.
+        "Content-Type": "application/x-ns-proxy-autoconfig",
+        "Content-Length": String(Buffer.byteLength(script)),
+      });
+      return res.end(script);
+    },
+  },
+
   "/head-disagrees": {
     description:
       "HEAD reports a different Content-Length than GET, which is why the engine probes with " +
