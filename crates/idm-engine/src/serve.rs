@@ -501,6 +501,7 @@ impl Engine {
         config.mirrors = request.mirrors.clone();
         config.fetch.limiter = Some(Arc::clone(&self.inner.limiter));
         config.http.proxy = crate::proxy::mode(&self.inner.settings.lock().await.clone());
+        self.attach_credential(&mut config).await;
         config.profiles =
             self.inner.store.clone().map(|store| store as Arc<dyn idm_core::sched::ProfileStore>);
 
@@ -555,6 +556,7 @@ impl Engine {
             error: None,
             retry_in_secs: None,
             note: None,
+            error_kind: None,
             queue,
             // Filled in by `status`, from the queue table as it stands when
             // the window asks.
@@ -628,6 +630,7 @@ impl Engine {
                     job.status.retry_in_secs = None;
                     job.status.state = JobState::Queued;
                     job.status.error = None;
+                    job.status.error_kind = None;
                     // A fresh attempt vets the extra addresses again, so
                     // whatever it decided last time is not evidence now.
                     job.status.note = None;
@@ -726,6 +729,7 @@ impl Engine {
         config.mirrors = row.mirrors.clone();
         config.fetch.limiter = Some(Arc::clone(&self.inner.limiter));
         config.http.proxy = crate::proxy::mode(&self.inner.settings.lock().await.clone());
+        self.attach_credential(&mut config).await;
         config.profiles =
             self.inner.store.clone().map(|store| store as Arc<dyn idm_core::sched::ProfileStore>);
 
@@ -746,6 +750,7 @@ impl Engine {
             error: None,
             retry_in_secs: None,
             note: None,
+            error_kind: None,
             queue,
             // Filled in by `status`, from the queue table as it stands when
             // the window asks.
@@ -814,7 +819,7 @@ impl Engine {
             config.mirrors = row.mirrors.clone();
             config.fetch.limiter = Some(Arc::clone(&self.inner.limiter));
             config.http.proxy = crate::proxy::mode(&self.inner.settings.lock().await.clone());
-            config.http.proxy = crate::proxy::mode(&self.inner.settings.lock().await.clone());
+            self.attach_credential(&mut config).await;
             config.profiles = self
                 .inner
                 .store
@@ -839,6 +844,7 @@ impl Engine {
                 }),
                 retry_in_secs: None,
                 note: None,
+                error_kind: None,
                 queue: row.queue_id,
                 queue_name: None,
             };
@@ -956,6 +962,7 @@ impl Engine {
                     job.status.connections = 0;
                     job.status.retry_in_secs = None;
                     job.status.error = None;
+                    job.status.error_kind = None;
                     // Stopped by hand, so it is not waiting for a slot; it
                     // waits for the user instead.
                     job.waiting = false;
@@ -1011,6 +1018,7 @@ impl Engine {
                     job.status.url = url;
                     job.status.state = JobState::Queued;
                     job.status.error = None;
+                    job.status.error_kind = None;
                     job.status.retry_in_secs = None;
                     // Said about the address that has just been replaced.
                     job.status.note = None;
@@ -1044,6 +1052,7 @@ impl Engine {
                     // Nothing went wrong, so there is nothing to report. The
                     // state is the whole story.
                     record.status.error = None;
+                    record.status.error_kind = None;
                     record.waiting = false;
                     record.claimed.clone()
                 }
@@ -1181,6 +1190,7 @@ async fn schedule_retry(inner: &Arc<Inner>, id: JobId, failure: Failure) {
         job.status.connections = 0;
         job.status.retry_in_secs = Some(delay.as_secs());
         job.status.error = Some(failure.summary.clone());
+        job.status.error_kind = Some(failure.kind.code().to_owned());
         job.waiting = false;
         job.abort = None;
         delay
@@ -1893,6 +1903,7 @@ async fn finish(
         // of space for this, and the full text is kept in the store for
         // History's Technical details to open.
         record.status.error = failure.as_ref().map(|failure| failure.summary.clone());
+        record.status.error_kind = failure.as_ref().map(|failure| failure.kind.code().to_owned());
         if let Some(total) = total {
             record.status.total = Some(total);
             record.status.downloaded = total;
@@ -1939,6 +1950,29 @@ impl Engine {
                 Response::PairingPending { request_id }
             }
         }
+    }
+
+    /// Attaches the saved password for this download's host, if there is one.
+    ///
+    /// The same `Arc` goes to both halves of the config, and that is the
+    /// point rather than an economy: `http` is used by the probe and the
+    /// mirror check, `fetch` by every lane, and a Digest nonce count has to
+    /// be one counter across all of them. Two would hand out repeats and a
+    /// correct server would start refusing them under load.
+    ///
+    /// Nothing is read before this, so a download from a host with no saved
+    /// password carries no credential at all rather than an empty one.
+    async fn attach_credential(&self, config: &mut idm_net::download::DownloadConfig) {
+        let Some(found) = crate::credentials::for_url(self.inner.vault.as_ref(), &config.url)
+        else {
+            return;
+        };
+        let state = Arc::new(idm_net::auth::AuthState::new(idm_net::auth::HttpCredential::new(
+            found.username,
+            found.secret.expose(),
+        )));
+        config.http.auth = Some(Arc::clone(&state));
+        config.fetch.auth = Some(state);
     }
 
     /// Managing pairings is refused for browser clients.

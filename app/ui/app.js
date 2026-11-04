@@ -503,6 +503,19 @@ function jobCard(job) {
 
   const going = job.state === "running" || job.state === "queued";
 
+  // A site that wants a password gets Sign in rather than New link: the
+  // address is fine and a fresh one would change nothing. Matched on the
+  // kind rather than on the message, so rewording the message cannot
+  // silently remove the button.
+  if (!going && job.error_kind === "auth.required") {
+    const signIn = document.createElement("button");
+    signIn.className = "ghost";
+    signIn.textContent = "Sign in";
+    signIn.title = `Save a password for this site and carry on from here`;
+    signIn.onclick = () => signInFor(job);
+    foot.append(signIn);
+  }
+
   // For a link that expired while the download sat waiting. The bytes are
   // still good; only the way back to the rest of them is stale, so this
   // changes the address and keeps the file.
@@ -2096,6 +2109,35 @@ async function refreshBrowsers() {
     toast(String(error), true);
   }
   renderBrowsers();
+}
+
+/**
+ * Saves a password for a stopped download's site, then starts it again.
+ *
+ * The site is filled in from the job, because the person is looking at the
+ * download rather than at a list of sites and should not have to copy an
+ * address between the two. The resume is part of the same action for the
+ * same reason: having just supplied what was missing, being left with a
+ * still-failed download and a second button to find would be absurd.
+ */
+async function signInFor(job) {
+  const answer = await askForCredential({
+    scope: { kind: "site", url: job.url },
+    username: "",
+    label: job.url,
+  });
+  if (!answer) return;
+  try {
+    credentialRows = await invoke("save_credential", answer);
+  } catch (error) {
+    toast(String(error), true);
+    return;
+  }
+  renderCredentials();
+  // The engine reads the vault when a download starts, so the saved
+  // password only takes effect on the next attempt.
+  await act("resume_job", { id: job.id });
+  toast(`Signed in and started ${job.filename} again`);
 }
 
 // -------------------------------------------------------- saved passwords

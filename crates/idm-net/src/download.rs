@@ -361,7 +361,17 @@ pub async fn probe(config: &DownloadConfig) -> Result<Target, DownloadError> {
     // crude, but an order of magnitude is all the guard needs, and it is
     // the difference between protecting a 600 ms link and not.
     let sent_at = Instant::now();
-    let response = request.send().await.map_err(DownloadError::Request)?;
+    // Through the auth helper rather than `send`, so a server that wants a
+    // password gets answered here -- once -- instead of the 401 travelling
+    // all the way to the scheduler as an unexplained failure.
+    let (response, refusal) = crate::auth::send(request, config.http.auth.as_ref(), &config.url)
+        .await
+        .map_err(DownloadError::Request)?;
+    // Said out loud whatever happens next: "this server wants Windows
+    // sign-in" is worth having even on a response that then succeeds.
+    if let Some(refusal) = refusal {
+        config.note(&refusal);
+    }
     let probe_rtt = sent_at.elapsed() / 2;
     let facts = OwnedFacts::from_response(&response);
     let outcome = classify(requested, &facts.as_facts());

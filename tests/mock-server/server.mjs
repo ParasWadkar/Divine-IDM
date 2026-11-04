@@ -15,7 +15,7 @@
 // GET /_routes for the machine-readable route list.
 
 import { createServer } from "node:http";
-import { createCipheriv } from "node:crypto";
+import { createCipheriv, createHash, randomBytes } from "node:crypto";
 import { gzipSync } from "node:zlib";
 
 const DEFAULT_PORT = 8080;
@@ -91,6 +91,88 @@ function sizeFromQuery(url, fallback = 8 * MIB) {
 
 /** Per-route, per-client counters so a route can misbehave only after N hits. */
 const hitCounts = new Map();
+
+// ---------------------------------------------------------------------------
+// Signing in
+// ---------------------------------------------------------------------------
+//
+// The credentials every auth route expects. Fixed rather than configurable
+// because the tests assert on an exact Digest response, which is a hash of
+// these; a knob here would only move that constant somewhere else.
+const AUTH_USER = "mufasa";
+const AUTH_PASS = "circle-of-life";
+const AUTH_REALM = "downloads@example.org";
+
+// Nonces this server has handed out and still accepts. A route can issue one
+// already expired to exercise the `stale=true` path, which is what decides
+// whether a download longer-lived than a nonce survives.
+const liveNonces = new Map();
+
+function mintNonce(stale = false) {
+  const nonce = randomBytes(16).toString("hex");
+  liveNonces.set(nonce, { stale, used: new Set() });
+  return nonce;
+}
+
+function authHash(algorithm, text) {
+  return createHash(algorithm === "SHA-256" ? "sha256" : "md5").update(text).digest("hex");
+}
+
+/** Parses an `Authorization` header's comma-separated parameters. */
+function authParams(header) {
+  const out = {};
+  // Quoted values may contain commas, so the match respects quoting rather
+  // than splitting on the comma.
+  const pattern = /(\w+)=(?:"((?:[^"\\]|\\.)*)"|([^,\s]+))/g;
+  let match;
+  while ((match = pattern.exec(header)) !== null) {
+    out[match[1].toLowerCase()] = (match[2] ?? match[3]).replace(/\\(.)/g, "$1");
+  }
+  return out;
+}
+
+/**
+ * Checks a Digest `Authorization` against what this server would compute.
+ *
+ * Returns "ok", "stale" when the nonce has expired though the password was
+ * right, or "no" otherwise. Keeping those apart is the whole point: a stale
+ * nonce must not look like a wrong password.
+ */
+function checkDigest(req, algorithm, requireQop) {
+  const header = req.headers.authorization;
+  if (!header || !/^Digest /i.test(header)) return "no";
+  const p = authParams(header);
+  if (p.username !== AUTH_USER) return "no";
+  if (!liveNonces.has(p.nonce)) return "no";
+
+  const ha1 = authHash(algorithm, AUTH_USER + ":" + AUTH_REALM + ":" + AUTH_PASS);
+  const ha2 = authHash(algorithm, req.method + ":" + p.uri);
+  const expected = requireQop
+    ? authHash(algorithm, [ha1, p.nonce, p.nc, p.cnonce, "auth", ha2].join(":"))
+    : authHash(algorithm, [ha1, p.nonce, ha2].join(":"));
+  if (p.response !== expected) return "no";
+
+  if (requireQop) {
+    // The nonce count must be unique per nonce. Repeats are exactly what a
+    // per-lane counter would produce, so this is the check that catches it.
+    const record = liveNonces.get(p.nonce);
+    if (record.used.has(p.nc)) return "no";
+    record.used.add(p.nc);
+    if (record.stale) return "stale";
+  }
+  return "ok";
+}
+
+function sendChallenge(res, value) {
+  res.writeHead(401, { "WWW-Authenticate": value, "Content-Length": "0" });
+  res.end();
+}
+
+function basicExpected() {
+  return "Basic " + Buffer.from(AUTH_USER + ":" + AUTH_PASS).toString("base64");
+}
+
+
 function bumpHits(key) {
   const next = (hitCounts.get(key) ?? 0) + 1;
   hitCounts.set(key, next);
@@ -648,6 +730,115 @@ const routes = {
       req.on("close", () => clearInterval(tick));
       return undefined;
     },
+  },
+
+
+  "/auth-basic": {
+    description:
+      "401 with a Basic challenge until the right password arrives, then serves the file " +
+      "normally. The plainest case, and what every other auth route is compared against.",
+    handler: (req, res, url) => {
+      if (req.headers.authorization !== basicExpected()) {
+        return sendChallenge(res, 'Basic realm="' + AUTH_REALM + '"');
+      }
+      return serveHonestly(req, res, sizeFromQuery(url));
+    },
+  },
+
+  "/auth-digest": {
+    description:
+      "401 with a Digest challenge using MD5 and qop=auth, then serves the file. Rejects a " +
+      "repeated nonce count, which is what a per-lane counter would produce.",
+    handler: (req, res, url) => {
+      if (checkDigest(req, "MD5", true) !== "ok") {
+        return sendChallenge(
+          res,
+          'Digest realm="' + AUTH_REALM + '", qop="auth", algorithm=MD5, nonce="' +
+            mintNonce() + '"',
+        );
+      }
+      return serveHonestly(req, res, sizeFromQuery(url));
+    },
+  },
+
+  "/auth-digest-sha256": {
+    description:
+      "As /auth-digest but algorithm=SHA-256, which RFC 7616 added and which the engine " +
+      "must prefer when a server offers both.",
+    handler: (req, res, url) => {
+      if (checkDigest(req, "SHA-256", true) !== "ok") {
+        return sendChallenge(
+          res,
+          'Digest realm="' + AUTH_REALM + '", qop="auth", algorithm=SHA-256, nonce="' +
+            mintNonce() + '"',
+        );
+      }
+      return serveHonestly(req, res, sizeFromQuery(url));
+    },
+  },
+
+  "/auth-digest-no-qop": {
+    description:
+      "The RFC 2617 form with no qop, so no nc and no cnonce, and a differently hashed " +
+      "response. Still what a great many devices serve.",
+    handler: (req, res, url) => {
+      if (checkDigest(req, "MD5", false) !== "ok") {
+        return sendChallenge(
+          res,
+          'Digest realm="' + AUTH_REALM + '", algorithm=MD5, nonce="' + mintNonce() + '"',
+        );
+      }
+      return serveHonestly(req, res, sizeFromQuery(url));
+    },
+  },
+
+  "/auth-stale": {
+    description:
+      "Issues a nonce that is already expired, so the first correct answer comes back 401 " +
+      "with stale=true. Proves a nonce outliving its download is retried rather than " +
+      "mistaken for a wrong password.",
+    handler: (req, res, url) => {
+      const verdict = checkDigest(req, "MD5", true);
+      if (verdict === "ok") return serveHonestly(req, res, sizeFromQuery(url));
+      if (verdict === "stale") {
+        return sendChallenge(
+          res,
+          'Digest realm="' + AUTH_REALM + '", qop="auth", algorithm=MD5, nonce="' +
+            mintNonce() + '", stale=true',
+        );
+      }
+      return sendChallenge(
+        res,
+        'Digest realm="' + AUTH_REALM + '", qop="auth", algorithm=MD5, nonce="' +
+          mintNonce(true) + '"',
+      );
+    },
+  },
+
+  "/auth-ntlm-only": {
+    description:
+      "Offers nothing but Windows sign-in, so the refusal can be asserted as prose rather " +
+      "than as a bare 401.",
+    handler: (_req, res) => sendChallenge(res, "Negotiate, NTLM"),
+  },
+
+  "/auth-both": {
+    description:
+      "Offers Negotiate, NTLM and Basic together, which is what a Windows server commonly " +
+      "does. The engine must use the Basic rather than take the refusal.",
+    handler: (req, res, url) => {
+      if (req.headers.authorization !== basicExpected()) {
+        return sendChallenge(res, 'Negotiate, NTLM, Basic realm="' + AUTH_REALM + '"');
+      }
+      return serveHonestly(req, res, sizeFromQuery(url));
+    },
+  },
+
+  "/auth-wrong-password": {
+    description:
+      "Never accepts anything, so a wrong password is refused once rather than retried " +
+      "until the server locks the account.",
+    handler: (_req, res) => sendChallenge(res, 'Basic realm="' + AUTH_REALM + '"'),
   },
 
   "/head-disagrees": {

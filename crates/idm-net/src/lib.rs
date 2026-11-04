@@ -6,6 +6,7 @@
 //! concurrency real, header extraction, and the loop that turns a response body
 //! into write jobs.
 
+pub mod auth;
 pub mod budget;
 pub mod checksum;
 pub mod client;

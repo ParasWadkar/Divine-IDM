@@ -51,6 +51,14 @@ pub enum Kind {
     UrlInvalid,
     UrlRedirectFailure,
 
+    /// The site wants a password, and none that we have satisfies it.
+    ///
+    /// Its own kind rather than `HttpForbidden`, because what the person
+    /// should do about it is completely different: a forbidden download
+    /// usually wants a fresh address, and this one wants a password. The
+    /// window offers Sign in on this and New link on the other.
+    AuthRequired,
+
     DownloadInterrupted,
     DownloadIntegrity,
     DownloadUnknownSize,
@@ -78,6 +86,7 @@ impl Kind {
             Self::HttpForbidden => "http.forbidden",
             Self::HttpNotFound => "http.not_found",
             Self::HttpServerError => "http.server_error",
+            Self::AuthRequired => "auth.required",
             Self::UrlExpired => "url.expired",
             Self::UrlInvalid => "url.invalid",
             Self::UrlRedirectFailure => "url.redirect_failure",
@@ -241,6 +250,9 @@ fn from_probe(outcome: &ProbeOutcome) -> (Kind, String) {
         ProbeOutcome::NeedsNewUrl => {
             (Kind::HttpNotFound, "The file is no longer at that address".into())
         }
+        // By the time this is reached the transport has already offered any
+        // saved password, so there is nothing left to try automatically.
+        ProbeOutcome::NeedsSignIn => (Kind::AuthRequired, "This needs a password".into()),
         ProbeOutcome::Throttled => {
             (Kind::ServerUnavailable, "The server asked us to slow down".into())
         }
@@ -260,7 +272,8 @@ fn from_probe(outcome: &ProbeOutcome) -> (Kind, String) {
 fn from_status(code: u16) -> (Kind, String) {
     match code {
         400 => (Kind::HttpBadRequest, "The server rejected the request".into()),
-        401 | 403 => (Kind::HttpForbidden, "The server refused access".into()),
+        401 => (Kind::AuthRequired, "This needs a password".into()),
+        403 => (Kind::HttpForbidden, "The server refused access".into()),
         404 | 410 => (Kind::HttpNotFound, "The file is no longer at that address".into()),
         500..=599 => (Kind::HttpServerError, format!("Server error (HTTP {code})")),
         _ => (Kind::Unclassified, format!("The server refused the request (HTTP {code})")),
@@ -387,6 +400,21 @@ mod tests {
     }
 
     #[test]
+    fn a_password_prompt_is_not_a_forbidden_download() {
+        // They arrive as adjacent status codes and mean opposite things to
+        // whoever is looking at the list: one wants a password, the other
+        // usually wants a fresh address. Sharing a kind would put the wrong
+        // button on the card.
+        assert_eq!(from_status(401).0, Kind::AuthRequired);
+        assert_eq!(from_status(403).0, Kind::HttpForbidden);
+        assert_eq!(
+            from_probe(&ProbeOutcome::NeedsSignIn).0,
+            Kind::AuthRequired,
+            "and the probe's own outcome agrees with the bare status",
+        );
+    }
+
+    #[test]
     fn every_kind_has_a_code_of_its_own() {
         // The code is written to the database and matched by the interface, so
         // two kinds sharing one would silently merge two rows' meanings.
@@ -404,6 +432,7 @@ mod tests {
             Kind::UrlExpired,
             Kind::UrlInvalid,
             Kind::UrlRedirectFailure,
+            Kind::AuthRequired,
             Kind::DownloadInterrupted,
             Kind::DownloadIntegrity,
             Kind::DownloadUnknownSize,

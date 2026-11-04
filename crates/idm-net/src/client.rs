@@ -101,6 +101,14 @@ pub struct HttpConfig {
     pub h2_adaptive_window: bool,
     pub pool_idle_timeout: Duration,
     pub proxy: ProxyMode,
+    /// A saved password for this host, and what it has learned about how
+    /// the host wants to be asked.
+    ///
+    /// An `Arc` because every lane needs the same one: a Digest nonce count
+    /// must be unique per nonce, and the lanes send concurrently. One per
+    /// lane would hand out repeats and a correct server would start
+    /// refusing them, intermittently and only under load.
+    pub auth: Option<std::sync::Arc<crate::auth::AuthState>>,
 }
 
 impl Default for HttpConfig {
@@ -117,6 +125,7 @@ impl Default for HttpConfig {
             h2_adaptive_window: true,
             pool_idle_timeout: Duration::from_secs(90),
             proxy: ProxyMode::default(),
+            auth: None,
         }
     }
 }

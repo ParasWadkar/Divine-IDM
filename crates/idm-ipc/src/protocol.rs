@@ -633,6 +633,15 @@ pub struct JobStatus {
     pub connections: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// What *kind* of failure, as the stable dotted code.
+    ///
+    /// Beside `error` rather than instead of it, because the two answer
+    /// different questions: `error` is the sentence shown to the person,
+    /// and this is what the window matches on to decide which button to
+    /// offer. Matching on the sentence would make the prose load-bearing,
+    /// so rewording a message would silently remove a button.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_kind: Option<String>,
     /// Seconds until the next reconnection attempt, while `Reconnecting`.
     ///
     /// Shown so a wait looks like a wait rather than a stall.

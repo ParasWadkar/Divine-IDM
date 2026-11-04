@@ -49,6 +49,12 @@ pub struct FetchConfig {
     pub partial_flush_after: Duration,
     /// The engine-wide speed limit, if there is one.
     pub limiter: Option<std::sync::Arc<crate::limiter::RateLimiter>>,
+    /// A saved password for this host, shared by every lane.
+    ///
+    /// Here rather than on `SegmentRequest` because it is per host and per
+    /// download, not per range, and because the Digest nonce count inside
+    /// it must be one counter across all of them.
+    pub auth: Option<std::sync::Arc<crate::auth::AuthState>>,
 }
 
 impl Default for FetchConfig {
@@ -57,6 +63,7 @@ impl Default for FetchConfig {
             chunk_target: DEFAULT_CHUNK_TARGET,
             partial_flush_after: DEFAULT_PARTIAL_FLUSH,
             limiter: None,
+            auth: None,
         }
     }
 }
@@ -160,7 +167,12 @@ pub async fn fetch_claim(
         builder = builder.header(COOKIE, cookies);
     }
 
-    let response = builder.send().await.map_err(FetchError::Request)?;
+    // Through the auth helper: a segment can outlive a Digest nonce, and
+    // the stale-nonce retry inside it is what keeps a long download from
+    // failing halfway for a reason that is not a wrong password.
+    let (response, _) = crate::auth::send(builder, config.auth.as_ref(), request.url)
+        .await
+        .map_err(FetchError::Request)?;
     let facts = OwnedFacts::from_response(&response);
     let outcome = classify(wanted, &facts.as_facts());
 

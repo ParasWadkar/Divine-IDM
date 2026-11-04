@@ -113,7 +113,12 @@ async fn read_window(
         request = request.header(COOKIE, cookies);
     }
 
-    let response = request.send().await.map_err(|error| error.to_string())?;
+    // A mirror behind a password is unusual but not absurd, and a 401 here
+    // would otherwise read as "that address disagrees" rather than "that
+    // address wanted signing in to".
+    let (response, _) = crate::auth::send(request, config.http.auth.as_ref(), url)
+        .await
+        .map_err(|error| error.to_string())?;
     if !response.status().is_success() {
         return Err(format!("it answered {}", response.status()));
     }

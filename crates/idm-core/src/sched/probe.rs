@@ -97,6 +97,14 @@ pub enum ProbeOutcome {
     /// Gone for good; the user must supply a refreshed address. The partial
     /// file and journal are kept so they can.
     NeedsNewUrl,
+    /// The server wants a password, and either none was saved or the one
+    /// that was saved did not satisfy it.
+    ///
+    /// Distinct from `NeedsNewUrl` because the address is fine and a new
+    /// one would change nothing, and distinct from `Restart` because
+    /// retrying unchanged is guaranteed to fail. The partial file and
+    /// journal are kept, so signing in resumes rather than restarts.
+    NeedsSignIn,
     /// Back off, honour `Retry-After`, and do **not** retry on a fresh
     /// connection — that is what turns a 429 into a temporary IP ban.
     Throttled,
@@ -122,6 +130,10 @@ impl ProbeOutcome {
                 "the server did not say how big the file is, so it cannot be split or resumed".into()
             }
             Self::Reprobe { .. } => "the size the server reported changed, so it is being checked again".into(),
+            Self::NeedsSignIn => {
+                "this needs a password. Save one for the site in Settings and start it again"
+                    .into()
+            }
             Self::ReResolve => {
  "the server refused the request. The link may have expired, or it may only be served to a browser that is signed in. Use the New link button to paste a fresh address."
                     .into()
@@ -201,6 +213,12 @@ pub fn classify(requested: ByteRange, facts: &ResponseFacts<'_>) -> ProbeOutcome
     match facts.status {
         429 | 503 | 509 => return ProbeOutcome::Throttled,
         500 | 502 | 504 => return ProbeOutcome::Throttled,
+        // Before 403, which is the other "you may not have this": a 401
+        // carries `WWW-Authenticate` and is answerable, where a 403 on a
+        // signed URL means the signature expired and re-resolving is what
+        // fixes it. The HTTP layer has already tried any saved password by
+        // the time this is reached, so a 401 here is final.
+        401 => return ProbeOutcome::NeedsSignIn,
         403 => return ProbeOutcome::ReResolve,
         404 | 410 => return ProbeOutcome::NeedsNewUrl,
         416 => {

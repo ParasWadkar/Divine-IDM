@@ -11,6 +11,12 @@ publish.workspace = true
 idm-core = { path = "../idm-core" }
 idm-media = { path = "../idm-media" }
 bytes.workspace = true
+# HTTP Digest. Both versions are already in this crate's tree via russh, so
+# declaring them costs no extra compilation -- and MD5 is here because that
+# is what Digest servers serve, not because anything chose it.
+md-5 = "0.10.6"
+sha2 = "0.10.9"
+
 httpdate.workspace = true
 reqwest.workspace = true
 thiserror.workspace = true
