@@ -503,19 +503,6 @@ function jobCard(job) {
 
   const going = job.state === "running" || job.state === "queued";
 
-  // A site that wants a password gets Sign in rather than New link: the
-  // address is fine and a fresh one would change nothing. Matched on the
-  // kind rather than on the message, so rewording the message cannot
-  // silently remove the button.
-  if (!going && job.error_kind === "auth.required") {
-    const signIn = document.createElement("button");
-    signIn.className = "ghost";
-    signIn.textContent = "Sign in";
-    signIn.title = `Save a password for this site and carry on from here`;
-    signIn.onclick = () => signInFor(job);
-    foot.append(signIn);
-  }
-
   // For a link that expired while the download sat waiting. The bytes are
   // still good; only the way back to the rest of them is stale, so this
   // changes the address and keeps the file.
@@ -1483,6 +1470,13 @@ function historyMenuItems(job, outcome) {
     // from here: the button that offers it lives on a download's card, and
     // a failed download is taken off that list the moment it fails.
     if (outcome === "failed") {
+      // A site that wants a password needs one, not a fresh address, so
+      // this comes first when that is the reason. Matched on the kind
+      // rather than on the message, because matching on prose makes the
+      // wording load-bearing: rewording it would quietly remove the entry.
+      if (job.error_kind === "auth.required") {
+        items.push({ label: "Sign in…", run: () => signInFor(job) });
+      }
       items.push({ label: "New link…", run: () => relinkFromHistory(job) });
     }
   }
@@ -2121,10 +2115,23 @@ async function refreshBrowsers() {
  * still-failed download and a second button to find would be absurd.
  */
 async function signInFor(job) {
+  // The site, not the address. One password covers the whole site, which is
+  // what the engine stores and what the list will show, so naming the exact
+  // URL here would promise something narrower than what is saved.
+  let site = job.url;
+  try {
+    site = new URL(job.url).origin;
+  } catch {
+    // An address this cannot parse is one the engine will refuse anyway,
+    // and showing it whole is better than showing nothing.
+  }
   const answer = await askForCredential({
     scope: { kind: "site", url: job.url },
     username: "",
-    label: job.url,
+    label: site,
+    // Nothing is being replaced: this is the first password for this site,
+    // reached from a download that has just been refused one.
+    replacing: false,
   });
   if (!answer) return;
   try {
@@ -2134,10 +2141,19 @@ async function signInFor(job) {
     return;
   }
   renderCredentials();
-  // The engine reads the vault when a download starts, so the saved
-  // password only takes effect on the next attempt.
-  await act("resume_job", { id: job.id });
-  toast(`Signed in and started ${job.filename} again`);
+  // From the History row rather than a live job id: a download is taken off
+  // the active list the moment it fails, so by the time anybody can reach
+  // this there is no live job left to resume. The bytes and the journal are
+  // still on disk, so this carries on rather than starting over.
+  try {
+    await invoke("resume_from_history", { id: job.id });
+    toast(`Signed in and picked ${job.filename} up again`);
+  } catch (error) {
+    // The password was still saved, which is worth saying: the next
+    // attempt will use it even though this one could not start.
+    toast(`Password saved, but it could not be started again: ${error}`, true);
+  }
+  await showHistory();
 }
 
 // -------------------------------------------------------- saved passwords
@@ -2244,9 +2260,12 @@ function askForCredential(existing) {
     // to prefill it with, and a dialog that looked prefilled would be
     // claiming to show a password it does not have.
     secret.value = "";
-    $("credential-message").textContent = existing
-      ? `Replace the password for ${existing.label}`
-      : "Save a password";
+    $("credential-message").textContent =
+      existing?.replacing === false
+        ? `Sign in to ${existing.label}`
+        : existing
+          ? `Replace the password for ${existing.label}`
+          : "Save a password";
 
     const placeholder = () =>
       (where.placeholder =
