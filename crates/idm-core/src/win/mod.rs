@@ -3,6 +3,7 @@
 //! Kept together so the `unsafe` surface is small, auditable, and covered by
 //! tests, rather than scattered through the writer and the journal.
 
+pub mod credentials;
 mod identity;
 pub mod network;
 pub mod power;
@@ -10,6 +11,7 @@ pub mod prealloc;
 pub mod privilege;
 pub mod volume;
 
+pub use credentials::{Credential, Entry as CredentialEntry, Secret, Vault, VaultError};
 pub use identity::FileIdentity;
 pub use network::net_fingerprint;
 pub use prealloc::{PreallocOptions, Preallocation, WriteMode};
