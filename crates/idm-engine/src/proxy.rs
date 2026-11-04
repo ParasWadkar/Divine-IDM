@@ -62,7 +62,7 @@ pub fn vet(address: &str) -> Result<String, String> {
     if !parsed.username().is_empty() || parsed.password().is_some() {
         return Err("a proxy address must not carry a username or password: this file is kept \
                     in the clear. Put the address alone here, then save the password under \
-                    Settings -> Saved passwords, where Windows keeps it"
+                    Settings → Saved passwords, where Windows keeps it"
             .into());
     }
 
