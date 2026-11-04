@@ -1698,6 +1698,16 @@ button.icon:hover {
   color: var(--good);
 }
 
+/* The second line under a row: what a tool is for, and where the copy in
+   use came from. Indented to the name above it rather than to the card, so
+   it reads as belonging to that row. */
+.browser-note {
+  color: var(--muted);
+  font-size: 12px;
+  padding: 0 10px 8px 28px;
+  overflow-wrap: anywhere;
+}
+
 .browser-panel {
   padding: 2px 12px 10px;
   border-top: 1px solid var(--line);

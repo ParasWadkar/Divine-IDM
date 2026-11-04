@@ -559,6 +559,22 @@ pub enum Request {
     },
     /// Cancels an armed post-download action during its countdown.
     CancelPostAction,
+    /// The external programs the app can run, and whether each is here.
+    ///
+    /// Refused for browser clients along with `FetchSidecar`: between them
+    /// they say what this machine has installed and then install more, and
+    /// a web page gets to ask for neither.
+    ListSidecars,
+    /// Downloads one of them, checked against the pinned hash, and installs
+    /// it.
+    ///
+    /// Never automatic, and the request carries no address: the name picks
+    /// an entry out of a manifest compiled into the binary, so a client
+    /// cannot choose what gets downloaded and run, only which of two known
+    /// things to fetch.
+    FetchSidecar {
+        name: String,
+    },
     Ping,
 }
 
@@ -627,6 +643,26 @@ pub struct JobStatus {
     pub queue_name: Option<String>,
 }
 
+/// One external program, and what the app knows about it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SidecarView {
+    pub name: String,
+    /// The version the app pins, which is what a fetch would install --
+    /// not necessarily the version of a copy already on this machine.
+    pub version: String,
+    /// What it is needed for, in terms of what the user wanted.
+    pub why: String,
+    /// How large the download is, so the question can be asked with the
+    /// answer to "how much will this cost me" already in it.
+    pub bytes: u64,
+    pub present: bool,
+    /// Where a present copy came from, or why an absent one is absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Response {
@@ -656,6 +692,9 @@ pub enum Response {
     Settings(Settings),
     Queues {
         queues: Vec<QueueView>,
+    },
+    Sidecars {
+        tools: Vec<SidecarView>,
     },
     Pong,
     Error {

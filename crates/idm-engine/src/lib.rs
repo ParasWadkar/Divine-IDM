@@ -16,6 +16,7 @@ pub mod pairing;
 pub mod proxy;
 pub mod queues;
 pub mod serve;
+pub mod sidecars;
 
 pub use serve::Engine;
 

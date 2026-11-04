@@ -455,6 +455,24 @@
               </select>
             </label>
 
+            <!-- The programs this app runs but did not build. Here, in the
+                 open, rather than only behind a download that has already
+                 gone wrong: the answer to "why was the sound not joined on"
+                 is a hundred-megabyte download somebody has to agree to, and
+                 agreeing to it after the fact is worse than being asked. -->
+            <section id="tools-card" class="card">
+              <h2>Video tools</h2>
+              <p class="note">
+                Some video arrives as separate picture and sound tracks.
+                Joining them needs <code>ffmpeg</code>, which is not included
+                because it is larger than the rest of this app put together. A
+                copy already on your PATH is used as it stands. One fetched
+                here is checked against the exact build DivinePulse pins —
+                when it arrives, and again every time before it runs.
+              </p>
+              <div id="tools-list" class="browser-list"></div>
+            </section>
+
             <!-- Which browsers are connected, and how to connect the rest. One
                  place for what used to be two: installing the extension and
                  listing the paired ones were the same job seen from either end. -->

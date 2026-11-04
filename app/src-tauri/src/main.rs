@@ -97,6 +97,34 @@ async fn queues(state: State<'_, AppState>) -> Result<serde_json::Value, String>
     queue_reply(state.request(Request::ListQueues).await)
 }
 
+/// The external programs the app can run, and whether each is here.
+#[tauri::command]
+async fn sidecars(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
+    match state.request(Request::ListSidecars).await {
+        Response::Sidecars { tools } => {
+            serde_json::to_value(tools).map_err(|error| error.to_string())
+        }
+        Response::Rejected { reason } => Err(reason),
+        Response::Error { message } => Err(message),
+        other => Err(format!("unexpected reply: {other:?}")),
+    }
+}
+
+/// Fetches one of them, checked against its pinned hash, and installs it.
+///
+/// Slow by nature -- a hundred megabytes -- and awaited rather than fired
+/// off, so the button that started it can stay busy until it is actually
+/// done and then say what happened. The reply is the fresh list, because
+/// the whole point of the call is that one line of it changed.
+#[tauri::command]
+async fn fetch_sidecar(
+    state: State<'_, AppState>,
+    name: String,
+) -> Result<serde_json::Value, String> {
+    state.simple(Request::FetchSidecar { name }).await?;
+    sidecars(state).await
+}
+
 /// Creates a queue, or changes how many a queue runs at once.
 ///
 /// Returns the queues as they now stand, because the engine answers these
@@ -514,6 +542,8 @@ fn main() {
             pause_job,
             refresh_link,
             queues,
+            sidecars,
+            fetch_sidecar,
             set_queue,
             enable_queue,
             remove_queue,

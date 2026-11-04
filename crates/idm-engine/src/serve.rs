@@ -1635,6 +1635,10 @@ async fn run_stream(
     options.referrer = config.referrer.clone();
     options.cookies = config.cookies.clone();
     options.limiter = config.fetch.limiter.clone();
+    // Where `Request::FetchSidecar` installs ffmpeg. Without this the fetch
+    // would succeed and change nothing: the copy would sit in the state
+    // folder while every mux went on reporting ffmpeg missing.
+    options.sidecar_dir = Some(crate::sidecars::dir());
 
     let progress_inner = Arc::clone(inner);
     let report = idm_net::stream::download(&config.url, &options, move |progress| {
@@ -2177,6 +2181,44 @@ impl Engine {
         })
     }
 
+    /// Downloading and installing a program is refused for browsers.
+    ///
+    /// Its own helper rather than `refuse_browser`, because the sentence
+    /// matters: this is the one request that would have the engine fetch an
+    /// executable and run it, so the refusal says that rather than
+    /// something about settings.
+    fn refuse_browser_sidecars(client: &ClientInfo) -> Option<Response> {
+        client.is_browser().then(|| Response::Rejected {
+            reason: "the browser integration cannot install programs".into(),
+        })
+    }
+
+    /// What the app can run, and whether it has each already.
+    fn list_sidecars(client: &ClientInfo) -> Response {
+        if let Some(refusal) = Self::refuse_browser_sidecars(client) {
+            return refusal;
+        }
+        Response::Sidecars { tools: crate::sidecars::views() }
+    }
+
+    /// Fetches one, verifies it and installs it.
+    ///
+    /// Takes no engine lock for the duration -- this is a hundred megabytes
+    /// over somebody's connection, and every download and the window's own
+    /// ticker have to keep running underneath it.
+    async fn fetch_sidecar(client: &ClientInfo, name: String) -> Response {
+        if let Some(refusal) = Self::refuse_browser_sidecars(client) {
+            return refusal;
+        }
+        match crate::sidecars::fetch(&name).await {
+            Ok(done) => {
+                tracing::info!(%done, "installed a sidecar");
+                Response::Pong
+            }
+            Err(reason) => Response::Rejected { reason },
+        }
+    }
+
     async fn get_settings(&self) -> Response {
         Response::Settings(self.inner.settings.lock().await.clone())
     }
@@ -2435,6 +2477,8 @@ impl Handler for Engine {
             Request::GetSettings => self.get_settings().await,
             Request::SetSettings(settings) => self.set_settings(client, settings).await,
             Request::CancelPostAction => self.cancel_post_action().await,
+            Request::ListSidecars => Self::list_sidecars(client),
+            Request::FetchSidecar { name } => Self::fetch_sidecar(client, name).await,
             Request::Hello { .. } => Response::Error { message: "already authenticated".into() },
         }
     }
@@ -3297,6 +3341,55 @@ mod tests {
                 matches!(engine.handle(&browser, request).await, Response::Rejected { .. }),
                 "a browser must not decide what runs and when"
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_browser_cannot_install_a_program() {
+        // The sharpest edge in the whole surface: `FetchSidecar` has the
+        // engine download an executable and then run it. The name picks an
+        // entry out of a compiled-in manifest rather than carrying an
+        // address, so even an allowed caller cannot choose what is
+        // fetched -- and a web page is not an allowed caller at all.
+        let (_dir, engine) = engine_with_queues();
+        let browser = browser();
+        pair(&engine, &browser).await;
+
+        for request in [Request::ListSidecars, Request::FetchSidecar { name: "ffmpeg".into() }] {
+            match engine.handle(&browser, request).await {
+                Response::Rejected { reason } => {
+                    assert!(reason.contains("install"), "say what was refused: {reason}");
+                }
+                other => panic!("a browser must not install programs, got {other:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn the_app_is_told_what_it_can_fetch_without_fetching_anything() {
+        let (_dir, engine) = engine_with_queues();
+        match engine.handle(&desktop(), Request::ListSidecars).await {
+            Response::Sidecars { tools } => {
+                assert!(tools.iter().any(|tool| tool.name == "ffmpeg"), "{tools:?}");
+                for tool in tools {
+                    // The size is what the question is asked with, so a
+                    // zero would make the asking dishonest.
+                    assert!(tool.bytes > 0, "{} states no size", tool.name);
+                    assert!(!tool.why.is_empty(), "{} does not say what it is for", tool.name);
+                }
+            }
+            other => panic!("the app should get the list, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn the_app_cannot_fetch_something_that_is_not_in_the_manifest() {
+        // The name is an index into a fixed list, not an instruction. A
+        // client that invents one gets a refusal rather than a download.
+        let (_dir, engine) = engine_with_queues();
+        match engine.handle(&desktop(), Request::FetchSidecar { name: "curl".into() }).await {
+            Response::Rejected { reason } => assert!(reason.contains("no sidecar"), "{reason}"),
+            other => panic!("an unknown name should be refused, got {other:?}"),
         }
     }
 

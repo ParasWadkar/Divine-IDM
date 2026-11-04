@@ -10,14 +10,20 @@ publish.workspace = true
 [dependencies]
 idm-core = { path = "../idm-core" }
 idm-ipc = { path = "../idm-ipc" }
+idm-media = { path = "../idm-media" }
 idm-net = { path = "../idm-net" }
 idm-store = { path = "../idm-store" }
 idm-torrent = { path = "../idm-torrent" }
+reqwest.workspace = true
 serde = { workspace = true }
 serde_json.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "time", "sync"] }
 tracing.workspace = true
+# Only to unpack one named file out of an archive whose hash already matched
+# the publisher's, and whose contents are then checked against the lock. No
+# compression features beyond the one these archives use.
+zip = { version = "9.3.0", default-features = false, features = ["deflate"] }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", features = [

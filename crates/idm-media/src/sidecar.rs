@@ -69,8 +69,13 @@ pub struct Sidecar {
 /// One name, one hash, one version per line; `#` starts a comment.
 const LOCK: &str = include_str!("../../../sidecars/sidecars.lock");
 
-/// The pinned SHA-256 for a bundled file, if there is one.
-fn pinned_hash(file_name: &str) -> Option<&'static str> {
+/// The pinned SHA-256 for a sidecar of this name, if there is one.
+///
+/// Public because the fetcher needs it: what it unpacks is checked against
+/// this before it is moved into place, so the file that lands is already the
+/// one [`probe`] will accept. Both ends read the same compiled-in lock, so
+/// there is no second list to drift.
+pub fn pinned_hash(file_name: &str) -> Option<&'static str> {
     LOCK.lines().map(str::trim).filter(|line| !line.is_empty() && !line.starts_with('#')).find_map(
         |line| {
             let mut parts = line.split_whitespace();
@@ -81,14 +86,19 @@ fn pinned_hash(file_name: &str) -> Option<&'static str> {
     )
 }
 
-/// Whether this is a copy that shipped with the app, rather than one the
-/// user already had.
+/// Whether this is a copy the app put here, rather than one the user
+/// already had.
 ///
-/// Only a shipped copy has a pinned hash to be held to. Somebody's own
-/// ffmpeg on `PATH` is theirs, and refusing to run it because it is not the
-/// build we happened to pin would be taking their machine off them.
-fn is_shipped(path: &Path) -> bool {
+/// Only such a copy has a pinned hash to be held to, and there are two ways
+/// to be one: it shipped beside the executable, or `managed` names the
+/// directory the app fetched it into. Somebody's own ffmpeg on `PATH` is
+/// theirs either way, and refusing to run it because it is not the build we
+/// happened to pin would be taking their machine off them.
+fn is_ours(path: &Path, managed: Option<&Path>) -> bool {
     let Some(parent) = path.parent() else { return false };
+    if managed == Some(parent) {
+        return true;
+    }
     let Ok(exe) = std::env::current_exe() else { return false };
     let Some(beside) = exe.parent() else { return false };
     parent == beside || parent == beside.join("sidecars")
@@ -151,6 +161,21 @@ pub fn find(tool: Tool, trusted: Option<&Path>) -> Option<PathBuf> {
 /// architecture — fails here, in one place, rather than halfway through a
 /// mux with a diagnostic about the video.
 pub fn probe(tool: Tool, trusted: Option<&Path>) -> Result<Sidecar> {
+    probe_in(tool, trusted, None)
+}
+
+/// Finds `tool`, treating `dir` as a directory this app filled itself.
+///
+/// The difference from [`probe`] is only the checksum: a copy found in
+/// `dir` is held to the lock, because the fetcher put it there against the
+/// manifest and nothing else should have. `dir` is still subject to every
+/// word of [`search_paths`] about what a trusted directory may be -- it is
+/// the engine's own state folder, never anywhere a download lands.
+pub fn probe_managed(tool: Tool, dir: &Path) -> Result<Sidecar> {
+    probe_in(tool, Some(dir), Some(dir))
+}
+
+fn probe_in(tool: Tool, trusted: Option<&Path>, managed: Option<&Path>) -> Result<Sidecar> {
     let Some(path) = find(tool, trusted) else {
         return Err(MediaError::Sidecar(format!(
             "{} was not found, and it is needed for {}",
@@ -161,7 +186,7 @@ pub fn probe(tool: Tool, trusted: Option<&Path>) -> Result<Sidecar> {
 
     // Before it runs, not when it was installed: the point is to notice a
     // replacement in between, and a check that happened earlier cannot.
-    if is_shipped(&path)
+    if is_ours(&path, managed)
         && let Some(name) = path.file_name().and_then(|name| name.to_str())
         && let Some(expected) = pinned_hash(name)
     {
@@ -491,6 +516,34 @@ mod tests {
         let joined: Vec<String> =
             arguments.iter().map(|a| a.to_string_lossy().into_owned()).collect();
         assert!(!joined.contains(&"-map".to_owned()), "{joined:?}");
+    }
+
+    #[test]
+    fn a_copy_in_a_directory_we_filled_is_held_to_the_lock() {
+        // The point of fetching against a pinned manifest is lost if what
+        // lands is then run without being looked at again. A stub named
+        // ffmpeg.exe is exactly what a swapped file looks like.
+        let dir = tempfile::tempdir().unwrap();
+        let name = format!("ffmpeg{}", std::env::consts::EXE_SUFFIX);
+        std::fs::write(dir.path().join(&name), b"not the pinned build").unwrap();
+
+        let error = probe_managed(Tool::Ffmpeg, dir.path()).unwrap_err().to_string();
+        assert!(error.contains("pinned checksum"), "{error}");
+    }
+
+    #[test]
+    fn a_copy_somewhere_we_merely_looked_is_not() {
+        // The other half, and the reason the two are separate calls. A
+        // directory handed to `probe` is somewhere to look; the build found
+        // there is not something this project chose, so pinning it would be
+        // refusing to run the user's own ffmpeg for not being ours.
+        let dir = tempfile::tempdir().unwrap();
+        let name = format!("ffmpeg{}", std::env::consts::EXE_SUFFIX);
+        let path = dir.path().join(&name);
+        std::fs::write(&path, b"somebody else's ffmpeg").unwrap();
+
+        assert!(!is_ours(&path, None), "a temp directory is not ours");
+        assert!(is_ours(&path, Some(dir.path())), "it is once we say we filled it");
     }
 
     #[test]

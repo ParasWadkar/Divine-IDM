@@ -1714,8 +1714,12 @@ function selectTab(tab, giveFocus = false) {
   // The counts move as downloads start and finish, so they are read when the
   // panel is opened rather than left at whatever they were last time.
   if (tab.dataset.tab === "queues") refreshQueues();
-  // A browser may have been installed or paired since this was last looked at.
-  if (tab.dataset.tab === "settings") refreshBrowsers();
+  // A browser may have been installed or paired since this was last looked
+  // at, and ffmpeg may have arrived on the PATH from somewhere else.
+  if (tab.dataset.tab === "settings") {
+    refreshBrowsers();
+    refreshSidecars();
+  }
   if (giveFocus) tab.focus();
 }
 
@@ -2088,6 +2092,109 @@ async function refreshBrowsers() {
     toast(String(error), true);
   }
   renderBrowsers();
+}
+
+// ------------------------------------------------------------ video tools
+
+// The external programs the engine can run, as it last described them.
+let sidecarRows = [];
+// Names currently being fetched, so the button stays busy and a second
+// click cannot start the same hundred-megabyte download twice.
+const fetching = new Set();
+
+async function refreshSidecars() {
+  try {
+    sidecarRows = await invoke("sidecars");
+  } catch (error) {
+    sidecarRows = [];
+    toast(String(error), true);
+  }
+  renderSidecars();
+}
+
+function renderSidecars() {
+  const list = $("tools-list");
+  list.replaceChildren(
+    ...(sidecarRows.length
+      ? sidecarRows.map(sidecarRow)
+      : [empty("The engine did not say which tools it can use.")]),
+  );
+}
+
+function sidecarRow(tool) {
+  const wrap = document.createElement("div");
+  wrap.className = "browser";
+
+  const line = document.createElement("div");
+  line.className = "browser-row";
+
+  const dot = document.createElement("span");
+  dot.className = tool.present ? "dot good" : "dot";
+  dot.setAttribute("aria-hidden", "true");
+
+  const name = document.createElement("span");
+  name.className = "browser-name";
+  name.textContent = tool.name;
+
+  const status = document.createElement("span");
+  status.className = `browser-status ${tool.present ? "connected" : "not_connected"}`;
+  // What it is, not a yes or no: a present copy may be the user's own build
+  // at a different version, and that is worth seeing rather than hiding
+  // behind a tick.
+  status.textContent = tool.present ? (tool.detail ?? "Installed") : "Not installed";
+
+  const spacer = document.createElement("span");
+  spacer.className = "spacer";
+  line.append(dot, name, status, spacer);
+
+  const busy = fetching.has(tool.name);
+  const button = document.createElement("button");
+  button.className = tool.present ? "ghost" : "";
+  button.disabled = busy;
+  button.textContent = busy ? "Fetching…" : tool.present ? "Fetch again" : `Get it (${bytes(tool.bytes)})`;
+  // The size is in the label rather than a tooltip, because it is the whole
+  // of what somebody is agreeing to and a tooltip is not an agreement.
+  button.title = tool.present
+    ? `Download ${tool.name} ${tool.version} again and replace what is here`
+    : `Download ${bytes(tool.bytes)} from the publisher, checked against the build DivinePulse pins`;
+  button.onclick = () => getSidecar(tool);
+  line.append(button);
+
+  wrap.append(line);
+
+  const why = document.createElement("div");
+  why.className = "browser-note";
+  // Both halves: what it is for, and where the copy in use came from. An
+  // absent tool's `detail` is the refusal, which is the useful line there.
+  why.textContent = tool.present && tool.path ? `For ${tool.why}. ${tool.path}` : `For ${tool.why}.`;
+  wrap.append(why);
+
+  return wrap;
+}
+
+async function getSidecar(tool) {
+  if (fetching.has(tool.name)) return;
+
+  const sure = await confirmDialog(
+    `Download ${tool.name} ${tool.version} — ${bytes(tool.bytes)} — and install it for DivinePulse to use? ` +
+      `It is fetched from its publisher and refused unless it matches the build this app pins.`,
+    { confirm: "Download it" },
+  );
+  if (!sure) return;
+
+  fetching.add(tool.name);
+  renderSidecars();
+  try {
+    // The reply is the fresh list: a fetch changes exactly one line of it,
+    // and asking again separately would show a list from another instant.
+    sidecarRows = await invoke("fetch_sidecar", { name: tool.name });
+    toast(`${tool.name} is installed`);
+  } catch (error) {
+    toast(String(error), true);
+  } finally {
+    fetching.delete(tool.name);
+    renderSidecars();
+  }
 }
 
 const STATUS = {

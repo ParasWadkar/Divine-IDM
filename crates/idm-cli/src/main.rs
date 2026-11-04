@@ -855,6 +855,9 @@ async fn download_stream(
     options.referrer = args.referrer.clone();
     options.cookies = args.cookies.clone();
     options.max_height = args.max_height;
+    // The same folder the app installs a fetched ffmpeg into, so a tool
+    // fetched from the window is found here too rather than only there.
+    options.sidecar_dir = Some(idm_engine::sidecars::dir());
 
     let quiet = args.quiet;
     let outcome = idm_net::stream::download(url, &options, move |progress| {

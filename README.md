@@ -68,6 +68,10 @@ an extension you have not approved.
   downloads show connections a torrent shows how many peers it has found. A
   magnet link does not know its own name until the swarm tells it, so a new one
   sits briefly under whatever name the link carried.
+- **Video tools.** Settings → **Video tools** says whether `ffmpeg` is
+  available and offers to fetch it. What arrives is checked against the exact
+  build DivinePulse pins — when it downloads, and again every time before it
+  runs — so a copy replaced afterwards is not the one that executes.
 - **A link that has expired.** Big downloads often use links that stop working
   after an hour or two. Click **New link** on the stopped download, paste a
   fresh address for the same file, and it carries on from where it was
@@ -84,10 +88,12 @@ Being straight about this so nothing surprises you:
 - **DRM-protected video** (Netflix, Prime Video and the like). Not a missing
   feature — it is not possible without the studio's decryption module.
 - **Video that comes as separate picture and sound tracks** needs `ffmpeg` to
-  join them, and the installer does not include one: it is 105 MB on its own,
-  for something most downloads never touch. Put `ffmpeg` on your PATH and it
-  will be used. Single-track video, and every ordinary file download, work
-  without it.
+  join them, and the installer does not include one: it is larger than the
+  rest of the app put together, for something most downloads never touch.
+  Settings → **Video tools** will fetch it for you, and says how big the
+  download is before you agree to it; a copy already on your PATH is used
+  instead. Single-track video, and every ordinary file download, work without
+  it either way.
 - **macOS and Linux.** Windows only.
 
 ## If something goes wrong
@@ -118,7 +124,8 @@ Needs the Rust MSVC toolchain and Node.
 
 The installer lands in `target\release\bundle\nsis\`.
 
-`tools\fetch-sidecars.ps1` fetches ffmpeg and yt-dlp into `sidecars\`,
+`tools\fetch-sidecars.ps1` fetches ffmpeg and yt-dlp into `sidecars\` — the
+same job Settings → Video tools does at runtime, from the same manifest —
 checking each against the SHA-256 its publisher states before unpacking it
 and recording the hash of the program itself in `sidecars\sidecars.lock`.
 That second hash is checked again every time one of them is about to run,

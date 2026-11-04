@@ -49,6 +49,15 @@ pub struct StreamOptions {
     pub cookies: Option<String>,
     /// The engine-wide speed limit, if there is one.
     pub limiter: Option<Arc<crate::limiter::RateLimiter>>,
+    /// A directory the app fetched its own sidecars into, if it did.
+    ///
+    /// Searched ahead of `PATH`, and what is found there is held to the
+    /// pinned checksum. It must be a directory the app alone writes to --
+    /// the engine's state folder -- and `finish` refuses one that overlaps
+    /// the download folder, because a directory full of files named by web
+    /// pages is a directory a web page can run code from. That is not
+    /// hypothetical: this argument used to *be* the download folder.
+    pub sidecar_dir: Option<PathBuf>,
 }
 
 impl StreamOptions {
@@ -63,6 +72,7 @@ impl StreamOptions {
             referrer: None,
             cookies: None,
             limiter: None,
+            sidecar_dir: None,
         }
     }
 }
@@ -318,6 +328,14 @@ where
     Ok(StreamReport { path, bytes: written, segments: total, label: plan.label, muxed, note })
 }
 
+/// Whether these two directories are the same, or one is inside the other.
+///
+/// Either way the first is somewhere downloads land, which disqualifies it
+/// from holding a program this process is about to run.
+fn overlaps(sidecars: &Path, downloads: &Path) -> bool {
+    sidecars.starts_with(downloads) || downloads.starts_with(sidecars)
+}
+
 /// Produces the final file, muxing when that is needed and possible.
 ///
 /// When ffmpeg is missing the download is still delivered rather than
@@ -339,12 +357,19 @@ fn finish(
         return Ok((plain, false, None));
     }
 
-    // `None`, emphatically. This used to pass the download folder, which
-    // `search_paths` then preferred over every other candidate -- so an
-    // `ffmpeg.exe` that arrived there would be the one that ran, and
-    // arriving there is what files in that folder do. The copy beside the
-    // executable is already searched without being named here.
-    match sidecar::probe(Tool::Ffmpeg, None) {
+    // Never the download folder, and checked rather than assumed. This
+    // argument used to be the download folder, which `search_paths` then
+    // preferred over every other candidate -- so an `ffmpeg.exe` that
+    // arrived there would be the one that ran, and arriving there is what
+    // files in that folder do. A caller that makes that mistake again gets
+    // no sidecar rather than an executable of a web page's choosing.
+    let fetched = options.sidecar_dir.as_deref().filter(|dir| !overlaps(dir, &options.output_dir));
+    let found = match fetched {
+        Some(dir) => sidecar::probe_managed(Tool::Ffmpeg, dir),
+        None => sidecar::probe(Tool::Ffmpeg, None),
+    };
+
+    match found {
         Ok(ffmpeg) => {
             ffmpeg.run(sidecar::mux_arguments(video, audio, &target))?;
             Ok((target, true, None))
@@ -591,6 +616,86 @@ fn sanitise(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A single-track `.ts` plan, which is the commonest thing that wants
+    /// remuxing and so the cheapest way to reach `finish`'s sidecar lookup.
+    fn ts_plan() -> Plan {
+        Plan {
+            video: Track {
+                init: None,
+                segments: vec!["https://x/1.ts".into()],
+                container: "ts",
+                decryption: None,
+            },
+            audio: None,
+            live: false,
+            label: "720p".into(),
+        }
+    }
+
+    #[test]
+    fn a_fetched_sidecar_is_looked_for_where_the_app_puts_it() {
+        // The join this field exists for. `run_stream` sets `sidecar_dir`,
+        // and if `finish` did not consult it a fetch would succeed and
+        // change nothing -- ffmpeg sitting in the state folder while every
+        // mux went on reporting it missing. Proven by the refusal rather
+        // than a mux: a stub there is found, held to the pinned checksum
+        // and rejected, and "wrong build" is only reachable by having
+        // looked in that directory at all.
+        let out = tempfile::tempdir().unwrap();
+        let tools = tempfile::tempdir().unwrap();
+        std::fs::write(tools.path().join("ffmpeg.exe"), b"not the pinned build").unwrap();
+        let video = out.path().join("part.ts");
+        std::fs::write(&video, b"some joined segments").unwrap();
+
+        let mut options = StreamOptions::new(out.path());
+        options.sidecar_dir = Some(tools.path().to_path_buf());
+
+        let (path, muxed, note) = finish("clip", &options, &ts_plan(), &video, None).unwrap();
+        assert!(!muxed);
+        assert_eq!(path.extension().unwrap(), "ts", "the download is still delivered");
+        let note = note.expect("a refusal should be passed on");
+        assert!(note.contains("pinned checksum"), "it looked elsewhere: {note}");
+    }
+
+    #[test]
+    fn a_sidecar_directory_that_is_the_download_folder_is_ignored() {
+        // The other half: a caller that makes the old mistake gets no
+        // sidecar rather than an executable of a web page's choosing. The
+        // stub is in the output directory this time, named exactly as a
+        // download could name it.
+        let out = tempfile::tempdir().unwrap();
+        std::fs::write(out.path().join("ffmpeg.exe"), b"arrived as a download").unwrap();
+        let video = out.path().join("part.ts");
+        std::fs::write(&video, b"some joined segments").unwrap();
+
+        let mut options = StreamOptions::new(out.path());
+        options.sidecar_dir = Some(out.path().to_path_buf());
+
+        let (_, muxed, note) = finish("clip", &options, &ts_plan(), &video, None).unwrap();
+        assert!(!muxed, "nothing in the download folder may be run");
+        let note = note.expect("a refusal should be passed on");
+        // Whatever it says, it must not be about that file being the wrong
+        // build -- that would mean it was a candidate.
+        assert!(!note.contains("pinned checksum"), "the download folder was searched: {note}");
+    }
+
+    #[test]
+    fn a_sidecar_directory_inside_the_download_folder_is_not_one() {
+        // The guard for the hole this used to have: `sidecar_dir` is
+        // searched ahead of PATH and what is found there is executed, so a
+        // directory where downloads land is a directory a web page can run
+        // code from. Both directions, because either one means the same
+        // thing -- files the app did not name the same place it looks for a
+        // program.
+        let downloads = Path::new("C:/Users/someone/Downloads");
+        assert!(overlaps(downloads, downloads), "the folder itself");
+        assert!(overlaps(&downloads.join("tools"), downloads), "a folder inside it");
+        assert!(overlaps(downloads.parent().unwrap(), downloads), "a folder containing it");
+        // And the real one, which is the whole point of having the field.
+        let state = Path::new("C:/Users/someone/AppData/Local/DivineIDM/sidecars");
+        assert!(!overlaps(state, downloads), "the state folder is not where downloads land");
+    }
 
     #[test]
     fn manifests_are_recognised_by_their_contents_first() {

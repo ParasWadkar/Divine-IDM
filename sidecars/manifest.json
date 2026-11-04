@@ -10,7 +10,12 @@
     "a change somebody reviews.",
     "",
     "Both hashes below were read from the publisher's own checksum file,",
-    "not computed from whatever happened to download here."
+    "not computed from whatever happened to download here.",
+    "",
+    "`bytes` is the size of the download, stated so the app can say what a",
+    "fetch will cost before asking. It is not a check -- the hash is the",
+    "check -- and a publisher who re-cut the archive at the same version",
+    "would fail that long before this mattered."
   ],
   "tools": [
     {
@@ -19,6 +24,7 @@
       "why": "joining a video's picture and sound tracks, and changing container",
       "url": "https://www.gyan.dev/ffmpeg/builds/packages/ffmpeg-9.0.2-essentials_build.zip",
       "sha256": "60f467265b1e312373dbcd92200c2618a74850f98d3d078e94296bb3fa2047ba",
+      "bytes": 114768076,
       "source": "https://www.gyan.dev/ffmpeg/builds/packages/ffmpeg-9.0.2-essentials_build.zip.sha256",
       "archive": "zip",
       "take": ["bin/ffmpeg.exe"]
@@ -29,6 +35,7 @@
       "why": "finding the media behind a page the built-in parsers do not cover",
       "url": "https://github.com/yt-dlp/yt-dlp/releases/download/2026.10.26/yt-dlp.exe",
       "sha256": "f5389d3698ecde4ef06f4e6b1ce0294fe9ac1396228c8990b8d3416d6d177a7d",
+      "bytes": 23575744,
       "source": "https://github.com/yt-dlp/yt-dlp/releases/download/2026.10.26/SHA2-256SUMS",
       "archive": "none",
       "take": ["yt-dlp.exe"]
