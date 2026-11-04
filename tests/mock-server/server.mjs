@@ -848,11 +848,16 @@ const routes = {
       "real. Both branches matter: a host that should be proxied and one that should not, " +
       "decided by shExpMatch so a genuine PAC host function is exercised rather than a " +
       "constant being returned.",
-    handler: (_req, res) => {
+    handler: (_req, res, url) => {
+      // `?via=host:port` names a proxy that is actually listening, so the
+      // script can be pointed at the forward proxy in proxy.mjs and the
+      // whole chain driven for real. The default names a host that does
+      // not exist, which is all the unit-level test needs.
+      const via = url.searchParams.get("via") ?? "pac-proxy.example.test:8888";
       const script = [
         "function FindProxyForURL(url, host) {",
         '  if (shExpMatch(host, "*.proxied.test")) {',
-        '    return "PROXY pac-proxy.example.test:8888";',
+        `    return "PROXY ${via}";`,
         "  }",
         '  return "DIRECT";',
         "}",
