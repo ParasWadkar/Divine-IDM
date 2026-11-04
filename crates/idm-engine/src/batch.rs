@@ -140,8 +140,6 @@ mod tests {
         assert_eq!(expand(path).unwrap(), vec![path.to_owned()]);
     }
 
-    use super::*;
-
     #[test]
     fn a_plain_url_expands_to_itself() {
         assert_eq!(expand("https://x.invalid/a.bin").unwrap(), vec!["https://x.invalid/a.bin"]);

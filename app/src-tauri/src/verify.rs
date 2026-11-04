@@ -27,6 +27,12 @@ pub enum Algorithm {
 }
 
 impl Algorithm {
+    /// How to write this algorithm's name.
+    ///
+    /// Only the tests below say it out loud: the window gets the variant
+    /// itself over IPC and spells it in its own words, so this exists to
+    /// make a failing assertion readable rather than to be displayed.
+    #[cfg(test)]
     pub fn name(self) -> &'static str {
         match self {
             Self::Md5 => "MD5",

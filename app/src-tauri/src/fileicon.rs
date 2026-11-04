@@ -123,15 +123,15 @@ pub fn for_extension(extension: &str) -> Result<Icon, String> {
         }
 
         // Windows hands these over as BGRA.
-        for pixel in pixels.chunks_exact_mut(4) {
+        for pixel in pixels.as_chunks_mut::<4>().0 {
             pixel.swap(0, 2);
         }
 
         // An older icon carries its transparency in a separate mask and
         // leaves this channel at zero throughout, which would otherwise
         // come out as a square of nothing.
-        if pixels.chunks_exact(4).all(|pixel| pixel[3] == 0) {
-            for pixel in pixels.chunks_exact_mut(4) {
+        if pixels.as_chunks::<4>().0.iter().all(|pixel| pixel[3] == 0) {
+            for pixel in pixels.as_chunks_mut::<4>().0 {
                 pixel[3] = 255;
             }
         }
