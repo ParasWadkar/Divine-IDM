@@ -86,6 +86,32 @@ pub fn dir() -> PathBuf {
     idm_ipc::state_dir().join("sidecars")
 }
 
+/// Just the version out of what a tool says when asked for its version.
+///
+/// ffmpeg answers with a banner — "ffmpeg version 9.0.2-essentials_build-
+/// www.gyan.dev Copyright (c) 2000-2026 the FFmpeg developers" — and putting
+/// that whole sentence on a row meant for a version wrapped it onto three
+/// lines and pushed the button beside it onto two. yt-dlp answers with the
+/// version alone, so this has to leave that case untouched.
+fn short_version(said: &str) -> String {
+    let said = said.trim();
+    // The word after `version`. Falling back to the whole line rather than
+    // to nothing: a tool that phrases it some third way is better shown
+    // verbatim than shown blank.
+    let token = said
+        .split_whitespace()
+        .skip_while(|word| !word.eq_ignore_ascii_case("version"))
+        .nth(1)
+        .unwrap_or(said);
+    // A build string can still be long. Enough to tell two builds apart,
+    // short enough to sit on one line beside a name and a button.
+    if token.chars().count() > 40 {
+        token.chars().take(39).chain(std::iter::once('…')).collect()
+    } else {
+        token.to_owned()
+    }
+}
+
 /// The tool a spec names, if the runner knows how to run it.
 fn tool_for(name: &str) -> Option<Tool> {
     match name {
@@ -109,12 +135,21 @@ pub fn views() -> Vec<SidecarView> {
         .tools
         .iter()
         .map(|spec| {
-            // The probe rather than a mere look: a file of the right name
-            // that cannot execute is not a tool that is present, and a
-            // fetched copy that no longer matches the lock is refused here
-            // exactly as it would be mid-download.
+            // `probe` rather than `probe_managed`, deliberately: this is a
+            // listing, not permission to run anything. The difference is
+            // the pinned checksum, which means reading a hundred megabytes
+            // and hashing it -- affordable once before a mux, but this runs
+            // every time the Settings panel is opened, and it showed: the
+            // card sat empty for seconds while it hashed.
+            //
+            // Nothing is lost by leaving it out. `probe_managed` still runs
+            // immediately before the program is executed, which is the
+            // check that decides anything; a copy replaced between this
+            // listing and that moment would defeat an eager check here
+            // anyway. The version call stays, because a file of the right
+            // name that cannot execute is not a tool that is present.
             let found = tool_for(&spec.name)
-                .map(|tool| sidecar::probe_managed(tool, &managed).map_err(|e| e.to_string()));
+                .map(|tool| sidecar::probe(tool, Some(&managed)).map_err(|e| e.to_string()));
 
             let (present, detail, path) = match found {
                 Some(Ok(sidecar)) => {
@@ -122,9 +157,9 @@ pub fn views() -> Vec<SidecarView> {
                     (
                         true,
                         Some(if ours {
-                            format!("{} — fetched by this app", sidecar.version)
+                            format!("{} — fetched by this app", short_version(&sidecar.version))
                         } else {
-                            format!("{} — already on this machine", sidecar.version)
+                            format!("{} — already on this machine", short_version(&sidecar.version))
                         }),
                         Some(sidecar.path.display().to_string()),
                     )
@@ -404,6 +439,27 @@ mod tests {
         assert!(error.contains("no sidecar"), "{error}");
         // And nothing was created on the way to refusing.
         assert!(!dir().join("curl.exe").exists());
+    }
+
+    #[test]
+    fn a_version_banner_is_cut_down_to_the_version() {
+        // What ffmpeg actually says, which took up three lines of a row
+        // meant for one and wrapped the button beside it.
+        assert_eq!(
+            short_version(
+                "ffmpeg version 9.0.2-essentials_build-www.gyan.dev Copyright (c) 2000-2026 \
+                 the FFmpeg developers"
+            ),
+            "9.0.2-essentials_build-www.gyan.dev",
+        );
+        // yt-dlp says only the version, and must come through untouched.
+        assert_eq!(short_version("2026.10.26"), "2026.10.26");
+        // Something phrased a third way is shown as it came rather than
+        // blanked, because a blank version tells nobody anything.
+        assert_eq!(short_version("some other tool, v4"), "some other tool, v4");
+        // And a build string long enough to wrap anyway is cut, not kept.
+        let long = format!("x version {}", "a".repeat(80));
+        assert_eq!(short_version(&long).chars().count(), 40);
     }
 
     #[test]

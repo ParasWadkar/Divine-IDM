@@ -541,7 +541,10 @@
     <div id="confirm-modal" class="modal-overlay" hidden>
       <div class="modal">
         <p id="confirm-message"></p>
-        <label class="modal-remember">
+        <!-- Shown only when the caller passed a rememberKey. Without one
+             there is nothing to remember, and a checkbox that does nothing
+             is worse than no checkbox. -->
+        <label id="confirm-remember-row" class="modal-remember">
           <input type="checkbox" id="confirm-remember" />
           Remember my choice
         </label>

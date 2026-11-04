@@ -1896,6 +1896,9 @@ function confirmDialog(message, { confirm = "Confirm", rememberKey } = {}) {
     $("confirm-message").textContent = message;
     okBtn.textContent = confirm;
     remember.checked = false;
+    // Only when there is somewhere to keep the answer. The box was shown
+    // either way, so ticking it on a one-off question silently did nothing.
+    $("confirm-remember-row").hidden = !rememberKey;
     overlay.hidden = false;
 
     const finish = (confirmed) => {
@@ -2103,6 +2106,13 @@ let sidecarRows = [];
 const fetching = new Set();
 
 async function refreshSidecars() {
+  // Said before the round trip, not after. Answering this means asking
+  // each tool what version it is, which is a process spawn apiece -- and
+  // while that was in flight the card rendered as a heading with nothing
+  // under it, which reads as a broken panel rather than a busy one.
+  if (sidecarRows.length === 0) {
+    $("tools-list").replaceChildren(empty("Checking what is installed…"));
+  }
   try {
     sidecarRows = await invoke("sidecars");
   } catch (error) {
