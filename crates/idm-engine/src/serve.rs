@@ -109,6 +109,12 @@ struct Inner {
     /// the path of every single handover. The store stays the durable copy
     /// and this is reloaded from it whenever a queue changes.
     queues: Mutex<Vec<crate::queues::Queue>>,
+    /// Where saved passwords live.
+    ///
+    /// Behind a trait so the tests can prove the refusals without writing
+    /// to the machine's real Credential Manager, and without leaving
+    /// entries behind in somebody's Control Panel.
+    vault: Arc<dyn idm_core::win::credentials::Vault>,
     /// The torrents currently in that session, by job.
     ///
     /// Needed because cancelling aborts the job's task, and a torrent is not
@@ -194,6 +200,7 @@ impl Engine {
                 torrents: tokio::sync::OnceCell::new(),
                 live_torrents: Mutex::new(HashMap::new()),
                 queues: Mutex::new(queues),
+                vault: Arc::new(idm_core::win::credentials::WindowsVault),
             }),
         });
         start_stall_watchdog(Arc::clone(&engine.inner));
@@ -2181,6 +2188,63 @@ impl Engine {
         })
     }
 
+    /// Saved passwords are refused for browser clients, all three ways.
+    ///
+    /// Listing is refused as firmly as changing: the list says which sites
+    /// this person has an account with, which is worth keeping from a web
+    /// page even with no password attached to it.
+    fn refuse_browser_credentials(client: &ClientInfo) -> Option<Response> {
+        client.is_browser().then(|| Response::Rejected {
+            reason: "the browser integration cannot see or change saved passwords".into(),
+        })
+    }
+
+    /// What is saved, never the passwords themselves.
+    fn list_credentials(&self, client: &ClientInfo) -> Response {
+        if let Some(refusal) = Self::refuse_browser_credentials(client) {
+            return refusal;
+        }
+        match crate::credentials::views(self.inner.vault.as_ref()) {
+            Ok(entries) => Response::Credentials { entries },
+            Err(reason) => Response::Rejected { reason },
+        }
+    }
+
+    /// Saves one, replacing whatever was saved for the same thing.
+    fn set_credential(
+        &self,
+        client: &ClientInfo,
+        scope: idm_ipc::CredentialScope,
+        username: String,
+        password: idm_ipc::SecretString,
+    ) -> Response {
+        if let Some(refusal) = Self::refuse_browser_credentials(client) {
+            return refusal;
+        }
+        match crate::credentials::set(
+            self.inner.vault.as_ref(),
+            &scope,
+            &username,
+            password.expose(),
+        ) {
+            // Deliberately not logged, not even the target: "a password was
+            // saved for example.com" in a log file is a fact about this
+            // person that nothing here needs to keep.
+            Ok(()) => Response::Pong,
+            Err(reason) => Response::Rejected { reason },
+        }
+    }
+
+    fn remove_credential(&self, client: &ClientInfo, scope: idm_ipc::CredentialScope) -> Response {
+        if let Some(refusal) = Self::refuse_browser_credentials(client) {
+            return refusal;
+        }
+        match crate::credentials::remove(self.inner.vault.as_ref(), &scope) {
+            Ok(()) => Response::Pong,
+            Err(reason) => Response::Rejected { reason },
+        }
+    }
+
     /// Downloading and installing a program is refused for browsers.
     ///
     /// Its own helper rather than `refuse_browser`, because the sentence
@@ -2477,6 +2541,11 @@ impl Handler for Engine {
             Request::GetSettings => self.get_settings().await,
             Request::SetSettings(settings) => self.set_settings(client, settings).await,
             Request::CancelPostAction => self.cancel_post_action().await,
+            Request::ListCredentials => self.list_credentials(client),
+            Request::SetCredential { scope, username, password } => {
+                self.set_credential(client, scope, username, password)
+            }
+            Request::RemoveCredential { scope } => self.remove_credential(client, scope),
             Request::ListSidecars => Self::list_sidecars(client),
             Request::FetchSidecar { name } => Self::fetch_sidecar(client, name).await,
             Request::Hello { .. } => Response::Error { message: "already authenticated".into() },
@@ -3341,6 +3410,67 @@ mod tests {
                 matches!(engine.handle(&browser, request).await, Response::Rejected { .. }),
                 "a browser must not decide what runs and when"
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_browser_cannot_see_or_change_saved_passwords() {
+        // Listing is refused as firmly as writing. The list alone says
+        // which sites this person has an account with, which is not
+        // something a web page gets to learn even with no password on it.
+        let (_dir, engine) = engine_with_queues();
+        let browser = browser();
+        pair(&engine, &browser).await;
+
+        let scope = idm_ipc::CredentialScope::Site { url: "https://example.com".into() };
+        for request in [
+            Request::ListCredentials,
+            Request::SetCredential {
+                scope: scope.clone(),
+                username: "me".into(),
+                password: idm_ipc::SecretString::new("hunter2"),
+            },
+            Request::RemoveCredential { scope: scope.clone() },
+        ] {
+            match engine.handle(&browser, request).await {
+                Response::Rejected { reason } => {
+                    assert!(reason.contains("saved passwords"), "say what was refused: {reason}");
+                }
+                other => panic!("a browser must not touch saved passwords, got {other:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn the_app_may_ask_what_is_saved() {
+        // Read-only, and only under this app's own prefix, so running it
+        // cannot disturb anything in the machine's real vault.
+        let (_dir, engine) = engine_with_queues();
+        match engine.handle(&desktop(), Request::ListCredentials).await {
+            Response::Credentials { entries } => {
+                // Whatever is there, none of it carries a password: the
+                // type has no field for one.
+                let shown = format!("{entries:?}");
+                assert!(!shown.contains("password"), "{shown}");
+            }
+            other => panic!("the app should get the list, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_password_for_something_that_cannot_ask_for_one_is_refused() {
+        // Refused at the engine rather than stored against a scheme no
+        // download will ever look up, which would show in the list as a
+        // password that is set up and never work.
+        let (_dir, engine) = engine_with_queues();
+        let request = Request::SetCredential {
+            scope: idm_ipc::CredentialScope::Site { url: "ftp://example.com".into() },
+            username: "me".into(),
+            password: idm_ipc::SecretString::new("hunter2"),
+        };
+        match engine.handle(&desktop(), request).await {
+            Response::Rejected { reason } => assert!(reason.contains("http"), "{reason}"),
+            other => panic!("that scheme should be refused, got {other:?}"),
         }
     }
 

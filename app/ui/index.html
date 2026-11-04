@@ -455,6 +455,23 @@
               </select>
             </label>
 
+            <!-- Passwords for sites and proxies. The passwords themselves
+                 are never in this window: the engine puts them straight into
+                 Windows' vault and only ever hands back who they are for. -->
+            <section id="passwords-card" class="card">
+              <h2>Saved passwords</h2>
+              <p class="note">
+                Kept in Windows' own Credential Manager, not in this app's
+                files — so you can see and delete them in Control Panel even
+                if DivinePulse is not running. Nothing here is ever shown
+                back to you, including to this window.
+              </p>
+              <div id="password-list" class="browser-list"></div>
+              <div class="manual">
+                <button id="add-password" class="ghost">Save a password…</button>
+              </div>
+            </section>
+
             <!-- The programs this app runs but did not build. Here, in the
                  open, rather than only behind a download that has already
                  gone wrong: the answer to "why was the sound not joined on"
@@ -538,6 +555,49 @@
 
     <!-- A single reusable confirmation, built once and filled in by whatever
          asks for it, rather than one dialog per destructive action. -->
+    <!-- Three fields rather than `askFor`'s one. The password field is a
+         real `type=password`, so it is not read over somebody's shoulder and
+         not offered to the browser engine's own autofill as plain text. -->
+    <div id="credential-modal" class="modal-overlay" hidden>
+      <div class="modal">
+        <p id="credential-message">Save a password</p>
+        <label class="row">
+          <span>For</span>
+          <select id="credential-kind">
+            <option value="site">a site</option>
+            <option value="proxy">a proxy</option>
+          </select>
+        </label>
+        <input
+          id="credential-where"
+          class="ask-input"
+          type="text"
+          spellcheck="false"
+          autocomplete="off"
+          placeholder="https://example.com"
+        />
+        <input
+          id="credential-user"
+          class="ask-input"
+          type="text"
+          spellcheck="false"
+          autocomplete="off"
+          placeholder="Username"
+        />
+        <input
+          id="credential-secret"
+          class="ask-input"
+          type="password"
+          autocomplete="new-password"
+          placeholder="Password"
+        />
+        <div class="modal-actions">
+          <button id="credential-cancel" class="ghost">Cancel</button>
+          <button id="credential-ok">Save</button>
+        </div>
+      </div>
+    </div>
+
     <div id="confirm-modal" class="modal-overlay" hidden>
       <div class="modal">
         <p id="confirm-message"></p>

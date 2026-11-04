@@ -97,6 +97,49 @@ async fn queues(state: State<'_, AppState>) -> Result<serde_json::Value, String>
     queue_reply(state.request(Request::ListQueues).await)
 }
 
+/// Which sites and proxies have a password saved. Never the passwords.
+#[tauri::command]
+async fn credentials(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
+    match state.request(Request::ListCredentials).await {
+        Response::Credentials { entries } => {
+            serde_json::to_value(entries).map_err(|error| error.to_string())
+        }
+        Response::Rejected { reason } => Err(reason),
+        Response::Error { message } => Err(message),
+        other => Err(format!("unexpected reply: {other:?}")),
+    }
+}
+
+/// Saves a password in Windows' own vault, replacing any for the same thing.
+///
+/// The reply is the fresh list, because that is the only visible effect and
+/// asking for it separately would show a list from another instant.
+#[tauri::command]
+async fn save_credential(
+    state: State<'_, AppState>,
+    scope: idm_ipc::CredentialScope,
+    username: String,
+    password: String,
+) -> Result<serde_json::Value, String> {
+    state
+        .simple(Request::SetCredential {
+            scope,
+            username,
+            password: idm_ipc::SecretString::new(password),
+        })
+        .await?;
+    credentials(state).await
+}
+
+#[tauri::command]
+async fn forget_credential(
+    state: State<'_, AppState>,
+    scope: idm_ipc::CredentialScope,
+) -> Result<serde_json::Value, String> {
+    state.simple(Request::RemoveCredential { scope }).await?;
+    credentials(state).await
+}
+
 /// The external programs the app can run, and whether each is here.
 #[tauri::command]
 async fn sidecars(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
@@ -542,6 +585,9 @@ fn main() {
             pause_job,
             refresh_link,
             queues,
+            credentials,
+            save_credential,
+            forget_credential,
             sidecars,
             fetch_sidecar,
             set_queue,

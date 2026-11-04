@@ -559,6 +559,21 @@ pub enum Request {
     },
     /// Cancels an armed post-download action during its countdown.
     CancelPostAction,
+    /// Which sites and proxies have a password saved, never the passwords.
+    ///
+    /// Refused for browser clients, along with the other two: between them
+    /// they say what this person has an account with and then change it.
+    ListCredentials,
+    /// Saves a password, replacing anything saved for the same thing.
+    SetCredential {
+        scope: CredentialScope,
+        username: String,
+        password: SecretString,
+    },
+    /// Forgets one. Forgetting what is not there succeeds.
+    RemoveCredential {
+        scope: CredentialScope,
+    },
     /// The external programs the app can run, and whether each is here.
     ///
     /// Refused for browser clients along with `FetchSidecar`: between them
@@ -643,6 +658,70 @@ pub struct JobStatus {
     pub queue_name: Option<String>,
 }
 
+/// A password on its way to the engine, which does not print itself.
+///
+/// Serialises as a plain string, because it has to cross the wire as one.
+/// The whole of its job is `Debug`: `Request` derives `Debug`, and the day
+/// somebody adds `tracing::debug!(?request)` to the dispatch loop -- which
+/// is an obvious and reasonable thing to add -- is the day every password
+/// typed into this app is written to a log. A field that cannot print
+/// itself makes that impossible rather than merely discouraged.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct SecretString(String);
+
+impl SecretString {
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    /// The password itself, where it is about to be used.
+    ///
+    /// Named so that reading it is conspicuous in a diff.
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for SecretString {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("***")
+    }
+}
+
+impl std::fmt::Display for SecretString {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("***")
+    }
+}
+
+/// What a saved password is for.
+///
+/// Deliberately not a raw vault target. A client that could name the target
+/// could name `Microsoft/OneDrive` just as easily, and then read, replace
+/// or delete credentials this program has no business touching. The engine
+/// derives the target from this, so the only reachable names are its own.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CredentialScope {
+    /// A site that asks for a password, keyed by origin.
+    Site { url: String },
+    /// A proxy that asks for one, keyed by the address it was configured as.
+    Proxy { address: String },
+}
+
+/// One saved password, without the password.
+///
+/// There is no field for it, so showing the user what is saved cannot put a
+/// secret on the screen without this type changing shape first.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CredentialView {
+    pub scope: CredentialScope,
+    pub username: String,
+    /// How to say what this is for, in one line.
+    pub label: String,
+}
+
 /// One external program, and what the app knows about it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SidecarView {
@@ -695,6 +774,9 @@ pub enum Response {
     },
     Sidecars {
         tools: Vec<SidecarView>,
+    },
+    Credentials {
+        entries: Vec<CredentialView>,
     },
     Pong,
     Error {

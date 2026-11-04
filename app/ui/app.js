@@ -1719,6 +1719,7 @@ function selectTab(tab, giveFocus = false) {
   if (tab.dataset.tab === "settings") {
     refreshBrowsers();
     refreshSidecars();
+    refreshCredentials();
   }
   if (giveFocus) tab.focus();
 }
@@ -2096,6 +2097,169 @@ async function refreshBrowsers() {
   }
   renderBrowsers();
 }
+
+// -------------------------------------------------------- saved passwords
+
+// What the engine says is saved. Never contains a password: the reply type
+// has no field for one.
+let credentialRows = [];
+
+async function refreshCredentials() {
+  try {
+    credentialRows = await invoke("credentials");
+  } catch (error) {
+    credentialRows = [];
+    toast(String(error), true);
+  }
+  renderCredentials();
+}
+
+function renderCredentials() {
+  const list = $("password-list");
+  list.replaceChildren(
+    ...(credentialRows.length
+      ? credentialRows.map(credentialRow)
+      : [empty("No passwords saved. Sites and proxies that ask for one can be added here.")]),
+  );
+}
+
+function credentialRow(entry) {
+  const wrap = document.createElement("div");
+  wrap.className = "browser";
+
+  const line = document.createElement("div");
+  line.className = "browser-row";
+
+  const dot = document.createElement("span");
+  dot.className = "dot good";
+  dot.setAttribute("aria-hidden", "true");
+
+  const name = document.createElement("span");
+  name.className = "browser-name";
+  name.textContent = entry.username;
+
+  const where = document.createElement("span");
+  where.className = "browser-status";
+  where.textContent = entry.label;
+
+  const spacer = document.createElement("span");
+  spacer.className = "spacer";
+  line.append(dot, name, where, spacer);
+
+  const replace = document.createElement("button");
+  replace.className = "ghost";
+  replace.textContent = "Replace";
+  replace.title = `Save a different password for ${entry.label}`;
+  // Pre-filled with where and who, but never with the password: this window
+  // has never been told it and asking the engine for it would be the one
+  // thing this whole design is arranged to avoid.
+  replace.onclick = () => addCredential(entry);
+  line.append(replace);
+
+  const forget = document.createElement("button");
+  forget.className = "ghost";
+  forget.textContent = "Forget";
+  forget.onclick = () => forgetCredential(entry);
+  line.append(forget);
+
+  wrap.append(line);
+  return wrap;
+}
+
+async function forgetCredential(entry) {
+  const sure = await confirmDialog(
+    `Forget the password for ${entry.label}? It is removed from Windows' Credential Manager.`,
+    { confirm: "Forget it" },
+  );
+  if (!sure) return;
+  try {
+    // The reply is the fresh list, for the same reason the sidecar fetch
+    // works that way: one line of it changed and nothing else did.
+    credentialRows = await invoke("forget_credential", { scope: entry.scope });
+    toast(`Forgot the password for ${entry.label}`);
+  } catch (error) {
+    toast(String(error), true);
+  }
+  renderCredentials();
+}
+
+/** The three-field dialog. Resolves to null when cancelled. */
+function askForCredential(existing) {
+  return new Promise((resolve) => {
+    const overlay = $("credential-modal");
+    const kind = $("credential-kind");
+    const where = $("credential-where");
+    const user = $("credential-user");
+    const secret = $("credential-secret");
+    const okBtn = $("credential-ok");
+    const cancelBtn = $("credential-cancel");
+
+    const scope = existing?.scope;
+    kind.value = scope?.kind === "proxy" ? "proxy" : "site";
+    where.value = scope ? (scope.url ?? scope.address ?? "") : "";
+    user.value = existing?.username ?? "";
+    // Always empty, on a replace as much as on a new one. There is nothing
+    // to prefill it with, and a dialog that looked prefilled would be
+    // claiming to show a password it does not have.
+    secret.value = "";
+    $("credential-message").textContent = existing
+      ? `Replace the password for ${existing.label}`
+      : "Save a password";
+
+    const placeholder = () =>
+      (where.placeholder =
+        kind.value === "proxy" ? "http://127.0.0.1:3128" : "https://example.com");
+    placeholder();
+    kind.addEventListener("change", placeholder);
+
+    overlay.hidden = false;
+    (existing ? secret : where).focus();
+
+    const finish = (answer) => {
+      overlay.hidden = true;
+      // Cleared on the way out, not left sitting in a detached input where
+      // a later `hidden = false` would show it again.
+      secret.value = "";
+      kind.removeEventListener("change", placeholder);
+      okBtn.removeEventListener("click", onOk);
+      cancelBtn.removeEventListener("click", onCancel);
+      overlay.removeEventListener("keydown", onKey);
+      resolve(answer);
+    };
+    const onOk = () =>
+      finish({
+        scope:
+          kind.value === "proxy"
+            ? { kind: "proxy", address: where.value.trim() }
+            : { kind: "site", url: where.value.trim() },
+        username: user.value.trim(),
+        password: secret.value,
+      });
+    const onCancel = () => finish(null);
+    const onKey = (event) => {
+      if (event.key === "Enter") onOk();
+      else if (event.key === "Escape") onCancel();
+    };
+
+    okBtn.addEventListener("click", onOk);
+    cancelBtn.addEventListener("click", onCancel);
+    overlay.addEventListener("keydown", onKey);
+  });
+}
+
+async function addCredential(existing) {
+  const answer = await askForCredential(existing);
+  if (!answer) return;
+  try {
+    credentialRows = await invoke("save_credential", answer);
+    toast("Saved in Windows' Credential Manager");
+  } catch (error) {
+    toast(String(error), true);
+  }
+  renderCredentials();
+}
+
+$("add-password").addEventListener("click", () => addCredential(null));
 
 // ------------------------------------------------------------ video tools
 
