@@ -1963,6 +1963,17 @@ impl Engine {
     /// Nothing is read before this, so a download from a host with no saved
     /// password carries no credential at all rather than an empty one.
     async fn attach_credential(&self, config: &mut idm_net::download::DownloadConfig) {
+        // The proxy's password first, because it is a different secret from
+        // the site's and is wanted even when the site asks for nothing: the
+        // proxy stands between this machine and every download, so a 407
+        // stops a transfer that the origin would have served anonymously.
+        if let idm_net::client::ProxyMode::Manual(address) = &config.http.proxy
+            && let Some(found) = crate::credentials::for_proxy(self.inner.vault.as_ref(), address)
+        {
+            config.http.proxy_auth =
+                Some(idm_net::auth::HttpCredential::new(found.username, found.secret.expose()));
+        }
+
         let Some(found) = crate::credentials::for_url(self.inner.vault.as_ref(), &config.url)
         else {
             return;
@@ -3185,7 +3196,11 @@ mod tests {
 
         match reply {
             Response::Rejected { reason } => {
-                assert!(reason.contains("plain text"), "should say why: {reason}");
+                assert!(reason.contains("kept in the clear"), "should say why: {reason}");
+                assert!(
+                    reason.contains("Saved passwords"),
+                    "and where it should go instead: {reason}",
+                );
             }
             other => panic!("a password in a proxy address should be refused, got {other:?}"),
         }

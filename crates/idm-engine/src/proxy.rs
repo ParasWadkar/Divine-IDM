@@ -50,15 +50,19 @@ pub fn vet(address: &str) -> Result<String, String> {
         return Err(format!("{trimmed} names no host to connect to"));
     }
 
-    // Refused rather than accepted and written down. This string is kept in
-    // `settings.json` in the clear, so taking a password here would put one
-    // in a plain file the user has no reason to think is holding it. A proxy
-    // password belongs in Windows Credential Manager, and until that is
-    // wired up the honest answer is that authenticated proxies are not
-    // supported -- not a silent downgrade of where the secret lives.
+    // Still refused, and for the same reason as before: this string is kept
+    // in `settings.json` in the clear, so taking a password here would put
+    // one in a plain file the user has no reason to think is holding it.
+    //
+    // What has changed is that there is now somewhere for it to go. An
+    // authenticated proxy works -- the password lives in Windows Credential
+    // Manager under this address, and `credentials::for_proxy` reads it at
+    // the moment a client is built. So this says where to put it rather
+    // than that it cannot be done.
     if !parsed.username().is_empty() || parsed.password().is_some() {
-        return Err("a proxy address must not carry a username or password: they would be \
-                    stored in plain text. Authenticated proxies are not supported yet"
+        return Err("a proxy address must not carry a username or password: this file is kept \
+                    in the clear. Put the address alone here, then save the password under \
+                    Settings -> Saved passwords, where Windows keeps it"
             .into());
     }
 
@@ -122,16 +126,29 @@ mod tests {
     }
 
     #[test]
-    fn credentials_are_refused_and_the_reason_given() {
-        // The point is not that they cannot work -- reqwest would do it --
-        // but that accepting them here writes a password into settings.json.
+    fn the_refusal_says_where_the_password_should_go_instead() {
+        // The difference this commit makes. Before, the honest answer was
+        // that authenticated proxies did not work; now they do, and a
+        // refusal that only said "no" would be sending somebody away from
+        // a feature that is sitting right there.
+        let error = vet("http://someone:hunter2@127.0.0.1:3128").unwrap_err();
+        assert!(error.contains("Saved passwords"), "it should say where: {error}");
+        assert!(!error.contains("not supported"), "they are supported now: {error}");
+    }
+
+    #[test]
+    fn credentials_in_the_address_are_refused_and_the_reason_given() {
+        // Not because an authenticated proxy cannot work -- it does now --
+        // but because accepting one *here* writes a password into
+        // settings.json, which is a plain file nobody expects to hold one.
+        // The password goes in the vault instead, keyed by this address.
         for address in [
             "http://someone:hunter2@127.0.0.1:3128",
             "http://someone@127.0.0.1:3128",
             "socks5://someone:hunter2@127.0.0.1:1080",
         ] {
             let error = vet(address).unwrap_err();
-            assert!(error.contains("plain text"), "{address}: {error}");
+            assert!(error.contains("kept in the clear"), "{address}: {error}");
         }
     }
 

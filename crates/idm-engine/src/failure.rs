@@ -59,6 +59,11 @@ pub enum Kind {
     /// window offers Sign in on this and New link on the other.
     AuthRequired,
 
+    /// The proxy in between wants a password, which is not the same thing
+    /// as the site wanting one: the password goes against the proxy
+    /// address, and the site may be perfectly happy to serve anonymously.
+    ProxyAuthRequired,
+
     DownloadInterrupted,
     DownloadIntegrity,
     DownloadUnknownSize,
@@ -87,6 +92,7 @@ impl Kind {
             Self::HttpNotFound => "http.not_found",
             Self::HttpServerError => "http.server_error",
             Self::AuthRequired => "auth.required",
+            Self::ProxyAuthRequired => "auth.proxy_required",
             Self::UrlExpired => "url.expired",
             Self::UrlInvalid => "url.invalid",
             Self::UrlRedirectFailure => "url.redirect_failure",
@@ -274,6 +280,7 @@ fn from_status(code: u16) -> (Kind, String) {
         400 => (Kind::HttpBadRequest, "The server rejected the request".into()),
         401 => (Kind::AuthRequired, "This needs a password".into()),
         403 => (Kind::HttpForbidden, "The server refused access".into()),
+        407 => (Kind::ProxyAuthRequired, "The proxy needs a password".into()),
         404 | 410 => (Kind::HttpNotFound, "The file is no longer at that address".into()),
         500..=599 => (Kind::HttpServerError, format!("Server error (HTTP {code})")),
         _ => (Kind::Unclassified, format!("The server refused the request (HTTP {code})")),
@@ -407,6 +414,9 @@ mod tests {
         // button on the card.
         assert_eq!(from_status(401).0, Kind::AuthRequired);
         assert_eq!(from_status(403).0, Kind::HttpForbidden);
+        // And the proxy's own, which wants a password saved against the
+        // proxy address rather than against the site.
+        assert_eq!(from_status(407).0, Kind::ProxyAuthRequired);
         assert_eq!(
             from_probe(&ProbeOutcome::NeedsSignIn).0,
             Kind::AuthRequired,
@@ -433,6 +443,7 @@ mod tests {
             Kind::UrlInvalid,
             Kind::UrlRedirectFailure,
             Kind::AuthRequired,
+            Kind::ProxyAuthRequired,
             Kind::DownloadInterrupted,
             Kind::DownloadIntegrity,
             Kind::DownloadUnknownSize,

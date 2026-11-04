@@ -109,6 +109,14 @@ pub struct HttpConfig {
     /// lane would hand out repeats and a correct server would start
     /// refusing them, intermittently and only under load.
     pub auth: Option<std::sync::Arc<crate::auth::AuthState>>,
+    /// A password for the proxy itself, which is not the same thing as a
+    /// password for the site being downloaded from.
+    ///
+    /// Basic only. reqwest sets `Proxy-Authorization` when it opens the
+    /// tunnel, which is before any 407 could be read, so there is no point
+    /// at which a Digest nonce could be obtained and answered. A proxy that
+    /// insists on Digest is reported rather than silently retried.
+    pub proxy_auth: Option<crate::auth::HttpCredential>,
 }
 
 impl Default for HttpConfig {
@@ -126,6 +134,7 @@ impl Default for HttpConfig {
             pool_idle_timeout: Duration::from_secs(90),
             proxy: ProxyMode::default(),
             auth: None,
+            proxy_auth: None,
         }
     }
 }
@@ -202,10 +211,19 @@ fn base_builder(config: &HttpConfig, role: Role) -> Result<ClientBuilder, Client
         // `no_proxy` first, then the one we were given. Adding a proxy is
         // additive in reqwest, so without clearing the environment's first
         // the result would depend on what happened to be set.
-        ProxyMode::Manual(address) => builder.no_proxy().proxy(
-            reqwest::Proxy::all(address)
-                .map_err(|source| ClientError::Proxy { address: address.clone(), source })?,
-        ),
+        ProxyMode::Manual(address) => {
+            let mut proxy = reqwest::Proxy::all(address)
+                .map_err(|source| ClientError::Proxy { address: address.clone(), source })?;
+            // Only ever on the proxy. This is a different secret from the
+            // one the site may want, and reqwest keeps it to the
+            // `Proxy-Authorization` header rather than letting it reach the
+            // origin -- which matters, because a proxy password sent to
+            // every host downloaded through it would be a quiet leak.
+            if let Some(credential) = &config.proxy_auth {
+                proxy = proxy.basic_auth(&credential.username, credential.password());
+            }
+            builder.no_proxy().proxy(proxy)
+        }
     })
 }
 

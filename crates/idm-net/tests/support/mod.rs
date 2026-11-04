@@ -1,3 +1,9 @@
+// One harness compiled into every integration-test binary. No single binary
+// uses all of it -- the proxy test wants only the proxy, the rest want only
+// the ordinary server -- and that is not a defect worth a warning in each of
+// them.
+#![allow(dead_code)]
+
 //! Spawns the adversarial mock server for integration tests.
 //!
 //! The server binds port 0 and prints the port it actually got, so parallel
@@ -12,9 +18,9 @@ use std::process::{Child, Command, Stdio};
 /// `canonicalize` on Windows returns a `\\?\`-prefixed verbatim path, which
 /// Node cannot resolve as a script path — it exits immediately with a module
 /// error. The prefix is therefore stripped.
-fn script_path() -> PathBuf {
+fn named_script(name: &str) -> PathBuf {
     let joined =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/mock-server/server.mjs");
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/mock-server").join(name);
     let canonical = joined
         .canonicalize()
         .unwrap_or_else(|error| panic!("mock server script not found at {joined:?}: {error}"));
@@ -34,7 +40,21 @@ pub struct MockServer {
 impl MockServer {
     /// Starts the server and waits for it to report its bound port.
     pub fn start() -> Self {
-        let script = script_path();
+        Self::start_script("server.mjs")
+    }
+
+    /// The forward proxy, which demands a password before it serves
+    /// anything.
+    ///
+    /// A separate script rather than another route, because a proxy is
+    /// reached differently: it receives the absolute-form request line, and
+    /// a route on the ordinary server could never tell the two apart.
+    pub fn start_proxy() -> Self {
+        Self::start_script("proxy.mjs")
+    }
+
+    fn start_script(name: &str) -> Self {
+        let script = named_script(name);
         assert!(Path::new(&script).is_file(), "script missing: {script:?}");
 
         let mut child = Command::new("node")

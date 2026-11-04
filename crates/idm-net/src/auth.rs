@@ -59,7 +59,11 @@ impl HttpCredential {
     }
 
     /// The password, where it is about to be hashed or encoded.
-    fn password(&self) -> &str {
+    ///
+    /// Crate-visible rather than private: the proxy builder in `client.rs`
+    /// hands it to reqwest, which does the encoding itself. Still not
+    /// public, so nothing outside this crate can read one out.
+    pub(crate) fn password(&self) -> &str {
         &self.password
     }
 }

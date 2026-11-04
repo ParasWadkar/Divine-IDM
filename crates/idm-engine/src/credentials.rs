@@ -355,6 +355,39 @@ mod tests {
     }
 
     #[test]
+    fn a_proxy_password_comes_back_for_the_address_it_was_saved_for() {
+        let vault = FakeVault::default();
+        let proxy = CredentialScope::Proxy { address: "http://127.0.0.1:3128".into() };
+        set(&vault, &proxy, "me", "hunter2").unwrap();
+
+        // Found however it was typed, because the lookup vets the address
+        // the same way saving it did.
+        let found = for_proxy(&vault, "  http://127.0.0.1:3128 ").expect("it should be found");
+        assert_eq!(found.username, "me");
+        assert_eq!(found.secret.expose(), "hunter2");
+
+        // And not handed to a different proxy.
+        assert!(for_proxy(&vault, "http://127.0.0.1:8080").is_none());
+    }
+
+    #[test]
+    fn a_proxy_password_is_not_a_site_password() {
+        // Two different secrets with two different jobs. Offering one where
+        // the other was meant would send the proxy's password to every host
+        // downloaded through it, or the site's to whoever runs the proxy.
+        let vault = FakeVault::default();
+        set(&vault, &CredentialScope::Proxy { address: "http://127.0.0.1:3128".into() }, "p", "pp")
+            .unwrap();
+        set(&vault, &site("https://example.com"), "s", "ss").unwrap();
+
+        assert_eq!(for_proxy(&vault, "http://127.0.0.1:3128").unwrap().secret.expose(), "pp");
+        assert_eq!(for_url(&vault, "https://example.com").unwrap().secret.expose(), "ss");
+        // A proxy address is not a site, and a site is not a proxy.
+        assert!(for_url(&vault, "http://127.0.0.1:3128").is_none());
+        assert!(for_proxy(&vault, "https://example.com").is_none());
+    }
+
+    #[test]
     fn listing_says_what_each_one_is_for_and_never_the_password() {
         let vault = FakeVault::default();
         set(&vault, &site("https://example.com"), "me", "hunter2").unwrap();
