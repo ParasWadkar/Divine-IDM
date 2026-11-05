@@ -421,6 +421,14 @@
               <span>Have Windows Defender check finished downloads</span>
             </label>
 
+            <label
+              class="row switch"
+              title="A finished .zip is unpacked into a folder of the same name beside it. The archive is kept. Entries with a name that points outside that folder are skipped rather than written."
+            >
+              <input type="checkbox" id="extract-zips" />
+              <span>Unpack a finished .zip into a folder beside it</span>
+            </label>
+
             <!-- A program and a list of arguments, not a command line. See
                  crates/idm-engine/src/hook.rs: a command line has to be
                  parsed back into a list by something, and a server that

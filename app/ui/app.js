@@ -651,6 +651,7 @@ function renderSettings(settings, force = false) {
   $("speed-limit").value = String(settings.speed_limit_bytes_per_sec ?? 0);
   $("sort-into-folders").checked = settings.sort_into_folders ?? true;
   $("scan-downloads").checked = settings.scan_downloads ?? true;
+  $("extract-zips").checked = settings.extract_zips ?? false;
   $("hook-program").value = settings.hook_program ?? "";
   // One per line, because each element is one argument and a line is
   // the only separator that cannot appear inside one.
@@ -1112,6 +1113,7 @@ async function saveSettings(overrides = {}) {
     speed_limit_bytes_per_sec: Number($("speed-limit").value),
     sort_into_folders: $("sort-into-folders").checked,
     scan_downloads: $("scan-downloads").checked,
+    extract_zips: $("extract-zips").checked,
     hook_program: $("hook-program").value.trim(),
     hook_arguments: hookArguments($("hook-arguments").value),
     start_with_windows: $("start-with-windows").checked,
@@ -2217,6 +2219,7 @@ for (const id of [
   "speed-limit",
   "sort-into-folders",
   "scan-downloads",
+  "extract-zips",
   "hook-program",
   "hook-arguments",
   "start-with-windows",

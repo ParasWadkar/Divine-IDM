@@ -25,6 +25,7 @@ pub mod scan;
 pub mod schedule;
 pub mod serve;
 pub mod sidecars;
+pub mod unpack;
 
 pub use serve::Engine;
 

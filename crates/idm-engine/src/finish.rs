@@ -20,6 +20,7 @@ use idm_ipc::Settings;
 use crate::failure::{Failure, Kind};
 use crate::hook::{self, Ran};
 use crate::scan::{self, Verdict};
+use crate::unpack::{self, Unpacked};
 
 /// What the steps turned up, for the record rather than for a decision.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -28,6 +29,8 @@ pub struct Report {
     pub scan: Option<Verdict>,
     /// `None` when no hook is set, or the one set was refused.
     pub hook: Option<Ran>,
+    /// `None` when unpacking is switched off or the file is not a zip.
+    pub unpacked: Option<Unpacked>,
 }
 
 /// Turns a verdict into a refusal, or into nothing.
@@ -82,6 +85,12 @@ pub async fn run(
             // just been called a trojan.
             return (report, refusal);
         }
+    }
+
+    // Before the hook, so a hook that wants to look at what was in the
+    // archive finds it there.
+    if settings.extract_zips && unpack::looks_like_a_zip(file) {
+        report.unpacked = Some(unpack::unpack(file).await);
     }
 
     report.hook = run_hook(settings, default_dir, file).await;
@@ -228,6 +237,47 @@ mod tests {
 
         assert!(refusal.is_none(), "a hook must never be able to fail a download");
         assert!(matches!(report.hook, Some(Ran::Finished { .. })), "{:?}", report.hook);
+    }
+
+    #[tokio::test]
+    async fn a_zip_is_left_alone_unless_unpacking_was_asked_for() {
+        // Off by default, and this is the test that keeps it that way:
+        // writing files into somebody's Downloads folder unasked is the
+        // kind of help that is hard to undo.
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("pack.zip");
+        std::fs::write(&archive, b"not really a zip").unwrap();
+
+        let settings = Settings { scan_downloads: false, ..Settings::default() };
+        assert!(!settings.extract_zips);
+        let (report, _) = run(&settings, dir.path(), &archive).await;
+        assert!(report.unpacked.is_none());
+        assert!(!dir.path().join("pack").exists());
+    }
+
+    #[tokio::test]
+    async fn only_a_zip_is_unpacked() {
+        let dir = tempfile::tempdir().unwrap();
+        let other = dir.path().join("setup.bin");
+        std::fs::write(&other, b"x").unwrap();
+
+        let settings =
+            Settings { scan_downloads: false, extract_zips: true, ..Settings::default() };
+        let (report, _) = run(&settings, dir.path(), &other).await;
+        assert!(report.unpacked.is_none(), "{:?}", report.unpacked);
+    }
+
+    #[tokio::test]
+    async fn a_zip_that_cannot_be_unpacked_still_delivers_the_download() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("pack.zip");
+        std::fs::write(&archive, b"not really a zip").unwrap();
+
+        let settings =
+            Settings { scan_downloads: false, extract_zips: true, ..Settings::default() };
+        let (report, refusal) = run(&settings, dir.path(), &archive).await;
+        assert!(refusal.is_none(), "unpacking must never fail a download");
+        assert!(matches!(report.unpacked, Some(crate::unpack::Unpacked::Not { .. })));
     }
 
     #[tokio::test]

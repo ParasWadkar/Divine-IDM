@@ -2071,6 +2071,9 @@ async fn after_the_bytes(inner: &Arc<Inner>, id: JobId) -> Option<Failure> {
     if let Some(verdict) = &report.scan {
         tracing::debug!(?verdict, path = %path.display(), "scanned a finished download");
     }
+    if let Some(unpacked) = &report.unpacked {
+        tracing::debug!(?unpacked, path = %path.display(), "unpacked a finished archive");
+    }
     if let Some(ran) = &report.hook {
         tracing::debug!(?ran, path = %path.display(), "ran the post-download hook");
     }

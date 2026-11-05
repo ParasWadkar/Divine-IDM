@@ -434,6 +434,15 @@ pub struct Settings {
     /// server chose turns into a command. `{path}`, `{name}` and `{folder}`
     /// are substituted.
     pub hook_arguments: Vec<String>,
+
+    /// Whether a finished `.zip` is unpacked into a folder beside it.
+    ///
+    /// Off by default, unlike the virus check. Scanning looks at a file;
+    /// this one writes files the person did not ask for, into a folder they
+    /// did not name, and doing that unasked is the kind of helpfulness that
+    /// fills a Downloads folder with surprises. The archive is never
+    /// deleted either way.
+    pub extract_zips: bool,
 }
 
 impl Default for Settings {
@@ -472,6 +481,8 @@ impl Default for Settings {
             // Nothing runs anything until somebody says what.
             hook_program: String::new(),
             hook_arguments: Vec::new(),
+            // Writing files nobody asked for is opt-in. See the field.
+            extract_zips: false,
         }
     }
 }

@@ -112,6 +112,16 @@ Being straight about this so nothing surprises you:
   Settings if you would rather it did not run. Files over 8 GB are not
   scanned -- reading a disc image twice is a long wait for a verdict -- and
   that is reported as "not scanned" rather than as a clean bill.
+- **Unpacking anything but a `.zip`.** Switch it on in Settings and a
+  finished `.zip` is unpacked into a folder of the same name beside it --
+  numbered if one is already there, since two archives of the same name are
+  not the same archive. `.rar` and `.7z` are not unpacked. The archive is
+  kept. An entry whose name points outside that folder, or names a Windows
+  device, or is a symbolic link, is skipped rather than written, and the
+  count of skipped entries is reported; an archive that claims to expand to
+  more than a few gigabytes is refused before anything is written at all.
+  Off by default, because writing files you did not ask for into a folder
+  you did not name is hard to undo.
 - **Running a command line when a download finishes.** DivinePulse runs a
   program, not a command. Settings takes the full path to a `.exe` and a list
   of arguments, one per line, and hands each line to the program as one
