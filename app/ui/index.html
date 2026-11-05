@@ -126,6 +126,14 @@
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z" /><circle cx="12" cy="12" r="3" /></svg>
               <span>Look inside</span>
             </button>
+            <!-- For a page rather than a file. Shown for any web address,
+                 because a directory listing has no extension and a page
+                 often has one: the address cannot tell them apart, and the
+                 engine checks the content type before parsing anything. -->
+            <button type="button" id="grab" class="ghost" hidden>
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 13a5 5 0 0 0 7 0l2-2a5 5 0 0 0-7-7l-1 1" /><path d="M14 11a5 5 0 0 0-7 0l-2 2a5 5 0 0 0 7 7l1-1" /></svg>
+              <span>Get links</span>
+            </button>
             <button type="submit" class="primary">
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11" /><path d="m7 11 5 5 5-5" /><path d="M5 20h14" /></svg>
               <span>Download</span>
@@ -614,6 +622,34 @@
     <!-- Seven checkboxes rather than a drag-to-paint week grid. The grid
          looks better in a screenshot and is worse to use with a keyboard,
          and this says exactly the same thing. -->
+    <div id="links-modal" class="modal-overlay" hidden>
+      <div class="modal modal-wide">
+        <p id="links-message">Links on this page</p>
+        <div class="links-head">
+          <label class="links-every">
+            <input type="checkbox" id="links-every" />
+            <span>Tick everything shown</span>
+          </label>
+          <span class="spacer"></span>
+          <label class="links-kind">
+            <span class="sr-only">Show only one kind</span>
+            <select id="links-kind" title="Show only one kind">
+              <option value="">Everything</option>
+            </select>
+          </label>
+        </div>
+        <div id="links-list" class="links-list"></div>
+        <div class="modal-actions">
+          <button id="links-close" class="ghost">Close</button>
+          <!-- A second grab rather than a setting, so the cheap answer is
+               the one that happens by default and the expensive one is
+               asked for by name. -->
+          <button id="links-deeper" class="ghost">Read those pages too</button>
+          <button id="links-add">Download the ticked ones</button>
+        </div>
+      </div>
+    </div>
+
     <div id="archive-modal" class="modal-overlay" hidden>
       <div class="modal modal-wide">
         <p id="archive-message">Inside this archive</p>

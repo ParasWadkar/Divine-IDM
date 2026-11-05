@@ -97,6 +97,68 @@ async fn queues(state: State<'_, AppState>) -> Result<serde_json::Value, String>
     queue_reply(state.request(Request::ListQueues).await)
 }
 
+/// Collects the links on a page.
+///
+/// `follow` is the string `"this_page"` or `"and_what_it_links_to"`,
+/// matching the two values of the request's enum. A string rather than a
+/// number for the same reason the enum is not an integer: there is to be
+/// nothing here that a careless change could turn into a depth of three.
+#[tauri::command]
+async fn grab_links(
+    state: State<'_, AppState>,
+    url: String,
+    follow: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let follow = match follow.as_deref() {
+        Some("and_what_it_links_to") => idm_ipc::GrabDepth::AndWhatItLinksTo,
+        _ => idm_ipc::GrabDepth::ThisPage,
+    };
+    match state.request(Request::GrabLinks { url, follow }).await {
+        Response::Grabbed { links, pages, note } => Ok(serde_json::json!({
+            "links": links,
+            "pages": pages,
+            "note": note,
+        })),
+        Response::Rejected { reason } => Err(reason),
+        Response::Error { message } => Err(message),
+        other => Err(format!("unexpected reply: {other:?}")),
+    }
+}
+
+/// Queues a list of addresses that were picked out of a page.
+///
+/// Separate from `add_download` rather than called in a loop, and not
+/// because of the round trips: `add_download` expands `[1-9]` into nine
+/// downloads, and these addresses came off somebody else's page. A real
+/// link with brackets in it would quietly become nine requests for files
+/// that do not exist.
+#[tauri::command]
+async fn add_links(
+    state: State<'_, AppState>,
+    urls: Vec<String>,
+    queue: Option<i64>,
+) -> Result<usize, String> {
+    if urls.len() > idm_engine::grab::MOST_LINKS {
+        return Err(format!("at most {} at once", idm_engine::grab::MOST_LINKS));
+    }
+
+    let mut queued = 0;
+    let mut failed: Option<String> = None;
+    for url in urls {
+        match state.add_download(url, None, Vec::new(), queue).await {
+            Ok(_) => queued += 1,
+            Err(error) => failed = failed.or(Some(error)),
+        }
+    }
+    // One that failed out of many is not the request failing: the rest are
+    // downloading, and saying so is more useful than an error that hides
+    // what worked.
+    match failed {
+        Some(error) if queued == 0 => Err(error),
+        _ => Ok(queued),
+    }
+}
+
 /// Lists what is inside an archive, reading only its index.
 #[tauri::command]
 async fn peek_archive(
@@ -660,6 +722,8 @@ fn main() {
             refresh_link,
             queues,
             peek_archive,
+            grab_links,
+            add_links,
             bandwidth_rules,
             set_bandwidth_rule,
             forget_bandwidth_rule,

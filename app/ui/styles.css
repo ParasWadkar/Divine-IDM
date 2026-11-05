@@ -1727,6 +1727,73 @@ button.icon:hover {
   width: min(680px, 90vw);
 }
 
+.links-head {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  margin: 8px 0 0;
+  font-size: 13px;
+}
+
+.links-head .spacer {
+  flex: 1;
+}
+
+.links-every {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.links-list {
+  max-height: 46vh;
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  margin: 8px 0;
+}
+
+.link-row {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  padding: 6px 10px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.link-row + .link-row {
+  border-top: 1px solid var(--line);
+}
+
+/* The label first and the address under it in smaller type: the words are
+   what somebody recognises, and the address is what they check. */
+.link-row .link-what {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+
+.link-row .link-text {
+  overflow-wrap: anywhere;
+}
+
+.link-row .link-url {
+  color: var(--muted);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.link-row .link-kind {
+  color: var(--muted);
+  white-space: nowrap;
+  font-size: 11px;
+}
+
 .archive-list {
   max-height: 46vh;
   overflow-y: auto;

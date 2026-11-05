@@ -1697,8 +1697,222 @@ function looksLikeAnArchive(url) {
   }
 }
 
+/** Whether an address is a web page this could read for links. */
+function looksLikeAWebAddress(url) {
+  try {
+    return ["http:", "https:"].includes(new URL(url).protocol);
+  } catch {
+    return false;
+  }
+}
+
 function showPeekButton() {
-  $("peek").hidden = !looksLikeAnArchive($("url").value.trim());
+  const url = $("url").value.trim();
+  $("peek").hidden = !looksLikeAnArchive(url);
+  $("grab").hidden = !looksLikeAWebAddress(url);
+}
+
+// ------------------------------------------------------- the link picker
+
+/**
+ * The last grab, and which of its links are ticked.
+ *
+ * Kept outside the render so that changing the filter, or going a level
+ * deeper, does not lose what was already ticked.
+ */
+let grabbed = { links: [], chosen: new Set(), url: "", pages: 0, note: null };
+
+$("grab").addEventListener("click", () => {
+  const url = $("url").value.trim();
+  if (!url) return;
+  grabbed = { links: [], chosen: new Set(), url, pages: 0, note: null };
+  runGrab(url, "this_page", $("grab"));
+});
+
+$("links-deeper").addEventListener("click", () => {
+  // The ticks survive, because the deeper grab is a superset: everything
+  // from the first page is found again.
+  runGrab(grabbed.url, "and_what_it_links_to", $("links-deeper"));
+});
+
+async function runGrab(url, follow, button) {
+  const label = button.querySelector("span") ?? button;
+  const was = label.textContent;
+  label.textContent = follow === "this_page" ? "Reading…" : "Reading the pages…";
+  button.disabled = true;
+
+  try {
+    const result = await invoke("grab_links", { url, follow });
+    grabbed.url = url;
+    grabbed.links = result.links ?? [];
+    grabbed.pages = result.pages ?? 0;
+    grabbed.note = result.note ?? null;
+    // Only the ones still present stay ticked.
+    const present = new Set(grabbed.links.map((link) => link.url));
+    grabbed.chosen = new Set([...grabbed.chosen].filter((url) => present.has(url)));
+    // A deeper grab reads nothing new when the page linked to no pages, and
+    // offering it again would just read them again.
+    $("links-deeper").hidden = follow !== "this_page";
+    openLinks();
+  } catch (error) {
+    toast(String(error), true);
+  } finally {
+    label.textContent = was;
+    button.disabled = false;
+  }
+}
+
+/** Which kind a link is filed under, for the filter and the row. */
+function kindOf(link) {
+  return link.category ?? "Other";
+}
+
+function openLinks() {
+  const kinds = [...new Set(grabbed.links.map(kindOf))].sort();
+  const picker = $("links-kind");
+  const keep = kinds.includes(picker.value) ? picker.value : "";
+  picker.replaceChildren();
+  const all = document.createElement("option");
+  all.value = "";
+  all.textContent = "Everything";
+  picker.append(all);
+  for (const kind of kinds) {
+    const option = document.createElement("option");
+    option.value = kind;
+    option.textContent = kind;
+    picker.append(option);
+  }
+  picker.value = keep;
+
+  renderLinks();
+
+  const overlay = $("links-modal");
+  if (!overlay.hidden) return;
+
+  const close = $("links-close");
+  const add = $("links-add");
+  const every = $("links-every");
+
+  const finish = () => {
+    overlay.hidden = true;
+    close.removeEventListener("click", onClose);
+    add.removeEventListener("click", onAdd);
+    every.removeEventListener("change", onEvery);
+    picker.removeEventListener("change", renderLinks);
+    overlay.removeEventListener("keydown", onKey);
+  };
+  const onClose = () => finish();
+  const onEvery = () => {
+    for (const link of shownLinks()) {
+      if (every.checked) grabbed.chosen.add(link.url);
+      else grabbed.chosen.delete(link.url);
+    }
+    renderLinks();
+  };
+  const onAdd = async () => {
+    const urls = [...grabbed.chosen];
+    if (urls.length === 0) {
+      toast("Nothing is ticked.", true);
+      return;
+    }
+    add.disabled = true;
+    try {
+      const queue = $("queue-pick").value;
+      const queued = await invoke("add_links", {
+        urls,
+        queue: queue === "" ? null : Number(queue),
+      });
+      finish();
+      toast(`Started ${queued} download${queued === 1 ? "" : "s"}.`);
+      // The address box held a page, not a download. Leaving it there
+      // invites pressing Download on it next.
+      $("url").value = "";
+      showPeekButton();
+    } catch (error) {
+      toast(String(error), true);
+    } finally {
+      add.disabled = false;
+    }
+  };
+  const onKey = (event) => {
+    if (event.key === "Escape") onClose();
+  };
+
+  close.addEventListener("click", onClose);
+  add.addEventListener("click", onAdd);
+  every.addEventListener("change", onEvery);
+  picker.addEventListener("change", renderLinks);
+  overlay.addEventListener("keydown", onKey);
+  overlay.hidden = false;
+  close.focus();
+}
+
+/** The links the filter is letting through. */
+function shownLinks() {
+  const kind = $("links-kind").value;
+  return kind === "" ? grabbed.links : grabbed.links.filter((link) => kindOf(link) === kind);
+}
+
+function renderLinks() {
+  const list = $("links-list");
+  list.replaceChildren();
+  const shown = shownLinks();
+
+  for (const link of shown) {
+    const row = document.createElement("label");
+    row.className = "link-row";
+
+    const tick = document.createElement("input");
+    tick.type = "checkbox";
+    tick.checked = grabbed.chosen.has(link.url);
+    tick.addEventListener("change", () => {
+      if (tick.checked) grabbed.chosen.add(link.url);
+      else grabbed.chosen.delete(link.url);
+      updateLinkCount();
+    });
+
+    const what = document.createElement("span");
+    what.className = "link-what";
+    const text = document.createElement("span");
+    text.className = "link-text";
+    // The address when the link had no words of its own, which is most
+    // image sources and plenty of anchors.
+    text.textContent = link.text || link.url;
+    const url = document.createElement("span");
+    url.className = "link-url";
+    url.textContent = link.url;
+    what.append(text, url);
+
+    const kind = document.createElement("small");
+    kind.className = "link-kind";
+    kind.textContent = kindOf(link);
+
+    row.append(tick, what, kind);
+    list.append(row);
+  }
+
+  if (shown.length === 0) {
+    list.append(empty("No links of that kind."));
+  }
+
+  const pages = grabbed.pages === 1 ? "page" : "pages";
+  const counted = `${grabbed.links.length} link${grabbed.links.length === 1 ? "" : "s"}`;
+  $("links-message").textContent = grabbed.note
+    ? `${counted} on ${grabbed.pages} ${pages} — ${grabbed.note}.`
+    : `${counted} on ${grabbed.pages} ${pages}.`;
+
+  // Ticked when everything shown is ticked, and only then.
+  $("links-every").checked =
+    shown.length > 0 && shown.every((link) => grabbed.chosen.has(link.url));
+  updateLinkCount();
+}
+
+function updateLinkCount() {
+  const count = grabbed.chosen.size;
+  $("links-add").textContent =
+    count === 0 ? "Download the ticked ones" : `Download ${count}`;
+  $("links-every").checked =
+    shownLinks().length > 0 && shownLinks().every((link) => grabbed.chosen.has(link.url));
 }
 
 $("url").addEventListener("input", showPeekButton);

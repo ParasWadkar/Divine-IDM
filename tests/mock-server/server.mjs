@@ -1148,6 +1148,13 @@ const routes = {
     },
   },
 
+  "/site/file": {
+    description:
+      "Any /site/*.bin or /site/*.png: sixty-four kilobytes of the usual generated sequence, " +
+      "so a link picked off a page downloads for real.",
+    handler: (req, res) => serveHonestly(req, res, 65536),
+  },
+
   "/site/many.html": {
     description: "A page with ?links= links on it, for the cap. Default two thousand.",
     handler: (req, res, url) => {
@@ -1267,6 +1274,11 @@ const server = createServer((req, res) => {
     pathname = "/hls-aes/segment";
   } else if (/^\/hls\/[^/]+\/seg\d+\.ts$/.test(pathname)) {
     pathname = "/hls/segment";
+  } else if (/^\/site\/[^/]+\.(bin|png)$/.test(pathname)) {
+    // The files the pages under /site link to. Generated rather than
+    // listed, because the pages generate their names -- and real, so that
+    // links picked out of a page can actually be downloaded.
+    pathname = "/site/file";
   }
 
   const route = routes[pathname];
