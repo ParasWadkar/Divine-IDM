@@ -102,6 +102,33 @@ const MIGRATIONS: &[&str] = &[
     r#"
     ALTER TABLE jobs ADD COLUMN mirrors TEXT;
     "#,
+    // v5 -- slowing downloads down, or stopping them, at certain times.
+    //
+    // A table rather than a column, and so the first migration since v1 to
+    // add one: a schedule is a list of its own length, and nothing about a
+    // job points at it.
+    //
+    // `days` is a bitmask with Monday in bit 0, which is one small integer
+    // where seven booleans or a comma-separated string would be seven
+    // columns or a parser. `start_minute` and `end_minute` are minutes past
+    // midnight; an end *before* a start is how a window that runs past
+    // midnight is spelled, so they are stored exactly as given and never
+    // tidied into order.
+    //
+    // `stop` is its own column rather than a reserved value of
+    // `bytes_per_sec`, because zero already means something: no limit at
+    // all, which is how a rule lifts the engine-wide limit for a few hours.
+    r#"
+    CREATE TABLE bandwidth_rules (
+        id            INTEGER PRIMARY KEY,
+        days          INTEGER NOT NULL,
+        start_minute  INTEGER NOT NULL,
+        end_minute    INTEGER NOT NULL,
+        bytes_per_sec INTEGER NOT NULL DEFAULT 0,
+        stop          INTEGER NOT NULL DEFAULT 0,
+        created_at_ms INTEGER NOT NULL
+    ) STRICT;
+    "#,
 ];
 
 pub const LATEST: u32 = MIGRATIONS.len() as u32;
@@ -169,6 +196,10 @@ mod tests {
             for column in ["needs_browser_auth", "error_kind", "error_summary", "mirrors"] {
                 conn.execute(&format!("ALTER TABLE jobs DROP COLUMN {column}"), []).unwrap();
             }
+            // A table added since v1 has to go as well, for the same
+            // reason: replaying the migration that creates it would find
+            // it already there.
+            conn.execute("DROP TABLE bandwidth_rules", []).unwrap();
             conn.pragma_update(None, "user_version", 1).unwrap();
             conn.execute(
                 "INSERT INTO jobs (url, filename, output_dir, state, created_at_ms, updated_at_ms)

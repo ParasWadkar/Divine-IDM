@@ -33,11 +33,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use rusqlite::Connection;
 
+mod bandwidth;
 mod jobs;
 mod profiles;
 mod queues;
 mod schema;
 
+pub use bandwidth::BandwidthRule;
 pub use idm_core::sched::HostKey;
 pub use jobs::{JobState, NewJob, Outcome, StoredJob};
 pub use queues::Queue;
