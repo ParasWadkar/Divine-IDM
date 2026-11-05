@@ -182,6 +182,22 @@ Being straight about this so nothing surprises you:
   filled in. Whatever it exits with, the download is unaffected.
 - **macOS and Linux.** Windows only.
 
+## How fast it is
+
+Measured, not asserted: `tests/bench/results/` has the numbers, the machine
+they came from, and the commands to repeat them. Against a server shaped
+the way a CDN edge is — each connection capped, 30 ms away — DivinePulse
+fetched a 128 MiB file at 70.2 MB/s, against 65.8 for `aria2c -x16` and
+5.1 for curl, and it reached that without being told how many connections
+to open.
+
+Two results there are not flattering and are reported anyway. On a server
+that caps the *client* rather than each connection, aria2c was 5% faster
+(though it made 54 requests to our 19). And with no latency and no cap at
+all — fetching from the same machine — plain curl is twice as fast as
+DivinePulse and four times as fast as aria2c, because parallel downloading
+is pure overhead when there is nothing to hide.
+
 ## If something goes wrong
 
 **The browser says DivinePulse is not reachable.** The app was not running and

@@ -1,0 +1,89 @@
+{
+  "measuredAt": "2026-11-05T19:46:02.832Z",
+  "sizeBytes": 134217728,
+  "shaping": {
+    "mode": "per-conn",
+    "bytesPerSec": 8000000,
+    "rttMs": 30
+  },
+  "runs": 3,
+  "sha256": "1dcc211ab7a8b5565484edd53078c7354f404e66e40f368cdfdda145341b9310",
+  "diskCeiling": {
+    "rate": 4704375963.884137,
+    "lowest": 4618943702.444413,
+    "highest": 4838052202.248568,
+    "steady": true
+  },
+  "server": null,
+  "tools": [
+    {
+      "label": "DivinePulse (adaptive)",
+      "ms": 1912.613,
+      "times": [
+        2072.8917,
+        1887.6447,
+        1912.613
+      ],
+      "requestsPerRun": 17,
+      "peakConnections": 16,
+      "bound": "the scheduler",
+      "bytesPerSec": 70175057.89200428
+    },
+    {
+      "label": "DivinePulse (1 conn)",
+      "ms": 26885.8589,
+      "times": [
+        26915.8804,
+        26885.8589,
+        26854.7656
+      ],
+      "requestsPerRun": 10,
+      "peakConnections": 2,
+      "bound": "the scheduler",
+      "bytesPerSec": 4992130.937650648
+    },
+    {
+      "label": "DivinePulse (16 conn)",
+      "ms": 1889.2601,
+      "times": [
+        1828.4526,
+        1889.2601,
+        1895.1419
+      ],
+      "requestsPerRun": 17,
+      "peakConnections": 16,
+      "bound": "the scheduler",
+      "bytesPerSec": 71042482.71585262
+    },
+    {
+      "label": "curl (1 conn)",
+      "ms": 26358.6029,
+      "times": [
+        26374.988,
+        26358.2079,
+        26358.6029
+      ],
+      "requestsPerRun": 1,
+      "peakConnections": 1,
+      "bound": "the scheduler",
+      "bytesPerSec": 5091989.454418315
+    },
+    {
+      "label": "Ghost Downloader 3",
+      "skipped": "not installed"
+    },
+    {
+      "label": "aria2c (-x16)",
+      "ms": 2038.5379,
+      "times": [
+        2038.5379,
+        2062.1383,
+        1990.0638
+      ],
+      "requestsPerRun": 16,
+      "peakConnections": 16,
+      "bound": "the scheduler",
+      "bytesPerSec": 65840192.62040701
+    }
+  ]
+}
