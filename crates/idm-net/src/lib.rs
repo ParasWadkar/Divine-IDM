@@ -16,6 +16,7 @@ pub mod fetch;
 pub mod ftp;
 pub mod limiter;
 pub mod mirror;
+pub mod range;
 pub mod sftp;
 pub mod stream;
 

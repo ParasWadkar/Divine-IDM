@@ -874,6 +874,76 @@ const routes = {
     },
   },
 
+
+  "/suffix-honest": {
+    description:
+      "Honours `bytes=-N`, answering 206 with the last N bytes and a Content-Range naming " +
+      "where they start. The shape a zip's index is read with.",
+    handler: (req, res, url) => {
+      const total = sizeFromQuery(url);
+      const match = /^bytes=-(\d+)$/.exec(req.headers.range ?? "");
+      if (!match) return serveHonestly(req, res, total);
+
+      const want = Math.min(Number(match[1]), total);
+      const start = total - want;
+      res.writeHead(206, {
+        "Accept-Ranges": "bytes",
+        "Content-Range": `bytes ${start}-${total - 1}/${total}`,
+        "Content-Length": String(want),
+        "Content-Type": "application/octet-stream",
+      });
+      return res.end(bodyFor(start, total));
+    },
+  },
+
+  "/suffix-ignored": {
+    description:
+      "Ignores a suffix range and answers 200 with the whole file. Legal, and the reason a " +
+      "tail read has to say whether it got the tail: the opening bytes must never be read " +
+      "as the closing ones.",
+    handler: (req, res, url) => {
+      const total = sizeFromQuery(url);
+      res.writeHead(200, {
+        "Content-Length": String(total),
+        "Content-Type": "application/octet-stream",
+      });
+      return res.end(bodyFor(0, total));
+    },
+  },
+
+  "/suffix-lies": {
+    description:
+      "Answers 206 to a suffix range but sends far more than was asked for. The case a cap " +
+      "exists for: without one this is a server deciding how much of this process's memory " +
+      "to use.",
+    handler: (req, res, url) => {
+      const total = sizeFromQuery(url);
+      res.writeHead(206, {
+        "Accept-Ranges": "bytes",
+        "Content-Range": `bytes 0-${total - 1}/${total}`,
+        "Content-Length": String(total),
+        "Content-Type": "application/octet-stream",
+      });
+      return res.end(bodyFor(0, total));
+    },
+  },
+
+  "/range-no-content-range": {
+    description:
+      "Answers 206 without a Content-Range, so there is no way to know which bytes arrived. " +
+      "Refused rather than guessed at: guessing is how the wrong part of a file gets read " +
+      "as the right one.",
+    handler: (req, res, url) => {
+      const total = sizeFromQuery(url);
+      const want = Math.min(64, total);
+      res.writeHead(206, {
+        "Content-Length": String(want),
+        "Content-Type": "application/octet-stream",
+      });
+      return res.end(bodyFor(0, want));
+    },
+  },
+
   "/head-disagrees": {
     description:
       "HEAD reports a different Content-Length than GET, which is why the engine probes with " +
