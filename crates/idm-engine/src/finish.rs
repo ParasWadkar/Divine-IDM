@@ -109,7 +109,7 @@ async fn run_hook(settings: &Settings, default_dir: &Path, file: &Path) -> Optio
         return None;
     }
 
-    let downloads = vec![PathBuf::from(&settings.download_dir), default_dir.to_path_buf()];
+    let downloads = hook::landing_dirs(&settings.download_dir, default_dir);
     let program = match hook::vet(&settings.hook_program, &downloads) {
         Ok(program) if !program.is_empty() => PathBuf::from(program),
         // Reported as not having run rather than as a failed download: the

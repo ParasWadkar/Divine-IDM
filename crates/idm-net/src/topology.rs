@@ -176,11 +176,6 @@ impl Learned {
             self.rates.insert(trial.shape, rate);
         }
     }
-
-    /// What has been measured, for a log line or a test.
-    pub fn rate_of(&self, shape: Shape) -> Option<f64> {
-        self.rates.get(&shape).copied()
-    }
 }
 
 /// What the process knows, keyed by origin.
@@ -240,10 +235,16 @@ pub fn memory() -> &'static Memory {
 /// Scheme, host and port. Not the path: two files from one CDN travel the
 /// same way, and keying on the path would mean never measuring the same
 /// thing twice.
+/// Parsed rather than split on `://`, which this did first and which got
+/// the keying wrong in the one way that matters: `https://CDN.invalid` and
+/// `https://cdn.invalid`, or `https://h/x` and `https://h:443/x`, are one
+/// origin and would have become two keys — splitting the very memory this
+/// module exists to accumulate.
 pub fn origin_of(url: &str) -> Option<String> {
-    let (scheme, rest) = url.split_once("://")?;
-    let authority = rest.split(['/', '?', '#']).next()?;
-    (!authority.is_empty()).then(|| format!("{}://{}", scheme.to_ascii_lowercase(), authority))
+    let parsed = crate::Url::parse(url).ok()?;
+    let host = parsed.host_str()?;
+    let port = parsed.port_or_known_default()?;
+    Some(format!("{}://{}:{}", parsed.scheme(), host.to_ascii_lowercase(), port))
 }
 
 #[cfg(test)]
@@ -390,6 +391,12 @@ mod tests {
         // And the scheme matters: h2 is on the https side of this.
         assert_ne!(origin_of("https://cdn.invalid/a"), origin_of("http://cdn.invalid/a"));
         assert_eq!(origin_of("not a url"), None);
-        assert_eq!(origin_of("https:///a"), None);
+        // No host to key on, whatever the rest of it says.
+        assert_eq!(origin_of("file:///C:/x"), None);
+        // The two that a split on `://` got wrong, and that would have
+        // quietly halved the evidence for every site written with a
+        // capital or a spelled-out default port.
+        assert_eq!(origin_of("https://CDN.invalid/a"), origin_of("https://cdn.invalid/a"));
+        assert_eq!(origin_of("https://cdn.invalid:443/a"), origin_of("https://cdn.invalid/a"));
     }
 }

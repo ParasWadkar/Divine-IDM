@@ -97,7 +97,16 @@
     return { url: src };
   }
 
-  /** Where a pill sits: the top-left inside of its video, in page coordinates. */
+  /**
+   * Where a pill sits: the top-left inside of its video, in page
+   * coordinates.
+   *
+   * Page coordinates rather than viewport ones, which is what makes
+   * scrolling free: `getBoundingClientRect().top` falls by exactly as much
+   * as `scrollY` rises, so the sum does not change while the page scrolls
+   * and the pill travels with its video without anything being told to
+   * move it.
+   */
   function place(pill, video) {
     const box = video.getBoundingClientRect();
     pill.style.left = `${Math.round(box.left + window.scrollX + 10)}px`;
@@ -181,18 +190,43 @@
     }, RESCAN_MS);
   }
 
-  // Throttled, because a video page mutates constantly and a rescan on
-  // every mutation would be this extension's own fault for being slow.
-  new MutationObserver(soon).observe(document.documentElement, {
+  /** Whether a batch of mutations could have changed which videos exist. */
+  function touchedAVideo(records) {
+    for (const record of records) {
+      for (const nodes of [record.addedNodes, record.removedNodes]) {
+        for (const node of nodes) {
+          if (node.nodeType !== 1) continue;
+          if (node.tagName === "VIDEO" || node.querySelector?.("video")) return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  // Throttled, and then filtered: a video page mutates constantly -- a
+  // player rewrites its own controls several times a second -- so a
+  // rescan on every batch would be this extension's own fault for being
+  // slow. Almost none of those batches add or remove a video, and
+  // checking that is a walk over a usually-empty node list.
+  new MutationObserver((records) => {
+    if (touchedAVideo(records)) soon();
+  }).observe(document.documentElement, {
     childList: true,
     subtree: true,
   });
-  // Cheap: moving the pills, not rescanning the page.
-  const reposition = () => {
-    for (const [video, pill] of pills) place(pill, video);
-  };
-  window.addEventListener("scroll", reposition, { passive: true });
-  window.addEventListener("resize", reposition, { passive: true });
+  // There is no scroll handler, deliberately. There was one, and it
+  // recomputed a position that scrolling cannot change -- a
+  // `getBoundingClientRect` read and a style write per pill, forcing a
+  // reflow each time round, dozens of times a second, on somebody else's
+  // page, to arrive at the number already there. A resize does move a
+  // video within the page, and fires rarely enough to answer directly.
+  window.addEventListener(
+    "resize",
+    () => {
+      for (const [video, pill] of pills) place(pill, video);
+    },
+    { passive: true },
+  );
 
   scan();
 })();

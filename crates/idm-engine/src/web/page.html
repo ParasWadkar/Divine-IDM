@@ -92,16 +92,18 @@
       const ask = (path, method = "GET") =>
         fetch(path, { method, headers: { Authorization: "Bearer " + key } });
 
+      // Deliberately the same rule as `bytes()` in the window's own script
+      // (app/ui/app.js): one decimal below 100. A self-contained page
+      // cannot import that function, but it can agree with it — the two
+      // are looked at side by side, and "4.2 MB" here against "4 MB" there
+      // reads as a disagreement about the download.
       const size = (n) => {
-        if (n === null || n === undefined) return "";
+        if (!Number.isFinite(n) || n <= 0) return "0 B";
         const units = ["B", "KB", "MB", "GB", "TB"];
-        let value = n;
-        let unit = 0;
-        while (value >= 1024 && unit < units.length - 1) {
-          value /= 1024;
-          unit += 1;
-        }
-        return `${value < 10 && unit > 0 ? value.toFixed(1) : Math.round(value)} ${units[unit]}`;
+        const power = Math.min(Math.floor(Math.log(n) / Math.log(1024)), units.length - 1);
+        const scaled = n / 1024 ** power;
+        const shown = scaled >= 100 || power === 0 ? Math.round(scaled) : scaled.toFixed(1);
+        return `${shown} ${units[power]}`;
       };
 
       const running = (state) => state === "running" || state === "connecting";

@@ -220,13 +220,15 @@ pub fn read_ef2(text: &str) -> Vec<Wanted> {
 
 /// The leaf of a suggested name, or nothing.
 ///
-/// A list is a file from elsewhere and the name in it is free text. The
-/// engine sanitises names again before anything is written, so this is not
-/// the only guard — but handing it a path at all would mean the folder in
-/// the list was something anybody had to think about.
+/// A list is a file from elsewhere and the name in it is free text, so it
+/// goes through the same sanitiser a name from a server does — which takes
+/// the last part, and then also strips the characters Windows will not
+/// have, the trailing dots and spaces it silently drops, and the device
+/// names. Writing a looser version here would have meant two rules for
+/// what a downloaded file may be called, and the looser one winning
+/// wherever it was reached first.
 pub fn leaf(name: &str) -> Option<String> {
-    let leaf = name.rsplit(['/', '\\']).next()?.trim();
-    (!leaf.is_empty() && leaf != "." && leaf != "..").then(|| leaf.to_owned())
+    idm_net::download::sanitise_filename(name)
 }
 
 /// Whether something is an address worth trying.
@@ -236,8 +238,11 @@ pub fn leaf(name: &str) -> Option<String> {
 /// text file. The engine refuses those anyway; refusing here means the
 /// count shown to the person is the count that will actually start.
 fn is_address(text: &str) -> bool {
+    // Length is not re-checked here: both callers skip a line longer than
+    // `LONGEST_LINE` before they get this far, and two places enforcing one
+    // limit is two places to change it.
     let lower = text.to_ascii_lowercase();
-    (lower.starts_with("http://") || lower.starts_with("https://")) && text.len() <= LONGEST_LINE
+    lower.starts_with("http://") || lower.starts_with("https://")
 }
 
 #[cfg(test)]

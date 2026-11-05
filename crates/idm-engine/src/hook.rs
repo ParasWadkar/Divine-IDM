@@ -129,6 +129,16 @@ pub fn vet(program: &str, downloads: &[PathBuf]) -> Result<String, String> {
     Ok(raw.to_owned())
 }
 
+/// Everywhere a download can land, which is where a hook may not live.
+///
+/// One function rather than the pair of paths assembled at each call site.
+/// It is a security-relevant definition — "the folders a download could
+/// write into" — and two hand-built copies of it would be two chances to
+/// forget one when a third place to land is added.
+pub fn landing_dirs(chosen: &str, default_dir: &Path) -> Vec<PathBuf> {
+    vec![PathBuf::from(chosen), default_dir.to_path_buf()]
+}
+
 /// The download folder a path sits in, if it sits in one.
 ///
 /// Canonicalised on both sides where possible, because `D:\dl`, `d:\DL` and

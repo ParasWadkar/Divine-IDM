@@ -41,6 +41,7 @@
 //! unpacked is still a zip that downloaded correctly, so the outcome is
 //! recorded and the download is delivered either way.
 
+use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
@@ -211,9 +212,16 @@ fn unpack_now(archive: &Path) -> Unpacked {
 
     // Before anything is written: a bomb should be refused on what it says
     // about itself, not discovered four gigabytes in.
+    //
+    // `by_index_data` rather than `by_index_raw`: the sizes are in the
+    // central directory, which `ZipArchive::new` has already read, and the
+    // raw accessor parses each entry's *local* header and seeks the reader
+    // to it. That is a seek and a read per entry — up to twenty thousand of
+    // them, each throwing away the buffer's window — to learn a number that
+    // is already in memory.
     let mut promised: u64 = 0;
     for index in 0..zip.len() {
-        if let Ok(entry) = zip.by_index_raw(index) {
+        if let Ok(entry) = zip.by_index_data(index) {
             promised = promised.saturating_add(entry.size());
         }
     }
@@ -244,73 +252,106 @@ fn unpack_now(archive: &Path) -> Unpacked {
     let mut files = 0;
     let mut skipped = 0;
     let mut written: u64 = 0;
+    // Allocated once rather than per entry: a fresh 64 KiB vector for each
+    // of twenty thousand entries is a gigabyte of zero-filling to no end.
+    let mut buffer = vec![0u8; 64 << 10];
+    // Parent folder as written, to the same folder as the file system calls
+    // it. Nearly every entry shares a parent with the one before, and
+    // canonicalising is an open-and-resolve each time.
+    let mut settled: HashMap<PathBuf, PathBuf> = HashMap::new();
 
     for index in 0..zip.len() {
-        let Ok(mut entry) = zip.by_index(index) else {
-            skipped += 1;
-            continue;
-        };
-        // A symlink in a zip is a path pointing wherever it likes, and
-        // following one after the fact would undo every check above.
-        if entry.is_symlink() {
-            skipped += 1;
-            continue;
-        }
-
-        // A name that is not even valid text is one nobody meant.
-        let Ok(stored) = entry.name() else {
-            skipped += 1;
-            continue;
-        };
-        let Some(relative) = safe_name(&stored) else {
-            skipped += 1;
-            continue;
-        };
-        let destination = folder.join(&relative);
-
-        if entry.is_dir() {
-            if std::fs::create_dir_all(&destination).is_err() {
-                skipped += 1;
-            }
-            continue;
-        }
-
-        if let Some(parent) = destination.parent()
-            && std::fs::create_dir_all(parent).is_err()
-        {
-            skipped += 1;
-            continue;
-        }
-
-        // The belt to `safe_name`'s braces. `safe_name` already refuses
-        // everything that could climb; this proves it on the path that was
-        // actually built, after the file system has had its say about
-        // short names, junctions and the rest.
-        let settled = destination
-            .parent()
-            .and_then(|parent| std::fs::canonicalize(parent).ok())
-            .map(|parent| parent.join(destination.file_name().unwrap_or_default()));
-        if !settled.is_some_and(|path| path.starts_with(&root)) {
-            skipped += 1;
-            continue;
-        }
-
-        match write_entry(&mut entry, &destination, written) {
-            Ok(bytes) => {
+        match one_entry(&mut zip, index, &folder, &root, &mut settled, &mut buffer, written) {
+            Taken::Wrote(bytes) => {
                 written += bytes;
                 files += 1;
             }
-            Err(_) => skipped += 1,
-        }
-
-        if written > MOST_UNPACKED_BYTES {
-            return Unpacked::Not {
-                why: format!("it wrote more than the {MOST_UNPACKED_BYTES} bytes allowed"),
-            };
+            Taken::Folder => {}
+            Taken::Skipped => skipped += 1,
         }
     }
 
     Unpacked::Into { folder, files, skipped }
+}
+
+/// What became of one entry.
+enum Taken {
+    Wrote(u64),
+    /// A directory entry, which is neither written nor refused.
+    Folder,
+    Skipped,
+}
+
+/// Takes one entry out, or refuses it.
+///
+/// Its own function because the guards are the substance here: eight of
+/// them, each of which has to both refuse the entry and count it. Inline,
+/// that was eight copies of `skipped += 1; continue;` with the line that
+/// does the work buried underneath, and a guard added in the middle could
+/// easily be written without the counter.
+#[allow(clippy::too_many_arguments)]
+fn one_entry<R: Read + std::io::Seek>(
+    zip: &mut zip::ZipArchive<R>,
+    index: usize,
+    folder: &Path,
+    root: &Path,
+    settled: &mut HashMap<PathBuf, PathBuf>,
+    buffer: &mut [u8],
+    already: u64,
+) -> Taken {
+    let Ok(mut entry) = zip.by_index(index) else {
+        return Taken::Skipped;
+    };
+    // A symlink in a zip is a path pointing wherever it likes, and
+    // following one after the fact would undo every check above.
+    if entry.is_symlink() {
+        return Taken::Skipped;
+    }
+    // A name that is not even valid text is one nobody meant.
+    let Ok(stored) = entry.name() else {
+        return Taken::Skipped;
+    };
+    let Some(relative) = safe_name(&stored) else {
+        return Taken::Skipped;
+    };
+    let destination = folder.join(&relative);
+
+    if entry.is_dir() {
+        if std::fs::create_dir_all(&destination).is_err() {
+            return Taken::Skipped;
+        }
+        return Taken::Folder;
+    }
+
+    let Some(parent) = destination.parent() else {
+        return Taken::Skipped;
+    };
+    if std::fs::create_dir_all(parent).is_err() {
+        return Taken::Skipped;
+    }
+
+    // The belt to `safe_name`'s braces. `safe_name` already refuses
+    // everything that could climb; this proves it on the path that was
+    // actually built, after the file system has had its say about short
+    // names, junctions and the rest.
+    let real = match settled.get(parent) {
+        Some(known) => known.clone(),
+        None => {
+            let Ok(found) = std::fs::canonicalize(parent) else {
+                return Taken::Skipped;
+            };
+            settled.insert(parent.to_path_buf(), found.clone());
+            found
+        }
+    };
+    if !real.starts_with(root) {
+        return Taken::Skipped;
+    }
+
+    match write_entry(&mut entry, &destination, buffer, already) {
+        Ok(bytes) => Taken::Wrote(bytes),
+        Err(_) => Taken::Skipped,
+    }
 }
 
 /// Writes one entry, stopping if the running total would pass the cap.
@@ -322,15 +363,15 @@ fn unpack_now(archive: &Path) -> Unpacked {
 fn write_entry(
     entry: &mut impl Read,
     destination: &Path,
+    buffer: &mut [u8],
     already: u64,
 ) -> Result<u64, std::io::Error> {
     use std::io::Write;
 
     let mut out = std::io::BufWriter::new(std::fs::File::create(destination)?);
-    let mut buffer = vec![0u8; 64 << 10];
     let mut written = 0u64;
     loop {
-        let read = entry.read(&mut buffer)?;
+        let read = entry.read(buffer)?;
         if read == 0 {
             break;
         }
