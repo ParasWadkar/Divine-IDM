@@ -95,8 +95,6 @@ pub async fn read_suffix(
 }
 
 async fn fetch(config: &HttpConfig, url: &str, range: &str, cap: usize) -> Result<Window> {
-    use tokio_stream::StreamExt;
-
     let client = crate::client::redirect_resolver(config)
         .map_err(|error| RangeError::Http(error.to_string()))?;
 
@@ -133,6 +131,60 @@ async fn fetch(config: &HttpConfig, url: &str, range: &str, cap: usize) -> Resul
         _ => (None, response.content_length()),
     };
 
+    Ok(Window { bytes: drain(response, cap).await?, offset, total })
+}
+
+/// A whole document, fetched outright and capped.
+///
+/// For the small text files this program reads rather than downloads: a
+/// page whose links are wanted, a `robots.txt` that says whether they may
+/// be. No range is asked for, because these have no interesting middle --
+/// either the whole thing fits under the cap or it is not the kind of file
+/// this was for.
+#[derive(Debug, Clone)]
+pub struct Page {
+    pub bytes: Vec<u8>,
+    /// Where the body actually came from, after any redirects.
+    ///
+    /// Not the address that was asked for. Relative links in a page resolve
+    /// against where the page arrived from, and a same-origin rule applied
+    /// to the requested address would be trivially escaped by a redirect.
+    pub url: String,
+    /// The `Content-Type` header, verbatim and including any parameters.
+    pub content_type: Option<String>,
+    /// The status, so a caller can tell "there is no such file" from "that
+    /// went wrong" -- which is the whole of how a missing `robots.txt` is
+    /// read as permission.
+    pub status: u16,
+}
+
+/// Fetches a whole document, giving up if it runs past `cap`.
+pub async fn read_page(config: &HttpConfig, url: &str, cap: usize) -> Result<Page> {
+    let client = crate::client::redirect_resolver(config)
+        .map_err(|error| RangeError::Http(error.to_string()))?;
+
+    let (response, _) = crate::auth::send(client.get(url), config.auth.as_ref(), url)
+        .await
+        .map_err(|error| RangeError::Http(error.to_string()))?;
+
+    let status = response.status().as_u16();
+    let landed = response.url().to_string();
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+
+    // The body is read whatever the status, because an error page's body is
+    // the only thing that explains it -- but it is capped like any other.
+    let bytes = drain(response, cap).await?;
+    Ok(Page { bytes, url: landed, content_type, status })
+}
+
+/// Collects a body, refusing it the moment it passes `cap`.
+async fn drain(response: reqwest::Response, cap: usize) -> Result<Vec<u8>> {
+    use tokio_stream::StreamExt;
+
     let mut body = Vec::new();
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
@@ -145,8 +197,7 @@ async fn fetch(config: &HttpConfig, url: &str, range: &str, cap: usize) -> Resul
         }
         body.extend_from_slice(&chunk);
     }
-
-    Ok(Window { bytes: body, offset, total })
+    Ok(body)
 }
 
 /// Pulls the start offset and the total out of `bytes 100-199/1234`.

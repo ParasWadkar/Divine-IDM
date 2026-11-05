@@ -580,6 +580,18 @@ pub enum Request {
     PeekArchive {
         url: String,
     },
+    /// Collects the links on a page, without downloading any of them.
+    ///
+    /// Refused for browser clients, and more firmly than most: this makes
+    /// the engine fetch pages of its own accord, one after another, at an
+    /// address somebody else's page would be choosing. An extension that
+    /// could ask for this could use this machine to read a site it cannot
+    /// reach itself.
+    GrabLinks {
+        url: String,
+        #[serde(default)]
+        follow: GrabDepth,
+    },
     /// The bandwidth schedule, and what it is doing now.
     ///
     /// Refused for browser clients along with the other two: a schedule
@@ -786,6 +798,38 @@ pub struct ArchiveEntryView {
     pub is_directory: bool,
 }
 
+/// How far a link grab goes.
+///
+/// Two values rather than a depth number. "Depth" is the one parameter
+/// that turns collecting the links off a page into crawling a site, so
+/// there is no number here for anybody to raise: the second value reads
+/// the pages the first page links to, and stops.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GrabDepth {
+    /// Only the page that was named.
+    #[default]
+    ThisPage,
+    /// That page, and the pages it links to.
+    AndWhatItLinksTo,
+}
+
+/// One link found on a page.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GrabbedLinkView {
+    pub url: String,
+    /// The link's own text, for showing beside the address.
+    pub text: String,
+    /// The page it was found on, which matters once more than one was read.
+    pub from: String,
+    /// Which folder this would be sorted into, when that is known.
+    ///
+    /// The picker groups by it, so a page of fifty images and three
+    /// archives can be narrowed to the three without reading addresses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
+}
+
 /// One rule in the bandwidth schedule, as a client sees it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BandwidthRuleView {
@@ -882,6 +926,14 @@ pub enum Response {
     BandwidthRules {
         rules: Vec<BandwidthRuleView>,
         now: ScheduleNow,
+    },
+    Grabbed {
+        links: Vec<GrabbedLinkView>,
+        /// How many pages were read to find them.
+        pages: usize,
+        /// Why it stopped short, when it did.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
     },
     Archive {
         entries: Vec<ArchiveEntryView>,

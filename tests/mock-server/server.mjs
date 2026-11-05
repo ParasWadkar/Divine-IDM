@@ -30,6 +30,14 @@ function byteAt(offset) {
   return x & 0xff;
 }
 
+/**
+ * What `/robots.txt` says, or `null` for a 404.
+ *
+ * Set by `/_robots`. State in a mock server is usually a mistake, but each
+ * test spawns its own, so there is nobody to race with.
+ */
+let robotsText = null;
+
 /** The key the encrypted HLS routes use. Fixed, so tests are repeatable. */
 const HLS_KEY = Buffer.from("0123456789abcdef0123456789abcdef", "hex");
 
@@ -1047,6 +1055,116 @@ const routes = {
     },
   },
 
+
+  // --- pages with links on them --------------------------------------
+  //
+  // For the link grabber. Deliberately messy: an off-origin link, a
+  // `mailto:`, an image `src`, a repeat, and -- on the followed pages -- a
+  // link one level further out, which must not be followed.
+
+  "/robots.txt": {
+    description:
+      "Whatever a test last set with /_robots?text=..., or a 404 when it set nothing. " +
+      "A site with no robots.txt is saying nothing, which is not the same as saying no.",
+    handler: (req, res) => {
+      if (robotsText === null) {
+        res.writeHead(404, { "Content-Type": "text/plain" });
+        return res.end("no robots.txt here\n");
+      }
+      res.writeHead(200, { "Content-Type": "text/plain" });
+      res.end(robotsText);
+    },
+  },
+
+  "/_robots": {
+    description: "Sets what /robots.txt will say. ?text= the body, or omitted to go back to a 404.",
+    handler: (req, res, url) => {
+      robotsText = url.searchParams.has("text") ? url.searchParams.get("text") : null;
+      res.writeHead(200, { "Content-Type": "text/plain" });
+      res.end("ok\n");
+    },
+  },
+
+  "/site/index.html": {
+    description:
+      "A page of links. ?files= how many file links, ?pages= how many page links worth " +
+      "following. Always includes one off-origin link, one mailto, one image src and one " +
+      "repeat of the first file, so the filtering and the de-duplication are exercised.",
+    handler: (req, res, url) => {
+      const files = Number(url.searchParams.get("files") ?? 3);
+      const pages = Number(url.searchParams.get("pages") ?? 2);
+      const parts = ["<!doctype html><html><head><title>index</title></head><body>"];
+      for (let i = 0; i < files; i += 1) {
+        parts.push(`<a href="top-${i}.bin">file number ${i}</a>`);
+      }
+      for (let i = 1; i <= pages; i += 1) {
+        parts.push(`<a href="/site/page.html?n=${i}">page ${i}</a>`);
+      }
+      parts.push('<a href="http://elsewhere.invalid/off.bin">somewhere else</a>');
+      parts.push('<a href="mailto:nobody@example.com">mail</a>');
+      parts.push('<img src="logo.png" alt="a logo">');
+      parts.push('<a href="top-0.bin">the same file again</a>');
+      parts.push("</body></html>");
+      const body = parts.join("\n");
+      res.writeHead(200, {
+        "Content-Type": "text/html; charset=utf-8",
+        "Content-Length": Buffer.byteLength(body),
+      });
+      res.end(body);
+    },
+  },
+
+  "/site/page.html": {
+    description:
+      "A page reached from the index. ?n= which one. Links to two files of its own and to " +
+      "/site/deeper.html, which a grab that stops at one level must not fetch.",
+    handler: (req, res, url) => {
+      const n = url.searchParams.get("n") ?? "0";
+      const body =
+        `<!doctype html><html><body>` +
+        `<a href="/site/sub-${n}-a.bin">a</a>` +
+        `<a href="/site/sub-${n}-b.bin">b</a>` +
+        `<a href="/site/deeper.html">deeper</a>` +
+        `</body></html>`;
+      res.writeHead(200, {
+        "Content-Type": "text/html",
+        "Content-Length": Buffer.byteLength(body),
+      });
+      res.end(body);
+    },
+  },
+
+  "/site/deeper.html": {
+    description:
+      "One level further out than a grab goes. Fetching this at all is the failure, so its " +
+      "link is named to say so.",
+    handler: (req, res) => {
+      const body = `<!doctype html><html><body><a href="/site/must-not-appear.bin">no</a></body></html>`;
+      res.writeHead(200, {
+        "Content-Type": "text/html",
+        "Content-Length": Buffer.byteLength(body),
+      });
+      res.end(body);
+    },
+  },
+
+  "/site/many.html": {
+    description: "A page with ?links= links on it, for the cap. Default two thousand.",
+    handler: (req, res, url) => {
+      const count = Number(url.searchParams.get("links") ?? 2000);
+      const parts = ["<!doctype html><html><body>"];
+      for (let i = 0; i < count; i += 1) {
+        parts.push(`<a href="/site/n-${i}.bin">n</a>`);
+      }
+      parts.push("</body></html>");
+      const body = parts.join("");
+      res.writeHead(200, {
+        "Content-Type": "text/html",
+        "Content-Length": Buffer.byteLength(body),
+      });
+      res.end(body);
+    },
+  },
 
   "/archive.zip": {
     description:

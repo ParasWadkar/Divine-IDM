@@ -2401,6 +2401,64 @@ impl Engine {
     /// the index is, and then the index itself -- unless the tail already
     /// contained it, which it does for any archive of a few thousand
     /// files. A four-gigabyte archive costs the same as a small one.
+    /// Collects the links on a page.
+    ///
+    /// The refusals here are the same shape as `peek_archive`'s and for a
+    /// stronger version of the same reason: this one makes the engine
+    /// fetch, in sequence, a series of addresses it worked out for itself.
+    async fn grab_links(
+        &self,
+        client: &ClientInfo,
+        url: String,
+        follow: idm_ipc::GrabDepth,
+    ) -> Response {
+        if client.is_browser() {
+            return Response::Rejected {
+                reason: "the browser integration cannot ask for the links on a page".into(),
+            };
+        }
+
+        // The same vetting a download gets. Narrowed further inside the
+        // grabber, which takes http and https only -- a magnet names a
+        // swarm and has no links on it.
+        let request = idm_ipc::DownloadRequest { url: url.clone(), ..Default::default() };
+        if let Err(reason) = request.validate_with(true) {
+            return Response::Rejected { reason };
+        }
+
+        let settings = self.inner.settings.lock().await.clone();
+        let http = idm_net::client::HttpConfig {
+            proxy: crate::proxy::mode_for(&settings, &url).await,
+            ..Default::default()
+        };
+
+        let depth = match follow {
+            idm_ipc::GrabDepth::ThisPage => crate::grab::Depth::ThisPage,
+            idm_ipc::GrabDepth::AndWhatItLinksTo => crate::grab::Depth::AndWhatItLinksTo,
+        };
+
+        match crate::grab::grab(&http, &url, depth).await {
+            Ok(grab) => Response::Grabbed {
+                links: grab
+                    .links
+                    .into_iter()
+                    .map(|link| idm_ipc::GrabbedLinkView {
+                        category: crate::category::category_for(
+                            link.url.rsplit('/').next().unwrap_or_default(),
+                        )
+                        .map(str::to_owned),
+                        url: link.url,
+                        text: link.text,
+                        from: link.from,
+                    })
+                    .collect(),
+                pages: grab.pages.len(),
+                note: grab.note,
+            },
+            Err(error) => Response::Rejected { reason: error.to_string() },
+        }
+    }
+
     async fn peek_archive(&self, client: &ClientInfo, url: String) -> Response {
         if client.is_browser() {
             // A fetch of this program's choosing, to an address a page
@@ -3038,6 +3096,7 @@ impl Handler for Engine {
             Request::SetSettings(settings) => self.set_settings(client, settings).await,
             Request::CancelPostAction => self.cancel_post_action().await,
             Request::PeekArchive { url } => self.peek_archive(client, url).await,
+            Request::GrabLinks { url, follow } => self.grab_links(client, url, follow).await,
             Request::ListBandwidthRules => self.list_bandwidth_rules(client).await,
             Request::SetBandwidthRule {
                 id,
