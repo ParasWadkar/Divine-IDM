@@ -1680,6 +1680,116 @@ async function showHistory() {
   }
 }
 
+// ------------------------------------------------------- looking inside
+
+/**
+ * Whether an address looks like an archive this can list.
+ *
+ * On the address alone, because the whole point is deciding before
+ * fetching anything -- asking the server what it is would be a request,
+ * and one that tells it somebody is interested.
+ */
+function looksLikeAnArchive(url) {
+  try {
+    return new URL(url).pathname.toLowerCase().endsWith(".zip");
+  } catch {
+    return false;
+  }
+}
+
+function showPeekButton() {
+  $("peek").hidden = !looksLikeAnArchive($("url").value.trim());
+}
+
+$("url").addEventListener("input", showPeekButton);
+
+$("peek").addEventListener("click", async () => {
+  const url = $("url").value.trim();
+  if (!url) return;
+
+  const button = $("peek");
+  const label = button.querySelector("span");
+  const was = label.textContent;
+  label.textContent = "Looking…";
+  button.disabled = true;
+
+  try {
+    const inside = await invoke("peek_archive", { url });
+    showArchive(url, inside);
+  } catch (error) {
+    toast(String(error), true);
+  } finally {
+    label.textContent = was;
+    button.disabled = false;
+  }
+});
+
+function showArchive(url, inside) {
+  const list = $("archive-list");
+  list.replaceChildren();
+
+  const entries = inside.entries ?? [];
+  for (const entry of entries) {
+    const row = document.createElement("div");
+    row.className = "archive-row";
+
+    const name = document.createElement("span");
+    name.className = entry.is_directory ? "archive-name is-folder" : "archive-name";
+    name.textContent = entry.name;
+
+    const spacer = document.createElement("span");
+    spacer.className = "spacer";
+
+    const size = document.createElement("small");
+    // A folder has no size of its own, and showing "0 B" for one reads as
+    // an empty file rather than as a folder.
+    size.textContent = entry.is_directory ? "" : bytes(entry.uncompressed);
+
+    row.append(name, spacer, size);
+    list.append(row);
+  }
+
+  if (entries.length === 0) {
+    list.append(empty("There is nothing in this archive."));
+  }
+
+  const files = entries.filter((entry) => !entry.is_directory).length;
+  $("archive-message").textContent = inside.truncated
+    ? `The first ${files} files in this archive — there are more — ${bytes(inside.total_uncompressed)} unpacked so far.`
+    : `${files} file${files === 1 ? "" : "s"} in this archive, ${bytes(inside.total_uncompressed)} unpacked.`;
+
+  const overlay = $("archive-modal");
+  const close = $("archive-close");
+  const download = $("archive-download");
+
+  const finish = () => {
+    overlay.hidden = true;
+    close.removeEventListener("click", onClose);
+    download.removeEventListener("click", onDownload);
+    overlay.removeEventListener("keydown", onKey);
+  };
+  const onClose = () => finish();
+  const onDownload = () => {
+    finish();
+    // Straight into the ordinary path, with the address already in the
+    // box: having just looked inside, being made to find the button again
+    // would be absurd.
+    $("add").requestSubmit();
+  };
+  const onKey = (event) => {
+    if (event.key === "Escape") onClose();
+  };
+
+  close.addEventListener("click", onClose);
+  download.addEventListener("click", onDownload);
+  overlay.addEventListener("keydown", onKey);
+  overlay.hidden = false;
+  close.focus();
+  // Named so the dialog says which archive, since the address box behind
+  // it is covered.
+  void url;
+}
+
 // ---------------------------------------------------------------------------
 // Wiring
 // ---------------------------------------------------------------------------
@@ -1703,6 +1813,9 @@ $("add").addEventListener("submit", async (event) => {
       queue: chosen === "" ? null : Number(chosen),
     });
     field.value = "";
+    // The box is empty now, so the button for what was in it should go
+    // with it rather than offering to look inside nothing.
+    showPeekButton();
     // Cleared along with the address, since they belonged to it. Left
     // behind, they would silently attach to whatever was typed next.
     box.value = "";
@@ -1781,6 +1894,7 @@ $("paste").addEventListener("click", async () => {
     if (!text) return toast("Nothing on the clipboard", true);
     $("url").value = text;
     $("url").focus();
+    showPeekButton();
   } catch (error) {
     toast(String(error), true);
   }

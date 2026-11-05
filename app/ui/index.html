@@ -120,6 +120,12 @@
                 <option value="">No queue</option>
               </select>
             </label>
+            <!-- Only for an archive, and only before downloading one: the
+                 whole point is seeing what is in it without fetching it. -->
+            <button type="button" id="peek" class="ghost" hidden>
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z" /><circle cx="12" cy="12" r="3" /></svg>
+              <span>Look inside</span>
+            </button>
             <button type="submit" class="primary">
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11" /><path d="m7 11 5 5 5-5" /><path d="M5 20h14" /></svg>
               <span>Download</span>
@@ -608,6 +614,17 @@
     <!-- Seven checkboxes rather than a drag-to-paint week grid. The grid
          looks better in a screenshot and is worse to use with a keyboard,
          and this says exactly the same thing. -->
+    <div id="archive-modal" class="modal-overlay" hidden>
+      <div class="modal modal-wide">
+        <p id="archive-message">Inside this archive</p>
+        <div id="archive-list" class="archive-list"></div>
+        <div class="modal-actions">
+          <button id="archive-close" class="ghost">Close</button>
+          <button id="archive-download">Download it</button>
+        </div>
+      </div>
+    </div>
+
     <div id="rule-modal" class="modal-overlay" hidden>
       <div class="modal">
         <p id="rule-message">Add a rule</p>

@@ -360,6 +360,29 @@ button.ghost {
   font-weight: 500;
 }
 
+/* The button beside the address box. It needs the same treatment as the
+   Download button next to it: an SVG with no width or height of its own
+   renders at the default 300x150, which turns a button into a slab. */
+#peek {
+  display: flex;
+  flex: none;
+  gap: 8px;
+  align-items: center;
+  justify-content: center;
+  padding: 12px 14px;
+  white-space: nowrap;
+}
+
+#peek svg {
+  width: 17px;
+  height: 17px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
 button.ghost:hover {
   color: var(--text);
   border-color: var(--accent-dim);
@@ -1696,6 +1719,51 @@ button.icon:hover {
 
 .browser-status.connected {
   color: var(--good);
+}
+
+/* Wider than the other dialogs: this one holds a file list, and names in
+   an archive are long. */
+.modal-wide {
+  width: min(680px, 90vw);
+}
+
+.archive-list {
+  max-height: 46vh;
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  margin: 8px 0;
+}
+
+.archive-row {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  padding: 5px 10px;
+  font-size: 13px;
+}
+
+.archive-row + .archive-row {
+  border-top: 1px solid var(--line);
+}
+
+.archive-row .spacer {
+  flex: 1;
+}
+
+.archive-row small {
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+/* A name from an archive. Broken anywhere rather than overflowing, because
+   it was chosen by whoever built the archive and may be very long. */
+.archive-name {
+  overflow-wrap: anywhere;
+}
+
+.archive-name.is-folder {
+  color: var(--muted);
 }
 
 .schedule-list {

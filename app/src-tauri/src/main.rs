@@ -97,6 +97,24 @@ async fn queues(state: State<'_, AppState>) -> Result<serde_json::Value, String>
     queue_reply(state.request(Request::ListQueues).await)
 }
 
+/// Lists what is inside an archive, reading only its index.
+#[tauri::command]
+async fn peek_archive(
+    state: State<'_, AppState>,
+    url: String,
+) -> Result<serde_json::Value, String> {
+    match state.request(Request::PeekArchive { url }).await {
+        Response::Archive { entries, truncated, total_uncompressed } => Ok(serde_json::json!({
+            "entries": entries,
+            "truncated": truncated,
+            "total_uncompressed": total_uncompressed,
+        })),
+        Response::Rejected { reason } => Err(reason),
+        Response::Error { message } => Err(message),
+        other => Err(format!("unexpected reply: {other:?}")),
+    }
+}
+
 /// The bandwidth schedule, and what it is doing right now.
 #[tauri::command]
 async fn bandwidth_rules(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
@@ -641,6 +659,7 @@ fn main() {
             pause_job,
             refresh_link,
             queues,
+            peek_archive,
             bandwidth_rules,
             set_bandwidth_rule,
             forget_bandwidth_rule,
