@@ -360,10 +360,12 @@ button.ghost {
   font-weight: 500;
 }
 
-/* The button beside the address box. It needs the same treatment as the
-   Download button next to it: an SVG with no width or height of its own
-   renders at the default 300x150, which turns a button into a slab. */
-#peek {
+/* Every ghost button that carries an icon. An SVG with no width or height
+   of its own renders at the default 300x150, which turns a button into a
+   slab -- so this was once a rule for the one button that had an icon, and
+   the next two icons added arrived as slabs. A class rather than a list of
+   ids: the next one will be fine without anybody remembering this. */
+button.with-icon {
   display: flex;
   flex: none;
   gap: 8px;
@@ -373,7 +375,7 @@ button.ghost {
   white-space: nowrap;
 }
 
-#peek svg {
+button.with-icon svg {
   width: 17px;
   height: 17px;
   fill: none;
@@ -381,6 +383,15 @@ button.ghost {
   stroke-width: 1.8;
   stroke-linecap: round;
   stroke-linejoin: round;
+}
+
+/* In the list header these sit beside a search box and a select, not
+   beside the Download button, so they take that row's height instead of
+   the topbar's. */
+.list-tools button.with-icon {
+  padding: 7px 12px;
+  border-radius: 8px;
+  font-size: 13px;
 }
 
 button.ghost:hover {

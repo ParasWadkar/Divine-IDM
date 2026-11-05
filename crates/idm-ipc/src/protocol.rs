@@ -631,6 +631,25 @@ pub enum Request {
         #[serde(default)]
         follow: GrabDepth,
     },
+    /// Everything still to download, as a text list.
+    ///
+    /// Refused for browser clients: the list says what this person is
+    /// fetching and from where, which is theirs and not a page's.
+    ExportList,
+    /// Reads a list of downloads and queues what is in it.
+    ///
+    /// Refused for browser clients, and this one hardly needs arguing: it
+    /// turns a block of text into any number of downloads, so a page that
+    /// could send one could queue a thousand.
+    ///
+    /// `name` is only used to tell `.ef2` from the text formats; nothing
+    /// is read from disk here, because the file was opened by the app.
+    ImportList {
+        name: String,
+        text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        queue: Option<i64>,
+    },
     /// The bandwidth schedule, and what it is doing now.
     ///
     /// Refused for browser clients along with the other two: a schedule
@@ -965,6 +984,22 @@ pub enum Response {
     BandwidthRules {
         rules: Vec<BandwidthRuleView>,
         now: ScheduleNow,
+    },
+    /// A list of downloads, written out.
+    Listed {
+        text: String,
+        /// How many downloads it describes.
+        items: usize,
+    },
+    /// What came of reading a list in.
+    Imported {
+        /// How many were queued.
+        added: usize,
+        /// How many the list held that were not: a line that is not an
+        /// address, an entry needing a form submission, one the engine
+        /// refused. Shown rather than swallowed, because a list that
+        /// imported half of itself silently is worse than one that says so.
+        skipped: usize,
     },
     Grabbed {
         links: Vec<GrabbedLinkView>,

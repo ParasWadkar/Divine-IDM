@@ -122,7 +122,7 @@
             </label>
             <!-- Only for an archive, and only before downloading one: the
                  whole point is seeing what is in it without fetching it. -->
-            <button type="button" id="peek" class="ghost" hidden>
+            <button type="button" id="peek" class="ghost with-icon" hidden>
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z" /><circle cx="12" cy="12" r="3" /></svg>
               <span>Look inside</span>
             </button>
@@ -130,7 +130,7 @@
                  because a directory listing has no extension and a page
                  often has one: the address cannot tell them apart, and the
                  engine checks the content type before parsing anything. -->
-            <button type="button" id="grab" class="ghost" hidden>
+            <button type="button" id="grab" class="ghost with-icon" hidden>
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 13a5 5 0 0 0 7 0l2-2a5 5 0 0 0-7-7l-1 1" /><path d="M14 11a5 5 0 0 0-7 0l-2 2a5 5 0 0 0 7 7l1-1" /></svg>
               <span>Get links</span>
             </button>
@@ -226,6 +226,18 @@
                     <option value="progress">Progress</option>
                   </select>
                 </label>
+                <!-- A list, not a session. Export writes what is still to
+                     download in aria2's input-file format, so the file is
+                     one aria2c reads too; import takes that, a bare list of
+                     addresses, or an .ef2 from IDM. -->
+                <button type="button" id="import-list" class="ghost with-icon" title="Queue the downloads in a text list, or in an .ef2 exported from IDM.">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11" /><path d="m7 10 5 5 5-5" /><path d="M5 20h14" /></svg>
+                  <span>Import list</span>
+                </button>
+                <button type="button" id="export-list" class="ghost with-icon" title="Write everything still to download out as a text list, with its mirrors.">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20V9" /><path d="m7 14 5-5 5 5" /><path d="M5 4h14" /></svg>
+                  <span>Export list</span>
+                </button>
               </div>
             </div>
 

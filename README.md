@@ -112,6 +112,18 @@ Being straight about this so nothing surprises you:
   Settings if you would rather it did not run. Files over 8 GB are not
   scanned -- reading a disc image twice is a long wait for a verdict -- and
   that is reported as "not scanned" rather than as a clean bill.
+- **Importing what is in a list beyond the addresses.** Export writes
+  everything still to download, with its mirrors, in the format
+  `aria2c --input-file` takes -- so the file is one aria2c will fetch as
+  well as one DivinePulse reads back. Import takes that, a bare list of
+  addresses, or an `.ef2` exported from IDM. From an `.ef2` the cookies,
+  user name and password are deliberately **not** imported: those are
+  credentials, and a file that has been passed around should not start
+  sending somebody's session to a server because it said to. An entry
+  needing a form submission (`postdata`) is skipped rather than fetched,
+  since the same address fetched plainly is a different file -- usually a
+  login page saved under the right name. A name in a list is reduced to
+  its last part, so a list cannot choose where a download lands.
 - **Unpacking anything but a `.zip`.** Switch it on in Settings and a
   finished `.zip` is unpacked into a folder of the same name beside it --
   numbered if one is already there, since two archives of the same name are

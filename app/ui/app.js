@@ -1761,6 +1761,46 @@ function showPeekButton() {
   $("grab").hidden = !looksLikeAWebAddress(url);
 }
 
+// ----------------------------------------------------- lists in and out
+
+// Both dialogs are opened by the Rust side, because the page has no file
+// access of its own and is not given any: the engine is handed the text of
+// a list, never a path to one.
+
+$("import-list").addEventListener("click", async () => {
+  const button = $("import-list");
+  button.disabled = true;
+  try {
+    const result = await invoke("import_list", { queue: null });
+    // Nothing means the dialog was dismissed, which is not a failure and
+    // not worth a message.
+    if (!result) return;
+    const skipped = result.skipped
+      ? `, ${result.skipped} skipped`
+      : "";
+    toast(`Queued ${result.added} download${result.added === 1 ? "" : "s"}${skipped}`);
+    refresh();
+  } catch (error) {
+    toast(String(error), true);
+  } finally {
+    button.disabled = false;
+  }
+});
+
+$("export-list").addEventListener("click", async () => {
+  const button = $("export-list");
+  button.disabled = true;
+  try {
+    const items = await invoke("export_list");
+    if (items === null) return;
+    toast(`Wrote ${items} download${items === 1 ? "" : "s"} to the list`);
+  } catch (error) {
+    toast(String(error), true);
+  } finally {
+    button.disabled = false;
+  }
+});
+
 // ------------------------------------------------------- the link picker
 
 /**

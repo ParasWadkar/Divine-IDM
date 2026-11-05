@@ -17,6 +17,7 @@ pub mod finish;
 pub mod folder;
 pub mod grab;
 pub mod hook;
+pub mod list;
 pub mod pac;
 pub mod pairing;
 pub mod proxy;

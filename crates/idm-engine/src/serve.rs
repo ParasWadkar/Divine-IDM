@@ -2442,6 +2442,87 @@ impl Engine {
     /// The refusals here are the same shape as `peek_archive`'s and for a
     /// stronger version of the same reason: this one makes the engine
     /// fetch, in sequence, a series of addresses it worked out for itself.
+    /// Writes everything still to download out as a text list.
+    async fn export_list(&self, client: &ClientInfo) -> Response {
+        if client.is_browser() {
+            return Response::Rejected {
+                reason: "the browser integration cannot read the download list".into(),
+            };
+        }
+
+        let Some(store) = self.inner.store.clone() else {
+            return Response::Error { message: "there is no store to read".into() };
+        };
+        // The store rather than the live job map, because mirrors are kept
+        // on the row: a download restored after a restart has them there
+        // and nowhere else.
+        let rows = match tokio::task::spawn_blocking(move || store.unfinished_jobs()).await {
+            Ok(Ok(rows)) => rows,
+            Ok(Err(error)) => return Response::Error { message: error.to_string() },
+            Err(error) => return Response::Error { message: error.to_string() },
+        };
+
+        let items: Vec<crate::list::Wanted> = rows
+            .into_iter()
+            .map(|row| crate::list::Wanted {
+                url: row.url,
+                mirrors: row.mirrors,
+                // The name it is actually being saved as, not the one the
+                // address suggests: somebody who renamed a download meant
+                // it, and an export that dropped the rename would come
+                // back as a different file.
+                filename: Some(row.filename),
+                referrer: row.referrer,
+            })
+            .collect();
+
+        Response::Listed { text: crate::list::write(&items), items: items.len() }
+    }
+
+    /// Reads a list of downloads and queues what is in it.
+    async fn import_list(
+        &self,
+        client: &ClientInfo,
+        name: &str,
+        text: &str,
+        queue: Option<i64>,
+    ) -> Response {
+        if client.is_browser() {
+            return Response::Rejected {
+                reason: "the browser integration cannot import a list of downloads".into(),
+            };
+        }
+
+        let wanted = crate::list::read(name, text);
+        if wanted.is_empty() {
+            return Response::Rejected {
+                reason: "there were no web addresses in that file".into(),
+            };
+        }
+
+        let mut added = 0;
+        let mut skipped = 0;
+        for item in wanted {
+            let request = idm_ipc::DownloadRequest {
+                url: item.url,
+                mirrors: item.mirrors,
+                filename: item.filename,
+                referrer: item.referrer,
+                queue,
+                ..Default::default()
+            };
+            // Through `enqueue`, not around it: a list is a file from
+            // somewhere else, and every rule a typed address goes through
+            // applies to one that arrived in a text file.
+            match self.enqueue(client, request).await {
+                Response::Accepted { .. } => added += 1,
+                _ => skipped += 1,
+            }
+        }
+
+        Response::Imported { added, skipped }
+    }
+
     async fn grab_links(
         &self,
         client: &ClientInfo,
@@ -3150,6 +3231,10 @@ impl Handler for Engine {
             Request::CancelPostAction => self.cancel_post_action().await,
             Request::PeekArchive { url } => self.peek_archive(client, url).await,
             Request::GrabLinks { url, follow } => self.grab_links(client, url, follow).await,
+            Request::ExportList => self.export_list(client).await,
+            Request::ImportList { name, text, queue } => {
+                self.import_list(client, &name, &text, queue).await
+            }
             Request::ListBandwidthRules => self.list_bandwidth_rules(client).await,
             Request::SetBandwidthRule {
                 id,
@@ -4737,6 +4822,95 @@ mod tests {
         };
         settings.download_dir = dir.to_owned();
         engine.handle(client, Request::SetSettings(settings)).await
+    }
+
+    #[tokio::test]
+    async fn the_browser_cannot_read_or_write_the_download_list() {
+        // One says what this person is fetching and from where; the other
+        // turns a block of text into any number of downloads.
+        let (_dir, engine) = engine();
+        assert!(matches!(
+            engine.handle(&browser(), Request::ExportList).await,
+            Response::Rejected { .. }
+        ));
+        let importing = Request::ImportList {
+            name: "list.txt".into(),
+            text: "https://example.invalid/x.bin".into(),
+            queue: None,
+        };
+        assert!(matches!(engine.handle(&browser(), importing).await, Response::Rejected { .. }));
+    }
+
+    #[tokio::test]
+    async fn a_list_of_addresses_is_queued() {
+        let (_dir, engine) = engine();
+        occupy_the_slot(&engine).await;
+
+        let importing = Request::ImportList {
+            name: "list.txt".into(),
+            text: "# mine
+https://example.invalid/a.bin
+https://example.invalid/b.bin
+"
+            .into(),
+            queue: None,
+        };
+        match engine.handle(&desktop(), importing).await {
+            Response::Imported { added, skipped } => assert_eq!((added, skipped), (2, 0)),
+            other => panic!("expected an import, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_file_with_no_addresses_in_it_is_refused() {
+        // Rather than reported as importing nothing, which looks like a
+        // success and leaves somebody wondering where their downloads went.
+        let (_dir, engine) = engine();
+        let importing = Request::ImportList {
+            name: "notes.txt".into(),
+            text: "shopping list
+milk
+"
+            .into(),
+            queue: None,
+        };
+        assert!(matches!(engine.handle(&desktop(), importing).await, Response::Rejected { .. }));
+    }
+
+    #[tokio::test]
+    async fn what_is_exported_can_be_imported_again() {
+        // The join the two halves are for. list.rs round-trips its own
+        // format in its own tests; this is about the engine filling it from
+        // real downloads and reading real downloads back out of it.
+        // With a store, because mirrors live on the row rather than in
+        // the live job map -- which is also why the export reads the store.
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(idm_store::Store::in_memory().unwrap());
+        let engine = engine_with_store(dir.path(), store);
+        occupy_the_slot(&engine).await;
+
+        let request = DownloadRequest {
+            url: "https://example.invalid/film.mp4".into(),
+            mirrors: vec!["https://mirror.invalid/film.mp4".into()],
+            size_hint: Some(10 << 20),
+            ..Default::default()
+        };
+        assert!(matches!(engine.enqueue(&desktop(), request).await, Response::Accepted { .. }));
+
+        let Response::Listed { text, items } = engine.handle(&desktop(), Request::ExportList).await
+        else {
+            panic!("expected a list");
+        };
+        assert!(items >= 1, "{text}");
+        assert!(text.contains("https://mirror.invalid/film.mp4"), "{text}");
+
+        let read = crate::list::read("downloads.txt", &text);
+        let film = read
+            .iter()
+            .find(|item| item.url == "https://example.invalid/film.mp4")
+            .expect("the download should be in the list");
+        assert_eq!(film.mirrors, vec!["https://mirror.invalid/film.mp4"]);
+        assert_eq!(film.filename.as_deref(), Some("film.mp4"));
     }
 
     /// Sets the post-download hook through the same path the window uses.

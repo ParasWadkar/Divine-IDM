@@ -125,6 +125,105 @@ async fn grab_links(
     }
 }
 
+/// Writes everything still to download out to a file the user picks.
+///
+/// The list the engine builds is aria2's input-file format, so what comes
+/// out is a file `aria2c -i` will fetch as well as one this reads back.
+/// Returns how many downloads it describes, or nothing if the save dialog
+/// was dismissed.
+#[tauri::command]
+async fn export_list(app: AppHandle, state: State<'_, AppState>) -> Result<Option<usize>, String> {
+    use tauri_plugin_dialog::DialogExt;
+
+    let (text, items) = match state.request(Request::ExportList).await {
+        Response::Listed { text, items } => (text, items),
+        Response::Rejected { reason } => return Err(reason),
+        Response::Error { message } => return Err(message),
+        other => return Err(format!("unexpected reply: {other:?}")),
+    };
+    if items == 0 {
+        return Err("there is nothing waiting to download".into());
+    }
+
+    let mut dialog = app
+        .dialog()
+        .file()
+        .set_title("Save the download list")
+        .set_file_name("downloads.txt")
+        .add_filter("Download list", &["txt"]);
+    if let Some(window) = app.get_webview_window("main") {
+        dialog = dialog.set_parent(&window);
+    }
+
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    dialog.save_file(move |picked| {
+        let _ = sender.send(picked);
+    });
+    let Some(path) = receiver.await.ok().flatten().and_then(|path| path.into_path().ok()) else {
+        return Ok(None);
+    };
+
+    std::fs::write(&path, text).map_err(|error| format!("could not write the list: {error}"))?;
+    Ok(Some(items))
+}
+
+/// Reads a list of downloads out of a file the user picks, and queues it.
+///
+/// The file is read here rather than by the engine, deliberately: the
+/// engine takes the text, never a path. A request carrying a path would be
+/// a request that reads a file of someone else's choosing, and the browser
+/// side speaks the same protocol.
+#[tauri::command]
+async fn import_list(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    queue: Option<i64>,
+) -> Result<Option<serde_json::Value>, String> {
+    use tauri_plugin_dialog::DialogExt;
+
+    let mut dialog = app
+        .dialog()
+        .file()
+        .set_title("Open a list of downloads")
+        .add_filter("Download lists", &["txt", "ef2", "lst"]);
+    if let Some(window) = app.get_webview_window("main") {
+        dialog = dialog.set_parent(&window);
+    }
+
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    dialog.pick_file(move |picked| {
+        let _ = sender.send(picked);
+    });
+    let Some(path) = receiver.await.ok().flatten().and_then(|path| path.into_path().ok()) else {
+        return Ok(None);
+    };
+
+    // Capped before it is read into memory. A list is a file, and a file
+    // can be a gigabyte of anything.
+    const LARGEST_LIST_BYTES: u64 = 8 << 20;
+    match std::fs::metadata(&path) {
+        Ok(data) if data.len() > LARGEST_LIST_BYTES => {
+            return Err("that file is too large to be a list of downloads".into());
+        }
+        Ok(_) => {}
+        Err(error) => return Err(format!("could not open that file: {error}")),
+    }
+
+    let text = std::fs::read(&path)
+        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+        .map_err(|error| format!("could not read that file: {error}"))?;
+    let name = path.file_name().map(|part| part.to_string_lossy().into_owned()).unwrap_or_default();
+
+    match state.request(Request::ImportList { name, text, queue }).await {
+        Response::Imported { added, skipped } => {
+            Ok(Some(serde_json::json!({ "added": added, "skipped": skipped })))
+        }
+        Response::Rejected { reason } => Err(reason),
+        Response::Error { message } => Err(message),
+        other => Err(format!("unexpected reply: {other:?}")),
+    }
+}
+
 /// Queues a list of addresses that were picked out of a page.
 ///
 /// Separate from `add_download` rather than called in a loop, and not
@@ -752,6 +851,8 @@ fn main() {
             peek_archive,
             grab_links,
             add_links,
+            export_list,
+            import_list,
             bandwidth_rules,
             set_bandwidth_rule,
             forget_bandwidth_rule,
