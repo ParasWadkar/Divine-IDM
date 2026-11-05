@@ -1721,10 +1721,15 @@ button.icon:hover {
   color: var(--good);
 }
 
-/* Wider than the other dialogs: this one holds a file list, and names in
-   an archive are long. */
+/* Wider than the other dialogs: these hold a file list, and names in an
+   archive -- or a link picked off a page -- are long.
+
+   max-width as well as width, because `.modal` caps every dialog at 360px
+   and a width alone loses to it silently: the dialog renders, at the wrong
+   size, with its buttons wrapped onto two lines. */
 .modal-wide {
   width: min(680px, 90vw);
+  max-width: min(680px, 90vw);
 }
 
 .links-head {
