@@ -490,7 +490,18 @@ pub async fn download_with_progress<F: FnMut(Progress)>(
     mut on_progress: F,
 ) -> Result<DownloadReport, DownloadError> {
     let started = Instant::now();
+    // Opt-in phase trace. The ramp has had one of these since it was
+    // written, for the same reason: on a fast path the transfer is a
+    // fraction of the elapsed time and the rest is machinery, and guessing
+    // which part of the machinery is a poor substitute for watching it.
+    let phase = |what: &str| {
+        if std::env::var_os("IDM_TRACE_PHASES").is_some() {
+            eprintln!("phase {:>7.1}ms  {what}", started.elapsed().as_secs_f64() * 1000.0);
+        }
+    };
+
     let target = probe(config).await?;
+    phase("probed");
 
     std::fs::create_dir_all(&config.output_dir)?;
     let final_path = config.output_dir.join(&target.filename);
@@ -500,6 +511,7 @@ pub async fn download_with_progress<F: FnMut(Progress)>(
     let data =
         File::options().create(true).truncate(false).read(true).write(true).open(&part_path)?;
 
+    phase("part opened");
     // Resume when a journal describes this very file; otherwise start fresh.
     let (mut journal, write_mode) = match open_resumable(&journal_path, &data, &target) {
         Some(journal) => {
@@ -657,7 +669,9 @@ pub async fn download_with_progress<F: FnMut(Progress)>(
     }
     let sources = Arc::new(Sources::new(built));
 
+    phase("lanes built");
     let (writer, acks) = Writer::spawn(&part_path, WriterConfig::new(1, target.total))?;
+    phase("writer up");
     let handle = writer.handle();
     let budget = AsyncBudget::for_connections(config.conn.per_host_max);
 
@@ -944,16 +958,19 @@ pub async fn download_with_progress<F: FnMut(Progress)>(
     }
 
     // Drain anything still running before finalising.
+    phase("transfer done");
     while tasks.join_next().await.is_some() {}
     checkpoint(&acks, &writer, &mut journal, &mut ledger, &data)?;
     writer.shutdown()?;
     journal.checkpoint_now(&data)?;
+    phase("flushed");
 
     // Verify before declaring victory. `SetFileValidData` forces a full pass,
     // because unwritten regions there hold plausible stale content.
     let verify_mode =
         if write_mode.requires_full_verification() { VerifyMode::Full } else { VerifyMode::Fast };
     let report = journal.verify(&data, verify_mode)?;
+    phase("verified");
     if report.blocks_failed > 0 {
         tracing::warn!(
             failed = report.blocks_failed,
@@ -970,6 +987,7 @@ pub async fn download_with_progress<F: FnMut(Progress)>(
     }
     data.sync_all()?;
     drop(data);
+    phase("synced");
 
     prealloc::finalize(
         &part_path,
@@ -977,6 +995,7 @@ pub async fn download_with_progress<F: FnMut(Progress)>(
         &target.pinned_url,
         config.referrer.as_deref().unwrap_or_default(),
     )?;
+    phase("renamed");
     let _ = std::fs::remove_file(&journal_path);
 
     // Record what this run learned, now that it has finished successfully.
