@@ -75,9 +75,26 @@ fn browser() -> ClientInfo {
     ClientInfo { name: idm_ipc::BROWSER_CLIENT.into(), client_id: Some("test".into()) }
 }
 
-async fn engine() -> (tempfile::TempDir, std::sync::Arc<Engine>) {
+/// An engine whose state folder is a temporary one.
+///
+/// `IDM_STATE_DIR` first, and that is not a detail: `Engine::new` opens the
+/// durable store, and without the override that is the store belonging to
+/// whatever copy of DivinePulse is installed on this machine. A test that
+/// migrates or writes to somebody's real download history is not a test,
+/// it is damage -- and it is silent, because everything still passes.
+///
+/// Set rather than restored: these tests are the only thing in this
+/// binary, and a restore would race the ones running beside it.
+fn scratch() -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
-    let engine = Engine::new(dir.path().to_path_buf(), 4);
+    // SAFETY: single-threaded setup, before anything reads the variable.
+    unsafe { std::env::set_var("IDM_STATE_DIR", dir.path()) };
+    dir
+}
+
+async fn engine() -> (tempfile::TempDir, std::sync::Arc<Engine>) {
+    let dir = scratch();
+    let engine = Engine::new(dir.path().join("downloads"), 4);
     (dir, engine)
 }
 
