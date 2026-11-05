@@ -17,6 +17,7 @@ pub mod pac;
 pub mod pairing;
 pub mod proxy;
 pub mod queues;
+pub mod schedule;
 pub mod serve;
 pub mod sidecars;
 

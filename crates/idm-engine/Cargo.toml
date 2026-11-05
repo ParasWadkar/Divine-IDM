@@ -33,6 +33,9 @@ windows = { version = "0.62", features = [
     # embedded JavaScript engine.
     "Win32_Networking_WinHttp",
     "Win32_System_Registry",
+    # GetLocalTime, for the bandwidth schedule: the machine's own idea of
+    # what day and time it is, including when the clocks go forward.
+    "Win32_System_SystemInformation",
 ] }
 
 [dev-dependencies]
