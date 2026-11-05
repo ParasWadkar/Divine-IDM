@@ -23,7 +23,9 @@
     "nativeMessaging",
     "storage",
     "contextMenus",
-    "alarms"
+    "alarms",
+    "scripting",
+    "activeTab"
   ],
   "optional_permissions": [
     "cookies",

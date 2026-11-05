@@ -112,6 +112,17 @@ Being straight about this so nothing surprises you:
   Settings if you would rather it did not run. Files over 8 GB are not
   scanned -- reading a disc image twice is a long wait for a verdict -- and
   that is reported as "not scanned" rather than as a clean bill.
+- **A download button on videos everywhere.** The browser extension can
+  put one on the videos of a site, but only a site you ask for, from its
+  popup, while you are looking at it -- it asks for access to that one
+  address and registers the script then, so on a browser where nobody has
+  asked, nothing of this runs anywhere. It also only works where the video
+  has an address something else could fetch. A player that streams in
+  pieces, which is most commercial video including YouTube and Netflix,
+  gives its `<video>` a `blob:` address that exists only inside that page;
+  the overlay says so there rather than offering a button that cannot
+  work. The stream watcher in the same popup is the one that helps with
+  those.
 - **Learning which connection shape a site prefers.** The number of
   connections and how they are grouped comes from a table, and a download
   now records what it achieved so a later one could use the better shape --

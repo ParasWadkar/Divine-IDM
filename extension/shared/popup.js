@@ -149,6 +149,34 @@ $("findStreams").addEventListener("change", async (event) => {
   }
 });
 
+/**
+ * The overlay switch, which is about this one site rather than a setting.
+ *
+ * Disabled where there is no site to switch it on for -- a new tab, a
+ * settings page, a PDF -- because a checkbox that silently does nothing is
+ * worse than one that is visibly not available.
+ */
+async function renderOverlay(reply) {
+  const box = $("overlayHere");
+  const hint = $("overlay-hint");
+  box.checked = Boolean(reply?.on);
+  box.disabled = !reply?.pattern;
+  hint.textContent = reply?.pattern
+    ? "Asks for access to this one site. Nothing runs on any other."
+    : "There is no site in this tab to switch this on for.";
+}
+
+$("overlayHere").addEventListener("change", async (event) => {
+  if (event.target.checked) {
+    const reply = await ask({ type: "overlayHere" });
+    event.target.checked = Boolean(reply?.ok);
+    if (!reply?.ok && reply?.reason) $("overlay-hint").textContent = reply.reason;
+  } else {
+    await ask({ type: "overlayOff" });
+  }
+  renderOverlay(await ask({ type: "overlayState" }));
+});
+
 $("pair").addEventListener("click", async () => {
   await ask({ type: "pair" });
   render(await ask({ type: "getStatus" }));
@@ -156,3 +184,4 @@ $("pair").addEventListener("click", async () => {
 
 ask({ type: "getStatus" }).then(render);
 ask({ type: "getStreams" }).then(renderStreams);
+ask({ type: "overlayState" }).then(renderOverlay);

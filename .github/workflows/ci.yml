@@ -69,7 +69,7 @@ jobs:
         run: |
           for script in engine-schemes resume-after-restart network-drop \
                         opaque-name duration capability-guard settings-wiring \
-                        window-script invoke-wiring; do
+                        window-script invoke-wiring extension-guard; do
             echo "--- $script ---"
             node "tests/e2e/$script.mjs"
           done

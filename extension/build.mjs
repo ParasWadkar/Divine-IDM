@@ -33,7 +33,7 @@ function validate(target, manifest) {
   if (manifest.manifest_version !== 3) {
     problems.push(`manifest_version should be 3, got ${manifest.manifest_version}`);
   }
-  for (const needed of ["downloads", "nativeMessaging", "storage"]) {
+  for (const needed of ["downloads", "nativeMessaging", "storage", "scripting"]) {
     if (!manifest.permissions?.includes(needed)) {
       problems.push(`missing required permission: ${needed}`);
     }
@@ -50,6 +50,17 @@ function validate(target, manifest) {
     problems.push("host permissions must be optional, not requested at install time");
   }
 
+  // The on-page overlay is registered at runtime, per site, after the user
+  // asks for it (see shared/overlay.js). Declaring it here would run it on
+  // every matching page from the moment the extension is installed -- which
+  // is a different feature with the same name, and one nobody agreed to. So
+  // a manifest that declares any content script fails the build.
+  if (manifest.content_scripts?.length) {
+    problems.push(
+      "content scripts must be registered at runtime, not declared: see shared/overlay.js",
+    );
+  }
+
   // The two families declare their background script differently; getting
   // this wrong means the extension loads and silently does nothing.
   if (target === "chromium" && !manifest.background?.service_worker) {
@@ -64,6 +75,18 @@ function validate(target, manifest) {
     }
   }
   return problems;
+}
+
+// The files shared/ must hold for the extension to do what its manifest
+// says. A missing one is a silent half-feature: the background registers a
+// content script that is not there, the browser refuses it, and nothing in
+// the popup says why.
+const NEEDED_FILES = ["background.js", "popup.html", "popup.js", "overlay.js"];
+for (const file of NEEDED_FILES) {
+  if (!existsSync(join(HERE, "shared", file))) {
+    console.error(`shared/${file} is missing`);
+    process.exit(1);
+  }
 }
 
 const chromiumKey = CHECK_ONLY ? null : loadOrCreate();

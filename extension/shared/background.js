@@ -638,6 +638,98 @@ api.tabs?.onRemoved.addListener((tabId) => {
 });
 
 /** Messages from the popup. */
+// ---------------------------------------------------------------------------
+// The on-page video overlay
+// ---------------------------------------------------------------------------
+
+/**
+ * Where the overlay is switched on, kept so a browser restart keeps it.
+ *
+ * `scripting.registerContentScripts` with `persistAcrossSessions` already
+ * survives a restart, but a registration is not readable as "what did the
+ * user ask for" -- it can also be gone because the permission was revoked
+ * from the browser's own settings. This is the record of the asking; the
+ * registration is the consequence.
+ */
+const OVERLAY_KEY = "idmOverlayOrigins";
+const OVERLAY_SCRIPT = "overlay.js";
+
+/** `https://example.com/*` for an address, or null if it is not a page. */
+function originPattern(url) {
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== "https:" && parsed.protocol !== "http:") return null;
+    return parsed.origin + "/*";
+  } catch {
+    return null;
+  }
+}
+
+async function overlayOrigins() {
+  return (await api.storage.local.get(OVERLAY_KEY))[OVERLAY_KEY] ?? [];
+}
+
+/**
+ * Registers the overlay for one origin.
+ *
+ * Registered at runtime rather than declared in the manifest, which is the
+ * whole design: a declared content script runs on every matching page from
+ * the moment the extension is installed. This one exists on the sites
+ * somebody asked for and nowhere else.
+ */
+async function registerOverlay(pattern) {
+  const id = "overlay:" + pattern;
+  try {
+    await api.scripting.unregisterContentScripts({ ids: [id] });
+  } catch {
+    // It was not registered. Unregistering first is how re-registering the
+    // same id is made idempotent, since registering a duplicate throws.
+  }
+  await api.scripting.registerContentScripts([
+    {
+      id,
+      matches: [pattern],
+      js: [OVERLAY_SCRIPT],
+      runAt: "document_idle",
+      persistAcrossSessions: true,
+    },
+  ]);
+}
+
+async function unregisterOverlay(pattern) {
+  try {
+    await api.scripting.unregisterContentScripts({ ids: ["overlay:" + pattern] });
+  } catch {
+    // Already gone, which is the state that was wanted.
+  }
+}
+
+/**
+ * Puts the registrations back in step with what was asked for.
+ *
+ * Run on every wake. A permission revoked in the browser's own settings
+ * takes the host access away without telling this extension, so an origin
+ * that is no longer granted is dropped here rather than left as a
+ * registration that cannot run.
+ */
+async function restoreOverlays() {
+  if (!api.scripting?.registerContentScripts) return;
+  const wanted = await overlayOrigins();
+  const kept = [];
+  for (const pattern of wanted) {
+    const granted = await api.permissions.contains({ origins: [pattern] }).catch(() => false);
+    if (granted) {
+      kept.push(pattern);
+      await registerOverlay(pattern).catch(() => {});
+    } else {
+      await unregisterOverlay(pattern);
+    }
+  }
+  if (kept.length !== wanted.length) {
+    await api.storage.local.set({ [OVERLAY_KEY]: kept });
+  }
+}
+
 api.runtime.onMessage.addListener((message, _sender, respond) => {
   (async () => {
     switch (message?.type) {
@@ -702,6 +794,80 @@ api.runtime.onMessage.addListener((message, _sender, respond) => {
         respond({ granted });
         break;
       }
+      case "overlayState": {
+        const [tab] = await api.tabs.query({ active: true, currentWindow: true });
+        const pattern = originPattern(tab?.url ?? "");
+        respond({
+          // Null means there is nothing to switch on here: a settings page,
+          // a PDF viewer, a new tab.
+          pattern,
+          on: pattern ? (await overlayOrigins()).includes(pattern) : false,
+        });
+        break;
+      }
+      case "overlayHere": {
+        const [tab] = await api.tabs.query({ active: true, currentWindow: true });
+        const pattern = originPattern(tab?.url ?? "");
+        if (!pattern) {
+          respond({ ok: false, reason: "there is no site in this tab" });
+          break;
+        }
+        // One site, named in the prompt, rather than every site. Asked for
+        // at the moment it is wanted, like cookies and the stream watcher.
+        const granted = await api.permissions.request({ origins: [pattern] });
+        if (!granted) {
+          respond({ ok: false, reason: "access to this site was not granted" });
+          break;
+        }
+        try {
+          await registerOverlay(pattern);
+        } catch (error) {
+          respond({ ok: false, reason: String(error?.message ?? error) });
+          break;
+        }
+        const origins = new Set(await overlayOrigins());
+        origins.add(pattern);
+        await api.storage.local.set({ [OVERLAY_KEY]: [...origins] });
+        // A registration applies from the next navigation, so without this
+        // the button would appear to do nothing until the page was
+        // reloaded.
+        if (tab?.id !== undefined) {
+          await api.scripting
+            .executeScript({ target: { tabId: tab.id }, files: [OVERLAY_SCRIPT] })
+            .catch(() => {});
+        }
+        respond({ ok: true, pattern });
+        break;
+      }
+      case "overlayOff": {
+        const [tab] = await api.tabs.query({ active: true, currentWindow: true });
+        const pattern = originPattern(tab?.url ?? "");
+        if (pattern) {
+          await unregisterOverlay(pattern);
+          const left = (await overlayOrigins()).filter((held) => held !== pattern);
+          await api.storage.local.set({ [OVERLAY_KEY]: left });
+          // The permission is deliberately left alone. Dropping it would
+          // also switch off the stream watcher on this site, which the
+          // user did not ask about.
+        }
+        respond({ ok: true });
+        break;
+      }
+      case "grabVideo": {
+        // The same path a stream takes, and for the same reasons: the
+        // referrer because hotlink-protected CDNs check it, the cookies
+        // only if that was switched on.
+        const settings = await getSettings();
+        const reply = await sendToHost({
+          type: "download",
+          url: message.url,
+          referrer: message.pageUrl || undefined,
+          user_agent: navigator.userAgent,
+          cookies: await cookieHeaderFor(message.url, settings),
+        });
+        respond({ ok: reply.type === "accepted", reason: reply.reason });
+        break;
+      }
       case "requestCookieAccess": {
         // Asked for only when the user turns cookie forwarding on, so the
         // install prompt stays minimal.
@@ -760,3 +926,4 @@ api.alarms?.onAlarm.addListener(async (alarm) => {
 greet();
 releaseOrphanedPauses();
 watchForStreams();
+restoreOverlays();
