@@ -62,11 +62,20 @@ function expected(length) {
  * HOME and USERPROFILE both point at a directory built for the case under
  * test, so the person running this suite keeps their own known_hosts.
  */
+// Every `idm.exe` here runs against a state folder of its own.
+//
+// `IDM_STATE_DIR` overrides the whole engine state directory, and without
+// it that directory is the one belonging to whatever copy of DivinePulse
+// is installed on this machine -- so a test run would open, migrate and
+// tidy up somebody's real download history. Silently, because the checks
+// pass either way.
+const STATE = mkdtempSync(join(tmpdir(), "idm-sftp-state-"));
+
 function fetch(home, name, out, extra = []) {
   return spawnSync(
     IDM,
     [`sftp://${USER}@127.0.0.1:${PORT}/${name}`, "-o", out, "--password", PASSWORD, ...extra],
-    { encoding: "utf8", env: { ...process.env, HOME: home, USERPROFILE: home } },
+    { encoding: "utf8", env: { ...process.env, HOME: home, USERPROFILE: home, IDM_STATE_DIR: STATE } },
   );
 }
 
@@ -211,7 +220,7 @@ async function main() {
         `sftp://${USER}@127.0.0.1:${PORT}/${NAME}`, "-o", out,
         "--password", "hunter2",
       ],
-      { encoding: "utf8", env: { ...process.env, HOME: known, USERPROFILE: known } },
+      { encoding: "utf8", env: { ...process.env, HOME: known, USERPROFILE: known, IDM_STATE_DIR: STATE } },
     );
     const rejected = (result.stderr || result.stdout).trim();
     check(

@@ -43,6 +43,16 @@ function expected(length) {
   return buffer;
 }
 
+// Every `idm.exe` here runs against a state folder of its own.
+//
+// `IDM_STATE_DIR` overrides the whole engine state directory, and without
+// it that directory is the one belonging to whatever copy of DivinePulse
+// is installed on this machine -- so a test run would open, migrate and
+// tidy up somebody's real download history. Silently, because the checks
+// pass either way.
+const STATE = mkdtempSync(join(tmpdir(), "idm-ftp-state-"));
+const ENV = { ...process.env, IDM_STATE_DIR: STATE };
+
 function startServer(port, extra = []) {
   const child = spawn("node", [SERVER, "--port", String(port), ...extra], {
     stdio: ["ignore", "pipe", "ignore"],
@@ -58,6 +68,7 @@ function startServer(port, extra = []) {
 function fetch(port, name, out, extra = []) {
   return spawnSync(IDM, [`ftp://127.0.0.1:${port}/${name}`, "-o", out, ...extra], {
     encoding: "utf8",
+    env: ENV,
   });
 }
 
@@ -152,7 +163,10 @@ async function main() {
 
     // 5. A directory address is refused before anything is attempted.
     out = mkdtempSync(join(tmpdir(), "idm-ftp-"));
-    result = spawnSync(IDM, [`ftp://127.0.0.1:2131/pub/`, "-o", out], { encoding: "utf8" });
+    result = spawnSync(IDM, [`ftp://127.0.0.1:2131/pub/`, "-o", out], {
+      encoding: "utf8",
+      env: ENV,
+    });
     check(
       "a directory address is refused with a reason",
       result.status !== 0 && /directory/.test(result.stderr + result.stdout),

@@ -39,8 +39,18 @@ function byteAt(offset) {
   return x & 0xff;
 }
 
+// Every `idm.exe` here runs against a state folder of its own.
+//
+// `IDM_STATE_DIR` overrides the whole engine state directory, and without
+// it that directory is the one belonging to whatever copy of DivinePulse
+// is installed on this machine -- so a test run would open, migrate and
+// tidy up somebody's real download history. Silently, because the checks
+// pass either way.
+const STATE = mkdtempSync(join(tmpdir(), "idm-stream-state-"));
+const ENV = { ...process.env, IDM_STATE_DIR: STATE };
+
 function run(url, out, extra = []) {
-  return spawnSync(IDM, [url, "-o", out, ...extra], { encoding: "utf8" });
+  return spawnSync(IDM, [url, "-o", out, ...extra], { encoding: "utf8", env: ENV });
 }
 
 function onlyFile(dir) {
