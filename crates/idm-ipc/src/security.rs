@@ -50,6 +50,15 @@ impl SessionToken {
         Self(hex(&bytes))
     }
 
+    /// Rebuilds one that was stored somewhere and read back.
+    ///
+    /// Not `From<String>`: a conversion that cheap invites a token being
+    /// made out of whatever string is to hand, and the only strings that
+    /// belong here are ones this program generated and kept.
+    pub fn from_stored(value: String) -> Self {
+        Self(value)
+    }
+
     pub fn as_str(&self) -> &str {
         &self.0
     }

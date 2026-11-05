@@ -443,6 +443,29 @@ pub struct Settings {
     /// fills a Downloads folder with surprises. The archive is never
     /// deleted either way.
     pub extract_zips: bool,
+
+    /// Whether the small web interface listens on the network.
+    ///
+    /// Off by default, and the only setting here that opens a port. See
+    /// `idm_engine::web` for what it will and will not do.
+    pub web_interface: bool,
+    /// The port it listens on; zero means the default.
+    pub web_port: u16,
+}
+
+/// The port the web interface listens on when nothing else is chosen.
+///
+/// High, and not one anything well known uses, so switching the interface
+/// on does not collide with a web server or a media box already running.
+pub const DEFAULT_WEB_PORT: u16 = 8077;
+
+impl Settings {
+    /// The web interface's port, with zero read as "whatever the default
+    /// is" so a settings file written before the field existed, or by
+    /// somebody clearing the box, still names a real port.
+    pub fn web_port_or_default(&self) -> u16 {
+        if self.web_port == 0 { DEFAULT_WEB_PORT } else { self.web_port }
+    }
 }
 
 impl Default for Settings {
@@ -483,6 +506,9 @@ impl Default for Settings {
             hook_arguments: Vec::new(),
             // Writing files nobody asked for is opt-in. See the field.
             extract_zips: false,
+            // Nothing listens on the network unless somebody says so.
+            web_interface: false,
+            web_port: DEFAULT_WEB_PORT,
         }
     }
 }

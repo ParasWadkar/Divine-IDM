@@ -8,6 +8,16 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+# The web interface (src/web.rs) listens on the network, which is the one
+# place in this program where hand-rolling the parsing would be a bad
+# trade. Already in the lock by way of librqbit, so this declares what was
+# arriving anyway rather than adding to the build.
+axum = { version = "0.8", default-features = false, features = [
+    "http1",
+    "json",
+    "query",
+    "tokio",
+] }
 idm-core = { path = "../idm-core" }
 idm-ipc = { path = "../idm-ipc" }
 idm-media = { path = "../idm-media" }

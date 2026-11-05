@@ -493,6 +493,40 @@
               </button>
             </div>
 
+            <h2>Across the network</h2>
+
+            <!-- The only setting in this program that opens a port. Off
+                 unless somebody switches it on, and narrow when it is on:
+                 it can list downloads and pause, resume or cancel one, and
+                 there is no route for anything else. -->
+            <label
+              class="row switch"
+              title="Watch downloads from a phone or another PC on the same network. It can pause, resume and cancel; it cannot add a download, change a setting or see a saved password."
+            >
+              <input type="checkbox" id="web-interface" />
+              <span>Let other devices on this network watch downloads</span>
+            </label>
+
+            <label class="row" id="web-port-row" hidden title="Pick another port if something else on this PC already has this one.">
+              <span>On port</span>
+              <input type="number" id="web-port" class="text-input" min="1024" max="65535" step="1" />
+            </label>
+
+            <div class="row" id="web-address-row" hidden>
+              <span>
+                Open this on the other device
+                <!-- Said here as well as on the page itself. Somebody
+                     deciding whether to switch this on should be told
+                     before they do, not after. -->
+                <small
+                  >The link holds the key, so treat it like a password. The
+                  connection is not encrypted, so leave this off on a network
+                  you do not trust.</small
+                >
+              </span>
+              <button type="button" id="copy-web-address" class="ghost">Copy link</button>
+            </div>
+
             <h2>Connection</h2>
 
             <!-- Three choices rather than an address box with a switch,

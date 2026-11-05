@@ -2903,6 +2903,15 @@ impl Engine {
         }
     }
 
+    /// What the settings say right now.
+    ///
+    /// Public because the web interface's supervisor has to notice the
+    /// switch being flipped, and reading them through a `Request` would
+    /// mean a client name for something that is not a client.
+    pub async fn settings(&self) -> Settings {
+        self.inner.settings.lock().await.clone()
+    }
+
     async fn get_settings(&self) -> Response {
         Response::Settings(self.inner.settings.lock().await.clone())
     }

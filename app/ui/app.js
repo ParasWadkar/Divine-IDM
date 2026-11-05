@@ -652,6 +652,9 @@ function renderSettings(settings, force = false) {
   $("sort-into-folders").checked = settings.sort_into_folders ?? true;
   $("scan-downloads").checked = settings.scan_downloads ?? true;
   $("extract-zips").checked = settings.extract_zips ?? false;
+  $("web-interface").checked = settings.web_interface ?? false;
+  $("web-port").value = String(settings.web_port || 8077);
+  showWebInterface();
   $("hook-program").value = settings.hook_program ?? "";
   // One per line, because each element is one argument and a line is
   // the only separator that cannot appear inside one.
@@ -666,6 +669,57 @@ function renderSettings(settings, force = false) {
   showProxyAddress();
   showFolder();
 }
+
+/**
+ * Shows the port and the link only while the interface is switched on.
+ *
+ * The link is asked for rather than assembled here: it holds the key,
+ * which lives in Windows Credential Manager and never reaches this page
+ * except as part of the address it is shown in.
+ */
+async function showWebInterface() {
+  const on = $("web-interface").checked;
+  $("web-port-row").hidden = !on;
+  $("web-address-row").hidden = !on;
+  if (!on) {
+    webAddress = null;
+    return;
+  }
+  try {
+    webAddress = await invoke("web_address");
+    const shown = $("web-address-row").querySelector("span");
+    const note = shown.querySelector("small");
+    shown.firstChild.textContent = webAddress ? `${webAddress.split("?")[0]} ` : "Open this on the other device ";
+    note.hidden = false;
+  } catch {
+    // The engine answered with nothing useful. The checkbox still shows
+    // what was asked for; the link simply is not offered.
+    webAddress = null;
+  }
+}
+
+/** The address of the web interface, key and all, or null while it is off. */
+let webAddress = null;
+
+// Not in the list that simply saves: the link can only be asked for once
+// the engine has the setting, so the save is awaited before the row is
+// filled in. Without that the row appears empty the first time it is
+// switched on, which looks like the feature not working.
+$("web-interface").addEventListener("change", async () => {
+  $("web-port-row").hidden = !$("web-interface").checked;
+  await saveSettings();
+  await showWebInterface();
+});
+
+$("copy-web-address").addEventListener("click", async () => {
+  if (!webAddress) return;
+  try {
+    await navigator.clipboard.writeText(webAddress);
+    toast("Link copied. It holds the key, so treat it like a password.");
+  } catch {
+    toast("Could not copy the link", true);
+  }
+});
 
 /** The address box is only meaningful for the one choice that uses it. */
 function showProxyAddress() {
@@ -1114,6 +1168,8 @@ async function saveSettings(overrides = {}) {
     sort_into_folders: $("sort-into-folders").checked,
     scan_downloads: $("scan-downloads").checked,
     extract_zips: $("extract-zips").checked,
+    web_interface: $("web-interface").checked,
+    web_port: Number($("web-port").value) || 0,
     hook_program: $("hook-program").value.trim(),
     hook_arguments: hookArguments($("hook-arguments").value),
     start_with_windows: $("start-with-windows").checked,
@@ -2260,6 +2316,7 @@ for (const id of [
   "sort-into-folders",
   "scan-downloads",
   "extract-zips",
+  "web-port",
   "hook-program",
   "hook-arguments",
   "start-with-windows",

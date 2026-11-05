@@ -1,0 +1,195 @@
+<!doctype html>
+<!--
+  The whole web interface. One file, no fonts, no scripts from anywhere
+  else: a page on somebody's home network should not be telling another
+  server who is watching downloads, and a server meant to have three
+  routes should not grow a fourth to serve a stylesheet.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!-- It is on a phone more often than not, so nothing here is sized in
+         pixels that assume a desk. -->
+    <title>DivinePulse</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #0e1116;
+        --panel: #161b22;
+        --line: #272e38;
+        --text: #e6edf3;
+        --muted: #8b949e;
+        --accent: #3b82f6;
+        --bad: #f87171;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        padding: 16px;
+        background: var(--bg);
+        color: var(--text);
+        font: 15px/1.5 system-ui, sans-serif;
+      }
+      header { display: flex; align-items: baseline; gap: 10px; margin-bottom: 4px; }
+      h1 { margin: 0; font-size: 19px; }
+      .warn {
+        margin: 0 0 16px;
+        color: var(--muted);
+        font-size: 12px;
+      }
+      .job {
+        padding: 12px 14px;
+        margin-bottom: 10px;
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 10px;
+      }
+      .name {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        font-weight: 600;
+      }
+      .line { display: flex; justify-content: space-between; gap: 10px; margin-top: 4px; color: var(--muted); font-size: 13px; }
+      .bar { height: 6px; margin-top: 8px; background: var(--line); border-radius: 3px; overflow: hidden; }
+      .bar i { display: block; height: 100%; background: var(--accent); }
+      .bad { color: var(--bad); }
+      .acts { display: flex; gap: 8px; margin-top: 10px; }
+      button {
+        flex: 1;
+        padding: 9px 10px;
+        color: var(--text);
+        background: transparent;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        font: inherit;
+      }
+      button:active { border-color: var(--accent); }
+      #empty, #count { color: var(--muted); font-size: 13px; }
+    </style>
+  </head>
+  <body>
+    <header><h1>DivinePulse</h1><span id="count"></span></header>
+    <!-- Said here, not only in the README. Somebody on a network they do
+         not own should be told by the thing they are looking at. -->
+    <p class="warn">
+      This connection is not encrypted. Anyone who can see traffic on this
+      network can read it, including the key in the address.
+    </p>
+
+    <div id="jobs"></div>
+    <p id="empty" hidden>Nothing is downloading.</p>
+
+    <script>
+      // The key arrives in the address the first time, because a browser
+      // opening a bookmark cannot send a header nobody told it about. It is
+      // then taken out of the address bar and sent as a bearer token, so it
+      // does not sit in the history or in a screenshot of the page.
+      const key = new URLSearchParams(location.search).get("k") ?? "";
+      history.replaceState(null, "", location.pathname);
+
+      const ask = (path, method = "GET") =>
+        fetch(path, { method, headers: { Authorization: "Bearer " + key } });
+
+      const size = (n) => {
+        if (n === null || n === undefined) return "";
+        const units = ["B", "KB", "MB", "GB", "TB"];
+        let value = n;
+        let unit = 0;
+        while (value >= 1024 && unit < units.length - 1) {
+          value /= 1024;
+          unit += 1;
+        }
+        return `${value < 10 && unit > 0 ? value.toFixed(1) : Math.round(value)} ${units[unit]}`;
+      };
+
+      const running = (state) => state === "running" || state === "connecting";
+
+      function draw(jobs) {
+        const list = document.getElementById("jobs");
+        document.getElementById("empty").hidden = jobs.length > 0;
+        document.getElementById("count").textContent = jobs.length
+          ? `${jobs.length} download${jobs.length === 1 ? "" : "s"}`
+          : "";
+        list.replaceChildren();
+
+        for (const job of jobs) {
+          const card = document.createElement("div");
+          card.className = "job";
+
+          const name = document.createElement("div");
+          name.className = "name";
+          // textContent, never innerHTML: the name came off somebody
+          // else's server.
+          name.textContent = job.filename;
+          card.append(name);
+
+          const line = document.createElement("div");
+          line.className = "line";
+          const left = document.createElement("span");
+          left.textContent = job.total
+            ? `${size(job.downloaded)} of ${size(job.total)}`
+            : size(job.downloaded);
+          const right = document.createElement("span");
+          right.textContent = running(job.state) ? `${size(job.bytes_per_sec)}/s` : job.state;
+          line.append(left, right);
+          card.append(line);
+
+          if (job.total) {
+            const bar = document.createElement("div");
+            bar.className = "bar";
+            const fill = document.createElement("i");
+            fill.style.width = `${Math.min(100, (job.downloaded / job.total) * 100)}%`;
+            bar.append(fill);
+            card.append(bar);
+          }
+
+          if (job.error) {
+            const why = document.createElement("div");
+            why.className = "line bad";
+            why.textContent = job.error;
+            card.append(why);
+          }
+
+          const acts = document.createElement("div");
+          acts.className = "acts";
+          // Three things, the same three the server has routes for.
+          const offered = running(job.state) ? ["pause", "cancel"] : ["resume", "cancel"];
+          for (const action of offered) {
+            const button = document.createElement("button");
+            button.textContent = action[0].toUpperCase() + action.slice(1);
+            button.addEventListener("click", async () => {
+              button.disabled = true;
+              await ask(`/api/jobs/${job.id}/${action}`, "POST").catch(() => {});
+              refresh();
+            });
+            acts.append(button);
+          }
+          card.append(acts);
+
+          list.append(card);
+        }
+      }
+
+      async function refresh() {
+        try {
+          const reply = await ask("/api/jobs");
+          if (!reply.ok) {
+            document.getElementById("empty").hidden = false;
+            document.getElementById("empty").textContent =
+              "That key is not right. Open the address shown in DivinePulse again.";
+            return;
+          }
+          draw((await reply.json()).jobs ?? []);
+        } catch {
+          // A phone that went to sleep, or the app that was closed. The
+          // next tick will say so by itself; nothing needs shouting.
+        }
+      }
+
+      refresh();
+      setInterval(refresh, 2000);
+    </script>
+  </body>
+</html>

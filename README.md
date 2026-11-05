@@ -112,6 +112,18 @@ Being straight about this so nothing surprises you:
   Settings if you would rather it did not run. Files over 8 GB are not
   scanned -- reading a disc image twice is a long wait for a verdict -- and
   that is reported as "not scanned" rather than as a clean bill.
+- **Reaching the web interface securely, or doing much with it.** Switch
+  it on in Settings and other devices on the same network can watch
+  downloads and pause, resume or cancel one. That is all it can do: there
+  is no route for adding a download, changing a setting, choosing a folder
+  or reading a saved password, so a mistake in one of the three routes
+  cannot reach a fourth. The link holds a key kept in Windows Credential
+  Manager, not in the settings file, and every request must carry it.
+  **The connection is not encrypted** -- it is plain HTTP, so anyone who
+  can see traffic on the network can read it, the key included. It is for
+  a home network, it is off by default, and both the Settings panel and
+  the page itself say so rather than offering a certificate that would
+  only teach you to click through a browser warning.
 - **Importing what is in a list beyond the addresses.** Export writes
   everything still to download, with its mirrors, in the format
   `aria2c --input-file` takes -- so the file is one aria2c will fetch as

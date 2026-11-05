@@ -125,6 +125,26 @@ async fn grab_links(
     }
 }
 
+/// The address to open the web interface at, or nothing when it is off.
+///
+/// The key is in it, which is the point: it is shown on the user's own
+/// screen so they can type or scan it into a phone, and the page takes it
+/// out of the address bar as soon as it loads.
+#[tauri::command]
+async fn web_address(state: State<'_, AppState>) -> Result<Option<String>, String> {
+    let settings = match state.request(Request::GetSettings).await {
+        Response::Settings(settings) => settings,
+        other => return Err(format!("unexpected reply: {other:?}")),
+    };
+    if !settings.web_interface {
+        return Ok(None);
+    }
+
+    let vault = idm_core::win::credentials::WindowsVault;
+    let token = idm_engine::web::token(&vault)?;
+    Ok(Some(idm_engine::web::where_to_open(settings.web_port_or_default(), token.as_str())))
+}
+
 /// Writes everything still to download out to a file the user picks.
 ///
 /// The list the engine builds is aria2's input-file format, so what comes
@@ -852,6 +872,7 @@ fn main() {
             grab_links,
             add_links,
             export_list,
+            web_address,
             import_list,
             bandwidth_rules,
             set_bandwidth_rule,
@@ -889,6 +910,7 @@ fn main() {
             build_tray(app.handle())?;
             start_ticker(app.handle().clone());
             start_endpoint(app.handle().clone());
+            start_web(app.handle().clone());
 
             // Started by the Run key at sign-in: come up in the tray rather
             // than throwing a window at someone who has just logged in.
@@ -967,6 +989,18 @@ fn start_endpoint(app: AppHandle) {
                 tracing::error!(%error, "could not open the local endpoint");
             }
         }
+    });
+}
+
+/// Keeps the web interface matching its setting, for as long as the app runs.
+///
+/// A supervisor rather than a start, because the switch is in Settings:
+/// turning it off should close the port, and turning it on should not mean
+/// restarting the app.
+fn start_web(app: AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        let engine = Arc::clone(&app.state::<AppState>().engine);
+        idm_engine::web::supervise(engine).await;
     });
 }
 
