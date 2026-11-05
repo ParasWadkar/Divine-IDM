@@ -112,6 +112,17 @@ Being straight about this so nothing surprises you:
   Settings if you would rather it did not run. Files over 8 GB are not
   scanned -- reading a disc image twice is a long wait for a verdict -- and
   that is reported as "not scanned" rather than as a clean bill.
+- **Learning which connection shape a site prefers.** The number of
+  connections and how they are grouped comes from a table, and a download
+  now records what it achieved so a later one could use the better shape --
+  but acting on that is switched off. The reason is honesty about the
+  evidence: two downloads minutes apart over a shared link are not a
+  controlled experiment, and the measuring has only been exercised on
+  loopback, where the whole argument for one shape over another does not
+  apply. The rule is written and tested (a challenger has to be 15% faster,
+  short downloads are discarded, nothing is remembered past a run of the
+  app); what is missing is a reason to trust it, which is a measurement
+  against real sites and not a code change.
 - **Reaching the web interface securely, or doing much with it.** Switch
   it on in Settings and other devices on the same network can watch
   downloads and pause, resume or cancel one. That is all it can do: there

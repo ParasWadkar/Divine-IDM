@@ -19,6 +19,7 @@ pub mod mirror;
 pub mod range;
 pub mod sftp;
 pub mod stream;
+pub mod topology;
 
 /// The URL type this crate speaks, so callers can parse one without taking
 /// a direct dependency on the HTTP client.

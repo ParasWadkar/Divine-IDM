@@ -108,6 +108,14 @@ pub struct DownloadConfig {
     /// rather than not at all. Unbounded because there are at most a handful
     /// per download and dropping one would defeat the point.
     pub notes: Option<tokio::sync::mpsc::UnboundedSender<String>>,
+    /// Use the connection shape this origin was measured to prefer.
+    ///
+    /// Off. What a download achieved with the shape it had is recorded
+    /// either way -- the bytes and the elapsed time are known anyway, so
+    /// measuring costs nothing -- but until this is switched on, the
+    /// shape comes from the table in [`lane_topology`] as it always did.
+    /// See [`crate::topology`] for why the measuring is so cautious.
+    pub learn_topology: bool,
 }
 
 impl DownloadConfig {
@@ -162,6 +170,7 @@ impl DownloadConfig {
             cookies: None,
             profiles: None,
             notes: None,
+            learn_topology: false,
         }
     }
 }
@@ -602,7 +611,19 @@ pub async fn download_with_progress<F: FnMut(Progress)>(
     } else {
         initial.max(config.conn.per_host_max)
     };
-    let (lane_count, streams) = lane_topology(lane_basis);
+    // The table's answer, unless this origin has been measured and acting
+    // on that is switched on. See `crate::topology`: measuring always
+    // happens, because the numbers are known anyway; using what was
+    // measured is a choice.
+    let origin = crate::topology::origin_of(&config.url);
+    let shape = match (&origin, config.learn_topology) {
+        (Some(origin), true) => crate::topology::memory().next(origin, lane_basis),
+        _ => {
+            let (lanes, streams) = lane_topology(lane_basis);
+            crate::topology::Shape { lanes, streams }
+        }
+    };
+    let (lane_count, streams) = (shape.lanes, shape.streams);
     let mut http = config.http.clone();
     http.streams_per_lane = streams;
 
@@ -987,6 +1008,28 @@ pub async fn download_with_progress<F: FnMut(Progress)>(
             connections = target_connections,
             ?reason,
             "recorded what this host taught"
+        );
+    }
+
+    // What this shape managed against this origin, for the next download.
+    // Only where the measurement means something: one address, so the
+    // rate is this origin's and not a blend of two, and h2, because the
+    // shape is about streams over one connection and h1 does not have
+    // them. `record` throws away anything too short to be evidence.
+    if let Some(origin) = &origin
+        && sources.len() == 1
+        && target.http_version.starts_with("HTTP/2")
+    {
+        crate::topology::memory().record(
+            origin,
+            crate::topology::Trial {
+                shape,
+                // What arrived in this run, not what the file holds: a resumed
+                // download's earlier bytes were fetched at another time, very
+                // possibly with another shape.
+                bytes: target.total.saturating_sub(resumed_bytes),
+                took: started.elapsed(),
+            },
         );
     }
 
