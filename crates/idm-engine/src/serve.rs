@@ -412,7 +412,7 @@ impl Engine {
         // Only the app and the command line may name an ftp or sftp
         // address. A page handing one over would put credentials in a URL
         // and reach servers the browser itself could not.
-        let filename = match self.vet(&request, settings.min_takeover_bytes, !client.is_browser()) {
+        let filename = match self.vet(&request, settings.min_takeover_bytes, client.is_trusted()) {
             Ok(name) => name,
             Err(reason) => return Response::Rejected { reason },
         };
@@ -2000,6 +2000,19 @@ async fn start(inner: &Arc<Inner>, id: JobId, config: DownloadConfig) {
     }
 }
 
+/// Refuses anything that is not the person at this machine.
+///
+/// One function rather than a check at each call site, because the set of
+/// clients that are not the person at the machine grows -- it was the
+/// browser extension, it is now the browser extension and the web
+/// interface -- and a refusal written as "is this the browser" quietly
+/// admits the next one. `what` completes the sentence: "the web interface
+/// cannot manage queues".
+fn refuse_unless_here(client: &ClientInfo, what: &str) -> Option<Response> {
+    (!client.is_trusted())
+        .then(|| Response::Rejected { reason: format!("{} cannot {what}", client.described()) })
+}
+
 async fn set_state(inner: &Inner, id: JobId, state: JobState) {
     if let Some(record) = inner.jobs.lock().await.get_mut(&id) {
         record.status.state = state;
@@ -2181,9 +2194,7 @@ impl Engine {
     /// Otherwise an extension could approve itself, or enumerate what else is
     /// connected, which is exactly what pairing exists to prevent.
     fn refuse_browser(client: &ClientInfo) -> Option<Response> {
-        client.is_browser().then(|| Response::Rejected {
-            reason: "the browser integration cannot manage pairings".into(),
-        })
+        refuse_unless_here(client, "manage pairings")
     }
 
     async fn list_pairings(&self, client: &ClientInfo) -> Response {
@@ -2418,9 +2429,7 @@ impl Engine {
 
     /// Managing queues is refused for browser clients.
     fn refuse_browser_queues(client: &ClientInfo) -> Option<Response> {
-        client.is_browser().then(|| Response::Rejected {
-            reason: "the browser integration cannot manage queues".into(),
-        })
+        refuse_unless_here(client, "manage queues")
     }
 
     /// The most of an archive's index that will be fetched.
@@ -2444,10 +2453,8 @@ impl Engine {
     /// fetch, in sequence, a series of addresses it worked out for itself.
     /// Writes everything still to download out as a text list.
     async fn export_list(&self, client: &ClientInfo) -> Response {
-        if client.is_browser() {
-            return Response::Rejected {
-                reason: "the browser integration cannot read the download list".into(),
-            };
+        if let Some(refusal) = refuse_unless_here(client, "read the download list") {
+            return refusal;
         }
 
         let Some(store) = self.inner.store.clone() else {
@@ -2487,10 +2494,8 @@ impl Engine {
         text: &str,
         queue: Option<i64>,
     ) -> Response {
-        if client.is_browser() {
-            return Response::Rejected {
-                reason: "the browser integration cannot import a list of downloads".into(),
-            };
+        if let Some(refusal) = refuse_unless_here(client, "import a list of downloads") {
+            return refusal;
         }
 
         let wanted = crate::list::read(name, text);
@@ -2529,10 +2534,8 @@ impl Engine {
         url: String,
         follow: idm_ipc::GrabDepth,
     ) -> Response {
-        if client.is_browser() {
-            return Response::Rejected {
-                reason: "the browser integration cannot ask for the links on a page".into(),
-            };
+        if let Some(refusal) = refuse_unless_here(client, "ask for the links on a page") {
+            return refusal;
         }
 
         // The same vetting a download gets. Narrowed further inside the
@@ -2577,13 +2580,11 @@ impl Engine {
     }
 
     async fn peek_archive(&self, client: &ClientInfo, url: String) -> Response {
-        if client.is_browser() {
-            // A fetch of this program's choosing, to an address a page
-            // would be naming. That is the shape of request somebody
-            // else's server should not be able to make this machine send.
-            return Response::Rejected {
-                reason: "the browser integration cannot ask what is inside an archive".into(),
-            };
+        // A fetch of this program's choosing, to an address somebody else
+        // would be naming. That is the shape of request a page, or the
+        // network, should not be able to make this machine send.
+        if let Some(refusal) = refuse_unless_here(client, "ask what is inside an archive") {
+            return refusal;
         }
 
         // The same vetting a download gets, because this is the same kind
@@ -2700,9 +2701,7 @@ impl Engine {
 
     /// Changing when downloads run is refused for browser clients.
     fn refuse_browser_schedule(client: &ClientInfo) -> Option<Response> {
-        client.is_browser().then(|| Response::Rejected {
-            reason: "the browser integration cannot change the download schedule".into(),
-        })
+        refuse_unless_here(client, "change the download schedule")
     }
 
     /// The rules, and what the schedule is doing right now.
@@ -2819,9 +2818,7 @@ impl Engine {
     /// this person has an account with, which is worth keeping from a web
     /// page even with no password attached to it.
     fn refuse_browser_credentials(client: &ClientInfo) -> Option<Response> {
-        client.is_browser().then(|| Response::Rejected {
-            reason: "the browser integration cannot see or change saved passwords".into(),
-        })
+        refuse_unless_here(client, "see or change saved passwords")
     }
 
     /// What is saved, never the passwords themselves.
@@ -2877,9 +2874,7 @@ impl Engine {
     /// executable and run it, so the refusal says that rather than
     /// something about settings.
     fn refuse_browser_sidecars(client: &ClientInfo) -> Option<Response> {
-        client.is_browser().then(|| Response::Rejected {
-            reason: "the browser integration cannot install programs".into(),
-        })
+        refuse_unless_here(client, "install programs")
     }
 
     /// What the app can run, and whether it has each already.
@@ -2916,10 +2911,8 @@ impl Engine {
         // Only the desktop app and CLI may change settings. Letting the
         // browser side rewrite them would hand a web page the ability to turn
         // its own kill switch back on.
-        if client.is_browser() {
-            return Response::Rejected {
-                reason: "the browser integration cannot change settings".into(),
-            };
+        if let Some(refusal) = refuse_unless_here(client, "change settings") {
+            return refusal;
         }
         // Vetted before anything is stored, while the person is still at the
         // screen: a folder that cannot be written to otherwise fails later,
@@ -3357,6 +3350,10 @@ mod tests {
 
     fn browser() -> ClientInfo {
         ClientInfo { name: idm_ipc::BROWSER_CLIENT.to_owned(), client_id: Some("ext-1".to_owned()) }
+    }
+
+    fn remote() -> ClientInfo {
+        ClientInfo { name: idm_ipc::REMOTE_CLIENT.to_owned(), client_id: None }
     }
 
     fn desktop() -> ClientInfo {
@@ -4822,6 +4819,49 @@ mod tests {
         };
         settings.download_dir = dir.to_owned();
         engine.handle(client, Request::SetSettings(settings)).await
+    }
+
+    #[tokio::test]
+    async fn everything_the_browser_is_refused_the_web_interface_is_refused_too() {
+        // The point of the refactor, written as a test so it stays true.
+        // Each of these is about the machine rather than about a download,
+        // and the only thing that made them safe was that the browser was
+        // the one client that was not the person sitting here. It is not
+        // the only one any more.
+        let (_dir, engine) = engine();
+        let requests = || {
+            vec![
+                Request::ListQueues,
+                Request::SetQueue { name: "x".into(), max_concurrent: 1 },
+                Request::ListBandwidthRules,
+                Request::ListCredentials,
+                Request::ListSidecars,
+                Request::ListPairings,
+                Request::SetSettings(Settings::default()),
+                Request::PeekArchive { url: "https://example.invalid/x.zip".into() },
+                Request::GrabLinks {
+                    url: "https://example.invalid/".into(),
+                    follow: idm_ipc::GrabDepth::ThisPage,
+                },
+                Request::ExportList,
+                Request::ImportList {
+                    name: "x.txt".into(),
+                    text: "https://example.invalid/x.bin".into(),
+                    queue: None,
+                },
+            ]
+        };
+
+        for (client, who) in [(browser(), "the browser"), (remote(), "the web interface")] {
+            for request in requests() {
+                let name = format!("{request:?}");
+                let reply = engine.handle(&client, request).await;
+                assert!(
+                    matches!(reply, Response::Rejected { .. }),
+                    "{who} was allowed {name}: {reply:?}",
+                );
+            }
+        }
     }
 
     #[tokio::test]

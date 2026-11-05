@@ -38,9 +38,70 @@ pub struct ClientInfo {
 /// The name the browser native messaging host announces itself with.
 pub const BROWSER_CLIENT: &str = "browser-host";
 
+/// The name the web interface announces itself with.
+///
+/// A second client that is not the person at this machine. It was once
+/// enough to ask "is this the browser", because the browser was the only
+/// one; a check shaped that way answers "no, it is the web interface" and
+/// lets it through, which is exactly the wrong default for the next one
+/// after that too.
+pub const REMOTE_CLIENT: &str = "remote";
+
 impl ClientInfo {
     pub fn is_browser(&self) -> bool {
         self.name == BROWSER_CLIENT
+    }
+
+    /// Whether this is the person sitting at this machine.
+    ///
+    /// The app and the command line are: both run as this user, from this
+    /// desktop, and anything they can ask for the user could do by hand.
+    /// The browser extension and the web interface are not: each speaks
+    /// for a page or for whoever is on the network, so each is refused
+    /// everything that is about the machine rather than about a download.
+    ///
+    /// Stated as a list of the untrusted rather than of the trusted, and
+    /// deliberately: a new client added without touching this file arrives
+    /// untrusted, which is the direction a mistake should fall.
+    pub fn is_trusted(&self) -> bool {
+        !matches!(self.name.as_str(), BROWSER_CLIENT | REMOTE_CLIENT)
+    }
+
+    /// What to call this client when refusing it, in a refusal a person
+    /// reads.
+    pub fn described(&self) -> &'static str {
+        match self.name.as_str() {
+            BROWSER_CLIENT => "the browser integration",
+            REMOTE_CLIENT => "the web interface",
+            _ => "this client",
+        }
+    }
+}
+
+#[cfg(test)]
+mod client_tests {
+    use super::*;
+
+    fn named(name: &str) -> ClientInfo {
+        ClientInfo { name: name.into(), client_id: None }
+    }
+
+    #[test]
+    fn the_app_and_the_command_line_are_trusted() {
+        assert!(named("desktop").is_trusted());
+        assert!(named("cli").is_trusted());
+    }
+
+    #[test]
+    fn the_browser_and_the_web_interface_are_not() {
+        assert!(!named(BROWSER_CLIENT).is_trusted());
+        assert!(!named(REMOTE_CLIENT).is_trusted());
+    }
+
+    #[test]
+    fn a_refusal_names_the_client_it_is_refusing() {
+        assert_eq!(named(BROWSER_CLIENT).described(), "the browser integration");
+        assert_eq!(named(REMOTE_CLIENT).described(), "the web interface");
     }
 }
 
