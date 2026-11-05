@@ -137,6 +137,43 @@ function timeSpawn(command, args) {
   return { elapsed, status: result.status, stderr: result.stderr?.toString() ?? "" };
 }
 
+/**
+ * Times our own CLI, and keeps what it says about itself.
+ *
+ * `--json` has existed since this benchmark was written -- its doc comment
+ * in idm-cli even says it is for this -- and the harness was running `-q`
+ * and throwing the information away. The settle reason and the steal count
+ * are what tell a scheduler that stopped early apart from one that never
+ * found the work, and no amount of staring at a throughput figure
+ * distinguishes those.
+ */
+function timeOurs(args) {
+  const started = process.hrtime.bigint();
+  const result = spawnSync(OUR_EXE, args, { encoding: "utf8" });
+  const elapsed = Number(process.hrtime.bigint() - started) / 1e6;
+
+  let said = null;
+  try {
+    // One line of JSON on stdout; anything else means it failed before
+    // printing, and the stderr is the interesting part then.
+    said = JSON.parse((result.stdout ?? "").trim().split("\n").pop());
+  } catch {
+    said = null;
+  }
+  return {
+    elapsed,
+    status: result.status,
+    stderr: result.stderr ?? "",
+    // What the engine thought it was doing, for the table and the record.
+    settled: said?.settled ?? null,
+    connections: said?.connections ?? null,
+    steals: said?.steals ?? null,
+    hedges: said?.hedges ?? null,
+    retries: said?.retries ?? null,
+    writeMode: said?.write_mode ?? null,
+  };
+}
+
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const TOOLS = [
@@ -145,21 +182,21 @@ const TOOLS = [
     label: "DivinePulse (adaptive)",
     available: () => existsSync(OUR_EXE),
     run: (url, dir, name) =>
-      timeSpawn(OUR_EXE, [url, "-o", dir, "--name", name, "--no-edge-pinning", "-q"]),
+      timeOurs([url, "-o", dir, "--name", name, "--no-edge-pinning", "--json"]),
   },
   {
     name: "divine-idm-1",
     label: "DivinePulse (1 conn)",
     available: () => existsSync(OUR_EXE),
     run: (url, dir, name) =>
-      timeSpawn(OUR_EXE, [url, "-o", dir, "--name", name, "-n", "1", "--no-edge-pinning", "-q"]),
+      timeOurs([url, "-o", dir, "--name", name, "-n", "1", "--no-edge-pinning", "--json"]),
   },
   {
     name: "divine-idm-16",
     label: "DivinePulse (16 conn)",
     available: () => existsSync(OUR_EXE),
     run: (url, dir, name) =>
-      timeSpawn(OUR_EXE, [url, "-o", dir, "--name", name, "-n", "16", "--no-edge-pinning", "-q"]),
+      timeOurs([url, "-o", dir, "--name", name, "-n", "16", "--no-edge-pinning", "--json"]),
   },
   {
     name: "curl",
@@ -356,6 +393,7 @@ async function main() {
     await fetch(`${base}/_reset`).catch(() => {});
 
     const times = [];
+    let said = null;
     let failure = null;
     for (let run = 0; run < RUNS; run += 1) {
       rmSync(dir, { recursive: true, force: true });
@@ -377,6 +415,8 @@ async function main() {
         break;
       }
       times.push(outcome.elapsed);
+      // Only our own tool reports these; for the others they stay null.
+      said = outcome.settled ? outcome : said;
       console.log(`${(outcome.elapsed / 1000).toFixed(2)}s  ${human(rate(SIZE, outcome.elapsed))}`);
     }
 
@@ -395,6 +435,16 @@ async function main() {
             // Per run, since the counter spans every run of this tool.
             requestsPerRun: asked,
             peakConnections: used?.peakConnections ?? null,
+            // What the engine said about its own run, where it says
+            // anything: the settle reason is the difference between a
+            // scheduler that stopped on purpose and one that ran out of
+            // work to hand out.
+            settled: said?.settled ?? null,
+            connectionsSettledAt: said?.connections ?? null,
+            steals: said?.steals ?? null,
+            hedges: said?.hedges ?? null,
+            retries: said?.retries ?? null,
+            writeMode: said?.writeMode ?? null,
           },
     );
   }
@@ -426,7 +476,7 @@ async function main() {
 
   console.log(
     `\n${"Tool".padEnd(28)}${"Median".padEnd(10)}${"Throughput".padEnd(14)}` +
-      `${"vs curl".padEnd(9)}${"reqs".padEnd(7)}${"peak".padEnd(7)}bound by`,
+      `${"vs curl".padEnd(9)}${"reqs".padEnd(7)}${"peak".padEnd(7)}${"steals".padEnd(7)}settled / bound by`,
   );
   console.log("-".repeat(100));
   const baseline = results.find((r) => r.label.startsWith("curl"))?.ms;
@@ -458,7 +508,8 @@ async function main() {
         speedup.padEnd(9) +
         String(result.requestsPerRun ?? "-").padEnd(7) +
         String(result.peakConnections ?? "-").padEnd(7) +
-        result.bound,
+        String(result.steals ?? "-").padEnd(7) +
+        (result.settled ?? result.bound),
     );
   }
   console.log(

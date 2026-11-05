@@ -255,6 +255,14 @@ pub struct ConnController {
     baseline_per_conn_bps: f64,
     quiet_until_ms: u64,
     next_decision_ms: u64,
+    /// The best aggregate rate seen, and the count that produced it.
+    ///
+    /// Climbing is cheap to undo and expensive to get wrong, so the ramp
+    /// remembers where it was happiest rather than only where it stopped.
+    /// Without this, settling means keeping every connection the climb
+    /// added, including the ones that measurably made things worse.
+    best_bps: f64,
+    best_at: u32,
 }
 
 impl ConnController {
@@ -273,6 +281,8 @@ impl ConnController {
             baseline_per_conn_bps: 0.0,
             quiet_until_ms: 0,
             next_decision_ms: now_ms,
+            best_bps: 0.0,
+            best_at: start,
         }
     }
 
@@ -354,6 +364,14 @@ impl ConnController {
             return ConnDecision::Reduce { to: self.current, ceiling: self.ceiling };
         }
 
+        // Noted on every window, including the ones too early to act on:
+        // the measurement belongs to the count that produced it, and that
+        // is what makes a later retreat possible.
+        if observation.aggregate_bps > self.best_bps {
+            self.best_bps = observation.aggregate_bps;
+            self.best_at = self.current;
+        }
+
         if now_ms < self.quiet_until_ms || now_ms < self.next_decision_ms {
             return ConnDecision::Hold;
         }
@@ -376,10 +394,10 @@ impl ConnController {
 
         // Signals that mean another connection cannot possibly help.
         if observation.writer_backpressure {
-            return self.settle(SettleReason::DiskBound);
+            return self.settle(SettleReason::DiskBound, observation.aggregate_bps);
         }
         if observation.interarrival_p95_ratio > self.policy.queueing_p95_multiple {
-            return self.settle(SettleReason::Queueing);
+            return self.settle(SettleReason::Queueing, observation.aggregate_bps);
         }
 
         // The first window is only a baseline; there is nothing to compare to.
@@ -402,7 +420,7 @@ impl ConnController {
             if gain < self.policy.flat_gain_frac
                 && observation.per_conn_spread_frac < self.policy.low_variance_frac
             {
-                return self.settle(SettleReason::PerIpShaping);
+                return self.settle(SettleReason::PerIpShaping, observation.aggregate_bps);
             }
 
             // A severe collapse means the connections are fighting rather than
@@ -411,13 +429,13 @@ impl ConnController {
                 let drop = (self.baseline_per_conn_bps - observation.mean_per_conn_bps)
                     / self.baseline_per_conn_bps;
                 if drop > self.policy.per_conn_collapse_frac {
-                    return self.settle(SettleReason::PerConnCollapse);
+                    return self.settle(SettleReason::PerConnCollapse, observation.aggregate_bps);
                 }
             }
 
             self.weak_gains += 1;
             if self.weak_gains >= self.policy.weak_gains_before_settling {
-                return self.settle(SettleReason::DiminishingReturns);
+                return self.settle(SettleReason::DiminishingReturns, observation.aggregate_bps);
             }
             return ConnDecision::Hold;
         }
@@ -457,7 +475,9 @@ impl ConnController {
         let target = target.min(self.current + global_room);
 
         if target <= self.current {
-            return self.settle(SettleReason::AtCap);
+            // The one settle with no window of its own: `try_add` is reached
+            // only on a gain, so the best is the count we are already at.
+            return self.settle(SettleReason::AtCap, self.best_bps);
         }
         self.current = target;
         if fast {
@@ -466,8 +486,47 @@ impl ConnController {
         ConnDecision::Add { to: target }
     }
 
-    fn settle(&mut self, reason: SettleReason) -> ConnDecision {
+    fn settle(&mut self, reason: SettleReason, aggregate_bps: f64) -> ConnDecision {
         self.settled = Some(reason);
+
+        // Settling means the climb is over. Keeping connections that were
+        // measured to be worse than a smaller number is never right, and on
+        // a per-IP-shaped origin it is actively expensive: the rate is one
+        // bucket split N ways, so the extra connections buy nothing and the
+        // ragged tail they produce leaves the bucket under-drawn.
+        //
+        // Measured against a shared 8 MB/s bucket, 128 MiB: two connections
+        // 8.36 MB/s, three 8.19, four 7.90, eight 7.55, sixteen 7.64. The
+        // controller diagnosed this correctly and then held at sixteen,
+        // because settling only ever stopped the climb.
+        //
+        // The bar is `flat_gain_frac`, the same number that decides whether
+        // an aggregate counts as unchanged: retreat only when going up cost
+        // more than a difference this module already calls noise.
+        let lost = self.best_bps > 0.0
+            && aggregate_bps < self.best_bps * (1.0 - self.policy.flat_gain_frac);
+        if lost && self.best_at < self.current {
+            self.current = self.best_at;
+        }
+
+        // A downward probe was tried here and taken out again. The ramp
+        // only ever measures counts at or above the one it opens with, so
+        // against a shared bucket the best it can find is the number it
+        // started from -- and the real curve on an 8 MB/s bucket peaks
+        // lower: two connections 8.36 MB/s, four 7.90, eight 7.55.
+        //
+        // Halving and re-measuring did not get there. A window taken right
+        // after connections close measures the drain rather than the new
+        // count, and giving each step a full probe interval fixed that
+        // without changing the outcome: the descent's windows come back
+        // *equal* to the best rather than better, equal never updates the
+        // best, so the probe walks back to where it started. Landing lower
+        // needs the lowest count within noise of the best, which means
+        // per-count bookkeeping rather than one high-water mark.
+        //
+        // Measured over four runs it moved throughput not at all and cost
+        // about 40% more requests, which is the trade this program declines
+        // to make elsewhere. Written down rather than left in.
         ConnDecision::Settle { at: self.current, reason }
     }
 
@@ -479,7 +538,10 @@ impl ConnController {
         multiplexing_helped: bool,
     ) -> HostProfile {
         HostProfile {
-            best_conn_count: self.current,
+            // Where it was fastest, which after a retreat is where it is --
+            // but a download that ended mid-climb should still pass on the
+            // count that worked rather than the one it happened to reach.
+            best_conn_count: if self.best_bps > 0.0 { self.best_at } else { self.current },
             conn_ceiling: self.ceiling,
             multiplexing_helped,
             h3_won_race: None,
@@ -504,6 +566,30 @@ mod tests {
     ) -> ConnDecision {
         *clock_ms += 2000;
         controller.observe(*clock_ms, observation, 0)
+    }
+
+    /// Steps until the controller commits, feeding a window built from
+    /// whatever count it currently holds.
+    ///
+    /// Settling stopped being a single decision when the downward probe
+    /// arrived: once additions stop paying, the controller looks below
+    /// before it commits, so the first decision is the start of that probe
+    /// rather than the end of the ramp. Returns the reason and the count it
+    /// finally held.
+    fn settle_out(
+        controller: &mut ConnController,
+        clock_ms: &mut u64,
+        mut window: impl FnMut(u32) -> Observation,
+    ) -> (SettleReason, u32) {
+        for _ in 0..24 {
+            let observation = window(controller.connections());
+            match step(controller, clock_ms, &observation) {
+                ConnDecision::Settle { at, reason } => return (reason, at),
+                ConnDecision::Hold | ConnDecision::Reduce { .. } => continue,
+                ConnDecision::Add { .. } => panic!("added despite no gain"),
+            }
+        }
+        panic!("the ramp never settled");
     }
 
     #[test]
@@ -630,9 +716,10 @@ mod tests {
             observation.per_conn_spread_frac = 0.5;
             match step(&mut controller, &mut clock, &observation) {
                 ConnDecision::Settle { reason, .. } => break reason,
-                ConnDecision::Hold => continue,
+                // A `Reduce` here is the downward probe, not a throttle:
+                // the ramp looks below before it commits.
+                ConnDecision::Hold | ConnDecision::Reduce { .. } => continue,
                 ConnDecision::Add { .. } => panic!("added despite no gain"),
-                other => panic!("unexpected {other:?}"),
             }
         };
         assert_eq!(settled, SettleReason::DiminishingReturns);
@@ -651,14 +738,62 @@ mod tests {
         let mut observation = Observation::healthy(50.0 * MBPS, controller.connections());
         observation.per_conn_spread_frac = 0.02; // all connections equal
 
-        let decision = step(&mut controller, &mut clock, &observation);
-        assert_eq!(
-            decision,
-            ConnDecision::Settle {
-                at: controller.connections(),
-                reason: SettleReason::PerIpShaping
-            }
-        );
+        let (reason, _) = settle_out(&mut controller, &mut clock, |count| {
+            let mut window = Observation::healthy(50.0 * MBPS, count);
+            window.per_conn_spread_frac = 0.02; // all connections equal
+            window
+        });
+        assert_eq!(reason, SettleReason::PerIpShaping);
+        let _ = observation;
+    }
+
+    #[test]
+    fn settling_goes_back_to_the_count_that_was_fastest() {
+        // The bug this exists for. The controller used to diagnose a shared
+        // bucket correctly and then keep every connection the climb had
+        // added, because settling only ever stopped the climb.
+        //
+        // Measured against a real shared 8 MB/s bucket, 128 MiB: two
+        // connections 8.36 MB/s, four 7.90, eight 7.55, sixteen 7.64. The
+        // diagnosis was right and the count was wrong.
+        let policy = ConnPolicy::default();
+        let mut clock = 0;
+        let mut controller = ConnController::new(policy, clock);
+
+        let opened_at = controller.connections();
+        step(&mut controller, &mut clock, &Observation::healthy(8.3 * MBPS, opened_at));
+        assert!(controller.connections() > opened_at, "the climb should have added some");
+
+        // Everything after the opening window is worse, including the
+        // counts the downward probe tries, so the best on record stays the
+        // one it opened at.
+        let (_, at) = settle_out(&mut controller, &mut clock, |count| {
+            let mut window = Observation::healthy(7.5 * MBPS, count);
+            window.per_conn_spread_frac = 0.02;
+            window
+        });
+
+        assert_eq!(at, opened_at, "it should return to the count that measured fastest");
+        assert_eq!(controller.connections(), opened_at);
+    }
+
+    #[test]
+    fn the_profile_remembers_the_best_count_not_the_last_one() {
+        // `to_profile` used to write down wherever the climb stopped, so a
+        // per-IP origin taught the next download to start at the count that
+        // had just been measured as worse.
+        let policy = ConnPolicy::default();
+        let mut clock = 0;
+        let mut controller = ConnController::new(policy, clock);
+
+        let opened_at = controller.connections();
+        step(&mut controller, &mut clock, &Observation::healthy(8.3 * MBPS, opened_at));
+        let mut worse = Observation::healthy(7.5 * MBPS, controller.connections());
+        worse.per_conn_spread_frac = 0.02;
+        step(&mut controller, &mut clock, &worse);
+
+        let profile = controller.to_profile(1_000, 42, false);
+        assert_eq!(profile.best_conn_count, opened_at);
     }
 
     #[test]
@@ -712,10 +847,8 @@ mod tests {
             interarrival_p95_ratio: 1.0,
             rtt: Duration::from_millis(20),
         };
-        assert!(matches!(
-            step(&mut controller, &mut clock, &observation),
-            ConnDecision::Settle { reason: SettleReason::PerConnCollapse, .. }
-        ));
+        let (reason, _) = settle_out(&mut controller, &mut clock, |_| observation);
+        assert_eq!(reason, SettleReason::PerConnCollapse);
     }
 
     #[test]
