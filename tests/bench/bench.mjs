@@ -169,15 +169,12 @@ const TOOLS = [
   },
   {
     name: "ghd",
-    label: "Ghost Downloader 3",
-    // On PATH only: `ghd` is installed from inside the application, so its
-    // presence is a decision somebody made rather than something this
-    // harness can arrange. Absent, the row says so instead of vanishing.
-    available: () => onPath("ghd"),
-    run: (url, dir, name) =>
-      // `add` queues and returns, so the timing has to wait for the task.
-      // `wait` is what the documented CLI offers for exactly that.
-      timeSpawn("ghd", ["add", url, "--dir", dir, "--name", name, "--wait"]),
+    label: "Ghost Downloader (ghd)",
+    // `ghd` ships in the portable build's bin/ but is not put on PATH, so
+    // GHD_EXE is how a machine says where its copy is. Absent, the row
+    // says "not installed" rather than vanishing.
+    available: () => Boolean(ghdExe()),
+    run: timeGhd,
   },
   {
     name: "aria2c",
@@ -191,6 +188,61 @@ const TOOLS = [
       ]),
   },
 ];
+
+/** Where this machine's `ghd` is, or nothing. */
+function ghdExe() {
+  const named = process.env.GHD_EXE;
+  if (named && existsSync(named)) return named;
+  return onPath("ghd") ? "ghd" : null;
+}
+
+/** Task ids added during this run, so the app is left as it was found. */
+const ghdTasks = [];
+const NEWLINE = "\n";
+
+/**
+ * Times Ghost Downloader, which is two calls rather than one.
+ *
+ * `add` queues the task, starts it and returns at once with a task id;
+ * `wait` blocks until it stops and exits non-zero unless it completed. So
+ * the clock has to span both, and the pair has to be spawned back to back
+ * -- anything between them is time the download is already spending.
+ *
+ * Both speak JSON on stdout, which is how the task id gets from one to the
+ * other and how a failure explains itself.
+ */
+function timeGhd(url, dir, name) {
+  const exe = ghdExe();
+  const started = process.hrtime.bigint();
+
+  const added = spawnSync(
+    exe,
+    // `--conflict overwrite` because the app remembers tasks between runs,
+    // and "keep both" would quietly write payload (1).bin on run two and
+    // leave the digest check reading a stale file.
+    ["add", url, "-o", dir, "--name", name, "--conflict", "overwrite"],
+    { encoding: "utf8" },
+  );
+  if (added.status !== 0) {
+    return { elapsed: 0, status: added.status ?? 1, stderr: added.stdout || added.stderr || "" };
+  }
+
+  let taskId;
+  try {
+    taskId = JSON.parse(added.stdout).result[0].taskId;
+  } catch {
+    return { elapsed: 0, status: 1, stderr: `could not read a task id from ${added.stdout}` };
+  }
+  ghdTasks.push(taskId);
+
+  const waited = spawnSync(exe, ["wait", taskId], { encoding: "utf8" });
+  const elapsed = Number(process.hrtime.bigint() - started) / 1e6;
+  return {
+    elapsed,
+    status: waited.status ?? 1,
+    stderr: waited.status === 0 ? "" : waited.stdout || waited.stderr || "",
+  };
+}
 
 /** Whether a command can be found, without running anything of substance. */
 function onPath(command) {
@@ -348,6 +400,26 @@ async function main() {
   }
 
   rmSync(dir, { recursive: true, force: true });
+  // Ghost Downloader keeps its task list across runs, so a benchmark that
+  // did not tidy up would leave dozens of finished rows in somebody's app.
+  // After the directory is gone, so "unfinished files are always deleted"
+  // has nothing left to delete.
+  //
+  // One id the app will not remove fails the whole batch, and once left
+  // behind these are somebody's to clear by hand -- so they go one at a
+  // time, and anything that survives is named rather than left as a
+  // surprise in the app.
+  const stubborn = [];
+  for (const task of ghdTasks) {
+    const gone = spawnSync(ghdExe(), ["remove", task], { stdio: "ignore" });
+    if (gone.status !== 0) stubborn.push(task);
+  }
+  if (stubborn.length) {
+    console.log(
+      `${NEWLINE}could not remove ${stubborn.length} task(s) from Ghost Downloader:` +
+        `${NEWLINE}  ghd remove ${stubborn.join(" ")}`,
+    );
+  }
   child.kill();
 
   const stats = await fetch(`${base}/_stats`).then((r) => r.json()).catch(() => null);
