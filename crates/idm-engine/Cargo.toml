@@ -19,7 +19,18 @@ reqwest.workspace = true
 serde = { workspace = true }
 serde_json.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "time", "sync"] }
+# "process" and "fs" are for handing a finished file to Windows Defender
+# (see src/scan.rs); they were reaching this crate only by feature
+# unification, which is not a dependency.
+tokio = { workspace = true, features = [
+    "rt-multi-thread",
+    "macros",
+    "signal",
+    "time",
+    "sync",
+    "process",
+    "fs",
+] }
 tracing.workspace = true
 # Only to unpack one named file out of an archive whose hash already matched
 # the publisher's, and whose contents are then checked against the lock. No

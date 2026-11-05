@@ -104,6 +104,14 @@ Being straight about this so nothing surprises you:
   running.** The torrent engine takes its limit once, when it starts, so a
   limit or a schedule rule changed afterwards applies to torrents from the
   next time the app opens. Ordinary downloads follow both at once.
+- **Removing a file a virus scanner objected to.** DivinePulse hands each
+  finished download to Windows Defender and never lets it delete or
+  quarantine anything: a detection fails the download, says what was found,
+  and leaves the file exactly where it is. Deleting it is then yours to
+  decide, from the download's menu in History. Turn the check off in
+  Settings if you would rather it did not run. Files over 8 GB are not
+  scanned -- reading a disc image twice is a long wait for a verdict -- and
+  that is reported as "not scanned" rather than as a clean bill.
 - **macOS and Linux.** Windows only.
 
 ## If something goes wrong

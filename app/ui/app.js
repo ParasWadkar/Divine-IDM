@@ -650,6 +650,7 @@ function renderSettings(settings, force = false) {
   $("max-concurrent").value = String(settings.max_concurrent_downloads);
   $("speed-limit").value = String(settings.speed_limit_bytes_per_sec ?? 0);
   $("sort-into-folders").checked = settings.sort_into_folders ?? true;
+  $("scan-downloads").checked = settings.scan_downloads ?? true;
   // Don't reset speed-in-bits: it's UI-only state, not persisted
   $("start-with-windows").checked = settings.start_with_windows;
   $("resume-on-start").checked = settings.resume_on_start;
@@ -1098,6 +1099,7 @@ async function saveSettings(overrides = {}) {
     max_concurrent_downloads: Number($("max-concurrent").value),
     speed_limit_bytes_per_sec: Number($("speed-limit").value),
     sort_into_folders: $("sort-into-folders").checked,
+    scan_downloads: $("scan-downloads").checked,
     start_with_windows: $("start-with-windows").checked,
     resume_on_start: $("resume-on-start").checked,
     post_action: $("post-action").value,
@@ -1384,6 +1386,29 @@ async function retryFromHistory(job) {
 }
 
 /**
+ * Removes a downloaded file from the disk, having asked first.
+ *
+ * Only reachable on a download Windows Defender objected to. The engine
+ * deliberately leaves such a file alone -- a download manager that silently
+ * destroys what it fetched is worse than one that does not scan -- and this
+ * is the other half of that decision: the person is told what was found and
+ * then gets to decide.
+ */
+async function deleteDownload(job) {
+  const sure = await confirmDialog(
+    `Delete ${job.filename}? It is removed from the disk, not sent to the recycle bin.`,
+    { confirm: "Delete it" },
+  );
+  if (!sure) return;
+  try {
+    await invoke("delete_file", { path: historyPath(job) });
+    toast(`Deleted ${job.filename}.`);
+  } catch (error) {
+    toast(String(error), true);
+  }
+}
+
+/**
  * Picks it up again from a different address, keeping the bytes it has.
  *
  * The same thing Try again does, with one field more. The engine treats a
@@ -1471,10 +1496,18 @@ function historyMenuItems(job, outcome) {
   } else if (outcome === "completed") {
     items.push({ label: "Open file", run: shell("open_file") });
   } else {
-    items.push({
-      label: outcome === "failed" ? "Try again" : "Download again",
-      run: () => retryFromHistory(job),
-    });
+    // A detection is the one failure Try again cannot help with: the file
+    // is already there and downloading it again would find the same thing.
+    // What it leaves somebody with is a file they now want gone, so that is
+    // what is offered instead.
+    if (job.error_kind === "content.infected") {
+      items.push({ label: "Delete the file…", danger: true, run: () => deleteDownload(job) });
+    } else {
+      items.push({
+        label: outcome === "failed" ? "Try again" : "Download again",
+        run: () => retryFromHistory(job),
+      });
+    }
     // The reason most big downloads fail is that their address stopped
     // working, and Try again on its own fails the same way for the same
     // reason. New link exists for exactly this and could not be reached
@@ -2169,6 +2202,7 @@ for (const id of [
   "max-concurrent",
   "speed-limit",
   "sort-into-folders",
+  "scan-downloads",
   "start-with-windows",
   "resume-on-start",
   "post-action",

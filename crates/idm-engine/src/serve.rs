@@ -1958,7 +1958,17 @@ async fn start(inner: &Arc<Inner>, id: JobId, config: DownloadConfig) {
 
             match outcome {
                 Ok(total) => {
-                    finish(&inner, id, JobState::Completed, total, None).await;
+                    // Everything that happens to a file after the bytes are
+                    // all there. A step may refuse to deliver the download;
+                    // a step that merely could not run does not.
+                    match after_the_bytes(&inner, id).await {
+                        None => finish(&inner, id, JobState::Completed, total, None).await,
+                        Some(refusal) => {
+                            // Failed with the file left exactly where it is.
+                            // Nothing here deletes anything.
+                            finish(&inner, id, JobState::Failed, total, Some(refusal)).await;
+                        }
+                    }
                 }
                 Err(failure) => {
                     // The partial file and journal are deliberately left in
@@ -2042,6 +2052,26 @@ fn outcome_of(failure: &Failure) -> idm_store::Outcome<'_> {
 /// the life of the process. The row itself stays; it is the history.
 async fn forget_row(inner: &Inner, id: JobId) {
     inner.rows.lock().await.remove(&id);
+}
+
+/// Runs the after-the-bytes steps over a job's finished file.
+///
+/// Reads the path from the record rather than from the config, because the
+/// filename may have been settled after the job was queued -- a server's
+/// own name, or a `(2)` added to avoid overwriting something.
+async fn after_the_bytes(inner: &Arc<Inner>, id: JobId) -> Option<Failure> {
+    let settings = inner.settings.lock().await.clone();
+    let path = {
+        let jobs = inner.jobs.lock().await;
+        let record = jobs.get(&id)?;
+        PathBuf::from(&record.status.output_dir).join(&record.status.filename)
+    };
+
+    let (report, refusal) = crate::finish::run(&settings, &path).await;
+    if let Some(verdict) = &report.scan {
+        tracing::debug!(?verdict, path = %path.display(), "scanned a finished download");
+    }
+    refusal
 }
 
 async fn finish(

@@ -571,6 +571,33 @@ fn open_file(path: String) -> Result<(), String> {
         .map_err(|error| error.to_string())
 }
 
+/// Deletes one downloaded file.
+///
+/// The only thing in this program that removes a file somebody downloaded,
+/// and it exists because of the one that does not: a detection leaves the
+/// file alone and says so, which is right, and then leaves the person
+/// holding something they want gone.
+///
+/// To the recycle bin would be friendlier and is not offered, because the
+/// case this is for is a file Windows Defender has just called malware and
+/// moving it somewhere it still exists is not what "delete" should mean
+/// there.
+///
+/// A directory is refused. A torrent's download is a folder, and a
+/// recursive delete reached from a menu is a different and much larger
+/// promise than this one.
+#[tauri::command]
+fn delete_file(path: String) -> Result<(), String> {
+    let path = std::path::PathBuf::from(path);
+    match std::fs::symlink_metadata(&path) {
+        Ok(data) if data.is_dir() => {
+            Err("that download is a folder, not a file; remove it in Explorer".into())
+        }
+        Ok(_) => std::fs::remove_file(&path).map_err(|error| error.to_string()),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
 /// Shows a finished file in Explorer, selected.
 #[tauri::command]
 fn reveal(path: String) -> Result<(), String> {
@@ -721,6 +748,7 @@ fn main() {
             pause_job,
             refresh_link,
             queues,
+            delete_file,
             peek_archive,
             grab_links,
             add_links,

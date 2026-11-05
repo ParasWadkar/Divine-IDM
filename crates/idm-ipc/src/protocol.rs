@@ -410,6 +410,14 @@ pub struct Settings {
     /// rather than quietly written to a file the user does not know is
     /// holding it. Authenticated proxies wait for that to be wired up.
     pub proxy_address: String,
+
+    /// Whether a finished download is handed to Windows Defender.
+    ///
+    /// On by default: it is the scanner the machine already has, and the
+    /// scan is the same one the right-click menu runs. Nothing is ever
+    /// removed on a detection -- see `idm_engine::scan` -- so the worst
+    /// this costs somebody who leaves it on is a few seconds per file.
+    pub scan_downloads: bool,
 }
 
 impl Default for Settings {
@@ -444,6 +452,7 @@ impl Default for Settings {
             // networks where a proxy is mandatory.
             proxy: ProxySetting::System,
             proxy_address: String::new(),
+            scan_downloads: true,
         }
     }
 }

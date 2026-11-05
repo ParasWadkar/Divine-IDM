@@ -68,6 +68,14 @@ pub enum Kind {
     DownloadIntegrity,
     DownloadUnknownSize,
 
+    /// Windows Defender found something in the finished file.
+    ///
+    /// Not a download problem: the transfer worked perfectly and the file
+    /// is exactly what the server sent. What is wrong is the file, which
+    /// is why this is its own kind and why the interface offers Delete
+    /// file on it and on nothing else.
+    ContentInfected,
+
     /// Nothing matched. The raw text is still in the detail, which is the
     /// whole reason this variant is allowed to exist rather than forcing a
     /// wrong guess into one of the others.
@@ -99,6 +107,7 @@ impl Kind {
             Self::DownloadInterrupted => "download.interrupted",
             Self::DownloadIntegrity => "download.integrity",
             Self::DownloadUnknownSize => "download.unknown_size",
+            Self::ContentInfected => "content.infected",
             Self::Unclassified => "unknown.unclassified",
         }
     }
