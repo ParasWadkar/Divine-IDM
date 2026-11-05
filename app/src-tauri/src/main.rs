@@ -97,6 +97,62 @@ async fn queues(state: State<'_, AppState>) -> Result<serde_json::Value, String>
     queue_reply(state.request(Request::ListQueues).await)
 }
 
+/// The bandwidth schedule, and what it is doing right now.
+#[tauri::command]
+async fn bandwidth_rules(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
+    schedule_reply(state.request(Request::ListBandwidthRules).await)
+}
+
+/// Adds a rule or replaces one, and returns the schedule as it now stands.
+#[tauri::command]
+async fn set_bandwidth_rule(
+    state: State<'_, AppState>,
+    id: Option<i64>,
+    days: u8,
+    start_minute: u16,
+    end_minute: u16,
+    bytes_per_sec: u64,
+    stop: bool,
+) -> Result<serde_json::Value, String> {
+    schedule_reply(
+        state
+            .request(Request::SetBandwidthRule {
+                id,
+                days,
+                start_minute,
+                end_minute,
+                bytes_per_sec,
+                stop,
+            })
+            .await,
+    )
+}
+
+#[tauri::command]
+async fn forget_bandwidth_rule(
+    state: State<'_, AppState>,
+    id: i64,
+) -> Result<serde_json::Value, String> {
+    schedule_reply(state.request(Request::RemoveBandwidthRule { id }).await)
+}
+
+/// The rules and the line about what is in force, as one reply.
+///
+/// Together because they are answered together: a rule that has just
+/// changed usually changes what is in force, and asking twice would show
+/// the window a list and a verdict from two different instants.
+fn schedule_reply(response: Response) -> Result<serde_json::Value, String> {
+    match response {
+        Response::BandwidthRules { rules, now } => Ok(serde_json::json!({
+            "rules": rules,
+            "now": now,
+        })),
+        Response::Rejected { reason } => Err(reason),
+        Response::Error { message } => Err(message),
+        other => Err(format!("unexpected reply: {other:?}")),
+    }
+}
+
 /// Which sites and proxies have a password saved. Never the passwords.
 #[tauri::command]
 async fn credentials(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
@@ -585,6 +641,9 @@ fn main() {
             pause_job,
             refresh_link,
             queues,
+            bandwidth_rules,
+            set_bandwidth_rule,
+            forget_bandwidth_rule,
             credentials,
             save_credential,
             forget_credential,

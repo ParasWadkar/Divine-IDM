@@ -44,6 +44,17 @@
             <span>Queues</span>
           </button>
           <button
+            id="tab-schedule"
+            class="nav-item"
+            data-tab="schedule"
+            role="tab"
+            aria-selected="false"
+            aria-controls="panel-schedule"
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /></svg>
+            <span>Schedule</span>
+          </button>
+          <button
             id="tab-history"
             class="nav-item"
             data-tab="history"
@@ -261,6 +272,34 @@
             </form>
 
             <div id="queue-list" class="queue-list"></div>
+          </section>
+
+          <section
+            id="panel-schedule"
+            class="panel"
+            role="tabpanel"
+            aria-labelledby="tab-schedule"
+            hidden
+          >
+            <div class="list-head">
+              <h2>Schedule</h2>
+            </div>
+
+            <p class="queues-note">
+              Slow downloads down, or stop them altogether, at times you
+              choose. While a rule is in force it decides the speed, instead
+              of the limit in Settings — so you can hold downloads back
+              during the day and let them run at full speed overnight. Where
+              two rules overlap, the stricter one wins.
+            </p>
+
+            <div id="schedule-now" class="schedule-now"></div>
+
+            <div id="schedule-list" class="schedule-list"></div>
+
+            <div class="manual">
+              <button id="add-rule" class="ghost">Add a rule…</button>
+            </div>
           </section>
 
           <section
@@ -566,6 +605,57 @@
     <!-- Three fields rather than `askFor`'s one. The password field is a
          real `type=password`, so it is not read over somebody's shoulder and
          not offered to the browser engine's own autofill as plain text. -->
+    <!-- Seven checkboxes rather than a drag-to-paint week grid. The grid
+         looks better in a screenshot and is worse to use with a keyboard,
+         and this says exactly the same thing. -->
+    <div id="rule-modal" class="modal-overlay" hidden>
+      <div class="modal">
+        <p id="rule-message">Add a rule</p>
+
+        <div id="rule-days" class="rule-days"></div>
+
+        <label class="row">
+          <span>From</span>
+          <input id="rule-start" class="text-input" type="time" step="300" value="09:00" />
+        </label>
+        <label class="row">
+          <span>Until</span>
+          <input id="rule-end" class="text-input" type="time" step="300" value="17:00" />
+        </label>
+        <p class="note" id="rule-overnight" hidden>
+          Ends earlier than it starts, so this runs past midnight — on the
+          nights of the days ticked above.
+        </p>
+
+        <label class="row">
+          <span>Then</span>
+          <select id="rule-action">
+            <option value="limit">limit the speed to</option>
+            <option value="open">let downloads run at full speed</option>
+            <option value="stop">do not download at all</option>
+          </select>
+        </label>
+        <label class="row" id="rule-speed-row">
+          <span class="sr-only">Speed</span>
+          <select id="rule-speed">
+            <option value="51200">50 KB/s</option>
+            <option value="131072">128 KB/s</option>
+            <option value="262144">256 KB/s</option>
+            <option value="524288">512 KB/s</option>
+            <option value="1048576">1 MB/s</option>
+            <option value="2097152">2 MB/s</option>
+            <option value="5242880">5 MB/s</option>
+            <option value="10485760">10 MB/s</option>
+          </select>
+        </label>
+
+        <div class="modal-actions">
+          <button id="rule-cancel" class="ghost">Cancel</button>
+          <button id="rule-ok">Save</button>
+        </div>
+      </div>
+    </div>
+
     <div id="credential-modal" class="modal-overlay" hidden>
       <div class="modal">
         <p id="credential-message">Save a password</p>

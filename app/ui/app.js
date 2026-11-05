@@ -1725,13 +1725,16 @@ function selectTab(tab, giveFocus = false) {
     // The state a screen reader announces, not only the one shown in paint.
     other.setAttribute("aria-selected", String(active));
   }
-  for (const name of ["active", "queues", "history", "settings"]) {
+  for (const name of ["active", "queues", "schedule", "history", "settings"]) {
     $(`panel-${name}`).hidden = name !== tab.dataset.tab;
   }
   if (tab.dataset.tab === "history") showHistory();
   // The counts move as downloads start and finish, so they are read when the
   // panel is opened rather than left at whatever they were last time.
   if (tab.dataset.tab === "queues") refreshQueues();
+  // Read when the panel is opened rather than on the snapshot: rules change
+  // rarely, and what is in force only changes on a boundary.
+  if (tab.dataset.tab === "schedule") refreshSchedule();
   // A browser may have been installed or paired since this was last looked
   // at, and ffmpeg may have arrived on the PATH from somewhere else.
   if (tab.dataset.tab === "settings") {
@@ -2169,6 +2172,253 @@ async function signInFor(job) {
   }
   await showHistory();
 }
+
+// --------------------------------------------------------------- schedule
+
+// Monday first, matching the bitmask the engine uses: bit 0 is Monday,
+// because a rule somebody writes is nearly always about a working week.
+const DAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+
+let scheduleRules = [];
+let scheduleNow = null;
+
+async function refreshSchedule() {
+  try {
+    const reply = await invoke("bandwidth_rules");
+    scheduleRules = reply.rules ?? [];
+    scheduleNow = reply.now ?? null;
+  } catch (error) {
+    scheduleRules = [];
+    scheduleNow = null;
+    toast(String(error), true);
+  }
+  renderSchedule();
+}
+
+/** Minutes past midnight as somebody would read them back. */
+function timeOfDay(minute) {
+  return `${String(Math.floor(minute / 60)).padStart(2, "0")}:${String(minute % 60).padStart(2, "0")}`;
+}
+
+/** The days a mask names, shortened where they run together. */
+function daysOf(mask) {
+  const on = DAY_NAMES.filter((_, index) => mask & (1 << index));
+  if (on.length === 7) return "Every day";
+  if (mask === 0b0001_1111) return "Weekdays";
+  if (mask === 0b0110_0000) return "Weekends";
+  return on.join(", ");
+}
+
+function renderSchedule() {
+  const now = $("schedule-now");
+  now.classList.toggle("is-stopped", Boolean(scheduleNow?.stopped));
+  now.replaceChildren();
+
+  if (scheduleNow) {
+    const headline = document.createElement("div");
+    headline.textContent = scheduleNow.stopped
+      ? "Downloads are being held back right now."
+      : scheduleNow.bytes_per_sec
+        ? `Downloads are limited to ${bytes(scheduleNow.bytes_per_sec)}/s right now.`
+        : "Downloads are running at full speed right now.";
+
+    const why = document.createElement("small");
+    const parts = [
+      scheduleNow.from_a_rule ? "Decided by a rule below." : "No rule applies, so Settings decides.",
+    ];
+    // Only when something is actually scheduled: with no rules at all this
+    // would be a promise that nothing is going to happen.
+    if (scheduleNow.changes_in != null) {
+      parts.push(`Changes in ${describeMinutes(scheduleNow.changes_in)}.`);
+    }
+    why.textContent = parts.join(" ");
+
+    now.append(headline, why);
+  }
+
+  const list = $("schedule-list");
+  list.replaceChildren(
+    ...(scheduleRules.length
+      ? scheduleRules.map(ruleRow)
+      : [empty("Nothing scheduled. Downloads use the speed limit in Settings.")]),
+  );
+}
+
+/** A gap in minutes, said the way a person would say it. */
+function describeMinutes(minutes) {
+  if (minutes < 60) return `${minutes} min`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return minutes % 60 ? `${hours} h ${minutes % 60} min` : `${hours} h`;
+  const days = Math.floor(hours / 24);
+  return days === 1 ? "a day" : `${days} days`;
+}
+
+function ruleRow(rule) {
+  const wrap = document.createElement("div");
+  wrap.className = "browser";
+
+  const line = document.createElement("div");
+  line.className = "browser-row";
+
+  const dot = document.createElement("span");
+  dot.className = rule.stop ? "dot" : "dot good";
+  dot.setAttribute("aria-hidden", "true");
+
+  const when = document.createElement("span");
+  when.className = "browser-name";
+  // An end before a start runs past midnight, which the engine reads the
+  // same way; saying so here saves somebody wondering if it is a typo.
+  const overnight = rule.end_minute < rule.start_minute ? " (overnight)" : "";
+  when.textContent = `${daysOf(rule.days)}  ${timeOfDay(rule.start_minute)}–${timeOfDay(rule.end_minute)}${overnight}`;
+
+  const what = document.createElement("span");
+  what.className = "browser-status";
+  what.textContent = rule.stop
+    ? "do not download"
+    : rule.bytes_per_sec
+      ? `${bytes(rule.bytes_per_sec)}/s`
+      : "full speed";
+
+  const spacer = document.createElement("span");
+  spacer.className = "spacer";
+  line.append(dot, when, what, spacer);
+
+  const edit = document.createElement("button");
+  edit.className = "ghost";
+  edit.textContent = "Edit";
+  edit.onclick = () => editRule(rule);
+  line.append(edit);
+
+  const remove = document.createElement("button");
+  remove.className = "ghost";
+  remove.textContent = "Remove";
+  remove.onclick = () => removeRule(rule);
+  line.append(remove);
+
+  wrap.append(line);
+  return wrap;
+}
+
+/** The editor. Resolves to null when cancelled. */
+function askForRule(existing) {
+  return new Promise((resolve) => {
+    const overlay = $("rule-modal");
+    const start = $("rule-start");
+    const end = $("rule-end");
+    const action = $("rule-action");
+    const speed = $("rule-speed");
+    const okBtn = $("rule-ok");
+    const cancelBtn = $("rule-cancel");
+
+    // Rebuilt each time rather than wired once, so the ticked days are
+    // whatever this rule has rather than whatever the last one left.
+    const days = $("rule-days");
+    days.replaceChildren();
+    const boxes = DAY_NAMES.map((name, index) => {
+      const label = document.createElement("label");
+      const box = document.createElement("input");
+      box.type = "checkbox";
+      box.checked = Boolean((existing?.days ?? 0b0001_1111) & (1 << index));
+      label.classList.toggle("is-on", box.checked);
+      box.addEventListener("change", () => label.classList.toggle("is-on", box.checked));
+      label.append(box, document.createTextNode(name));
+      days.append(label);
+      return box;
+    });
+
+    start.value = timeOfDay(existing?.start_minute ?? 9 * 60);
+    end.value = timeOfDay(Math.min(existing?.end_minute ?? 17 * 60, 23 * 60 + 59));
+    action.value = existing ? (existing.stop ? "stop" : existing.bytes_per_sec ? "limit" : "open") : "limit";
+    if (existing?.bytes_per_sec) speed.value = String(existing.bytes_per_sec);
+    $("rule-message").textContent = existing ? "Edit this rule" : "Add a rule";
+
+    const showAction = () => {
+      $("rule-speed-row").hidden = action.value !== "limit";
+      const from = minutesOf(start.value);
+      const to = minutesOf(end.value);
+      $("rule-overnight").hidden = !(from != null && to != null && to < from);
+    };
+    showAction();
+    action.addEventListener("change", showAction);
+    start.addEventListener("change", showAction);
+    end.addEventListener("change", showAction);
+
+    overlay.hidden = false;
+
+    const finish = (answer) => {
+      overlay.hidden = true;
+      action.removeEventListener("change", showAction);
+      start.removeEventListener("change", showAction);
+      end.removeEventListener("change", showAction);
+      okBtn.removeEventListener("click", onOk);
+      cancelBtn.removeEventListener("click", onCancel);
+      overlay.removeEventListener("keydown", onKey);
+      resolve(answer);
+    };
+    const onOk = () => {
+      const mask = boxes.reduce((into, box, index) => into | (box.checked << index), 0);
+      // Camel case, because that is what Tauri expects a command's
+      // arguments to be called however they are spelled in Rust. The rules
+      // coming back the other way are plain serde and stay snake case,
+      // which is why only this one direction is converted.
+      finish({
+        id: existing?.id ?? null,
+        days: mask,
+        startMinute: minutesOf(start.value) ?? 0,
+        endMinute: minutesOf(end.value) ?? 0,
+        bytesPerSec: action.value === "limit" ? Number(speed.value) : 0,
+        stop: action.value === "stop",
+      });
+    };
+    const onCancel = () => finish(null);
+    const onKey = (event) => {
+      if (event.key === "Enter") onOk();
+      else if (event.key === "Escape") onCancel();
+    };
+
+    okBtn.addEventListener("click", onOk);
+    cancelBtn.addEventListener("click", onCancel);
+    overlay.addEventListener("keydown", onKey);
+  });
+}
+
+/** "09:30" as minutes past midnight, or null when it is not a time. */
+function minutesOf(value) {
+  const match = /^(\d{1,2}):(\d{2})$/.exec(value ?? "");
+  if (!match) return null;
+  return Number(match[1]) * 60 + Number(match[2]);
+}
+
+async function editRule(existing) {
+  const answer = await askForRule(existing);
+  if (!answer) return;
+  try {
+    const reply = await invoke("set_bandwidth_rule", answer);
+    scheduleRules = reply.rules ?? [];
+    scheduleNow = reply.now ?? null;
+  } catch (error) {
+    toast(String(error), true);
+  }
+  renderSchedule();
+}
+
+async function removeRule(rule) {
+  const sure = await confirmDialog(
+    `Remove the rule for ${daysOf(rule.days)}, ${timeOfDay(rule.start_minute)}–${timeOfDay(rule.end_minute)}?`,
+    { confirm: "Remove it" },
+  );
+  if (!sure) return;
+  try {
+    const reply = await invoke("forget_bandwidth_rule", { id: rule.id });
+    scheduleRules = reply.rules ?? [];
+    scheduleNow = reply.now ?? null;
+  } catch (error) {
+    toast(String(error), true);
+  }
+  renderSchedule();
+}
+
+$("add-rule").addEventListener("click", () => editRule(null));
 
 // -------------------------------------------------------- saved passwords
 
