@@ -11,8 +11,9 @@ pub mod server;
 
 pub use client::IpcClient;
 pub use protocol::{
-    CredentialScope, CredentialView, DownloadRequest, JobId, JobState, JobStatus, PairedClient,
-    PendingPairing, PostActionSetting, ProxySetting, Request, Response, SecretString, Settings,
+    BandwidthRuleView, CredentialScope, CredentialView, DownloadRequest, JobId, JobState,
+    JobStatus, PairedClient, PendingPairing, PostActionSetting, ProxySetting, Request, Response,
+    ScheduleNow, SecretString, Settings,
 };
 pub use security::{Endpoint, SessionToken, endpoint_path, random_pipe_name, state_dir};
 pub use server::{BROWSER_CLIENT, ClientInfo, Handler, IpcServer};

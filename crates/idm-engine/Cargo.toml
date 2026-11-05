@@ -40,7 +40,9 @@ windows = { version = "0.62", features = [
 
 [dev-dependencies]
 tempfile.workspace = true
-tokio = { workspace = true, features = ["full"] }
+# "test-util" gives a paused clock, so the schedule tests do not wait for
+# a boundary to come round in real time.
+tokio = { workspace = true, features = ["full", "test-util"] }
 
 [lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

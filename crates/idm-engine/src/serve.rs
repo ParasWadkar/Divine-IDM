@@ -109,6 +109,18 @@ struct Inner {
     /// the path of every single handover. The store stays the durable copy
     /// and this is reloaded from it whenever a queue changes.
     queues: Mutex<Vec<crate::queues::Queue>>,
+    /// The bandwidth rules, mirrored from the store.
+    ///
+    /// A mirror for the same reason the queues are one: `pump` consults it
+    /// while holding the job registry, and reaching SQLite under that lock
+    /// would put the disk on the path of every handover between downloads.
+    rules: Mutex<Vec<crate::schedule::Rule>>,
+    /// What the schedule last decided.
+    ///
+    /// Kept rather than recomputed because `pump` consults it on every
+    /// handover, and reading the clock and walking the rules there would
+    /// put both on the path of starting every download.
+    in_force: Mutex<crate::schedule::Action>,
     /// Where saved passwords live.
     ///
     /// Behind a trait so the tests can prove the refusals without writing
@@ -181,6 +193,10 @@ impl Engine {
         // handover after a restart would find no queues and start everything
         // a queue was meant to hold back.
         let queues = store.as_deref().map(read_queues).unwrap_or_default();
+        // Read here too, and for the same reason: without it the first
+        // handover after a restart would find no rules and start downloads
+        // a schedule was meant to be holding back.
+        let rules = store.as_deref().map(read_rules).unwrap_or_default();
         let engine = Arc::new(Self {
             inner: Arc::new(Inner {
                 output_dir,
@@ -200,10 +216,16 @@ impl Engine {
                 torrents: tokio::sync::OnceCell::new(),
                 live_torrents: Mutex::new(HashMap::new()),
                 queues: Mutex::new(queues),
+                rules: Mutex::new(rules),
+                // Whatever the settings say until the schedule task has
+                // had its first look, which is the behaviour from before
+                // schedules existed.
+                in_force: Mutex::new(crate::schedule::Action::Limit(starting_limit)),
                 vault: Arc::new(idm_core::win::credentials::WindowsVault),
             }),
         });
         start_stall_watchdog(Arc::clone(&engine.inner));
+        start_bandwidth_schedule(Arc::clone(&engine.inner));
         engine
     }
 
@@ -1127,6 +1149,125 @@ const STALL_AFTER: std::time::Duration = std::time::Duration::from_secs(30);
 /// So progress is watched from out here, where "no bytes for a while" is
 /// visible, and a download that has stopped moving is pushed down the same
 /// path as an outright failure: stop, say so, wait, try again.
+/// What the limiter should be set to, and whether anything may run.
+///
+/// The one place the precedence lives. A rule in force wins over the
+/// engine-wide limit rather than being combined with it, which is what
+/// makes "a megabyte a second normally, full speed overnight" expressible;
+/// taking the lower of the two would silently make it impossible. With no
+/// rule in force the engine-wide limit applies unchanged.
+async fn effective_action(inner: &Arc<Inner>) -> crate::schedule::Action {
+    let rules = inner.rules.lock().await.clone();
+    match crate::schedule::in_force(crate::schedule::now(), &rules) {
+        Some(action) => action,
+        None => {
+            let limit = inner.settings.lock().await.speed_limit_bytes_per_sec;
+            crate::schedule::Action::Limit(limit)
+        }
+    }
+}
+
+/// Puts the schedule's answer into effect, and says whether it changed.
+///
+/// A stop window is a limit of nothing *and* a gate on starting anything;
+/// the limiter is left alone for it, because the downloads it would apply
+/// to are being taken off the road entirely.
+async fn apply_schedule(inner: &Arc<Inner>) -> bool {
+    let action = effective_action(inner).await;
+    let changed = {
+        // One hold, not two readings: what was in force and what now is
+        // have to be decided together, or two of these racing could each
+        // see the other's answer as the previous one and both report no
+        // change.
+        let mut in_force = inner.in_force.lock().await;
+        let was = std::mem::replace(&mut *in_force, action);
+        was != action
+    };
+
+    if let crate::schedule::Action::Limit(bytes) = action {
+        inner.limiter.set_rate(bytes).await;
+    }
+    changed
+}
+
+/// Keeps the speed limit in step with the time of day.
+///
+/// Wakes at each boundary rather than polling, because a schedule's
+/// boundaries are minutes apart at the closest and days apart at the
+/// furthest. The wait is capped all the same: a laptop that slept through
+/// a boundary, a clock put right by hand and the night the clocks go
+/// forward all move local time underneath a sleeping task, and a cap is
+/// what notices.
+fn start_bandwidth_schedule(inner: Arc<Inner>) {
+    // As the watchdog: an engine built outside a runtime has nothing to
+    // schedule, and spawning there would panic.
+    if tokio::runtime::Handle::try_current().is_err() {
+        return;
+    }
+
+    tokio::spawn(async move {
+        /// Long enough not to be a poll, short enough that a clock which
+        /// jumped is noticed before anybody would.
+        const LONGEST_SLEEP: u64 = 10 * 60;
+
+        loop {
+            let changed = apply_schedule(&inner).await;
+            if changed {
+                // Only on a change, so a download is not torn down and put
+                // back every ten minutes for the whole of a stop window.
+                enforce_stop(&inner).await;
+                pump(Arc::clone(&inner)).await;
+            }
+
+            let rules = inner.rules.lock().await.clone();
+            let ahead = crate::schedule::next_change(crate::schedule::now(), &rules)
+                .map_or(LONGEST_SLEEP, |minutes| u64::from(minutes) * 60);
+            tokio::time::sleep(std::time::Duration::from_secs(ahead.min(LONGEST_SLEEP))).await;
+        }
+    });
+}
+
+/// Takes running downloads off the road when a stop window begins.
+///
+/// They go back to being queued and waiting, which is where they were
+/// before the scheduler handed them a slot -- not paused. Paused is the
+/// user's word: a download the schedule had paused would be
+/// indistinguishable from one they paused themselves, so closing the app
+/// inside a window would leave downloads stopped with nobody to start them
+/// again. A queued one simply waits, and `pump` starts it when the window
+/// ends.
+///
+/// Aborting mid-transfer is the established move here -- the stall
+/// watchdog and the retry path both do it -- and the journal keeps the
+/// bytes, so what resumes carries on rather than starting over.
+async fn enforce_stop(inner: &Arc<Inner>) {
+    if *inner.in_force.lock().await != crate::schedule::Action::Stop {
+        return;
+    }
+
+    let running: Vec<JobId> = {
+        let jobs = inner.jobs.lock().await;
+        jobs.iter()
+            .filter(|(_, job)| job.status.state == JobState::Running)
+            .map(|(id, _)| *id)
+            .collect()
+    };
+
+    for id in running {
+        let mut jobs = inner.jobs.lock().await;
+        let Some(job) = jobs.get_mut(&id) else { continue };
+        if let Some(abort) = job.abort.take() {
+            abort.abort();
+        }
+        job.status.state = JobState::Queued;
+        job.status.bytes_per_sec = 0.0;
+        job.status.connections = 0;
+        // Back to where `pump` found it, so the window ending starts it
+        // again with no further bookkeeping.
+        job.waiting = true;
+    }
+}
+
 fn start_stall_watchdog(inner: Arc<Inner>) {
     // An engine can be built outside a runtime -- the synchronous tests do
     // exactly that to check how a request is vetted, which needs no tasks at
@@ -1716,6 +1857,13 @@ type BoxFuture = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
 async fn pump_inner(inner: Arc<Inner>) {
     let limit = inner.settings.lock().await.max_concurrent_downloads.max(1);
 
+    // Nothing starts inside a stop window. Read once here rather than per
+    // pass: the window cannot end while this loop is running, and the task
+    // that ends it calls `pump` again.
+    if *inner.in_force.lock().await == crate::schedule::Action::Stop {
+        return;
+    }
+
     loop {
         // Read before the job registry is locked, never under it. The
         // queue table is small and changes rarely; reaching the disk for it
@@ -2239,6 +2387,121 @@ impl Engine {
         })
     }
 
+    /// Changing when downloads run is refused for browser clients.
+    fn refuse_browser_schedule(client: &ClientInfo) -> Option<Response> {
+        client.is_browser().then(|| Response::Rejected {
+            reason: "the browser integration cannot change the download schedule".into(),
+        })
+    }
+
+    /// The rules, and what the schedule is doing right now.
+    async fn list_bandwidth_rules(&self, client: &ClientInfo) -> Response {
+        if let Some(refusal) = Self::refuse_browser_schedule(client) {
+            return refusal;
+        }
+
+        let rules = self.inner.rules.lock().await.clone();
+        let now = crate::schedule::now();
+        let from_a_rule = crate::schedule::in_force(now, &rules);
+        let action = match from_a_rule {
+            Some(action) => action,
+            None => crate::schedule::Action::Limit(
+                self.inner.settings.lock().await.speed_limit_bytes_per_sec,
+            ),
+        };
+
+        Response::BandwidthRules {
+            rules: rules
+                .iter()
+                .map(|rule| idm_ipc::BandwidthRuleView {
+                    id: rule.id,
+                    days: rule.days,
+                    start_minute: rule.start_minute,
+                    end_minute: rule.end_minute,
+                    bytes_per_sec: match rule.action {
+                        crate::schedule::Action::Limit(bytes) => bytes,
+                        crate::schedule::Action::Stop => 0,
+                    },
+                    stop: rule.action == crate::schedule::Action::Stop,
+                })
+                .collect(),
+            now: idm_ipc::ScheduleNow {
+                bytes_per_sec: match action {
+                    crate::schedule::Action::Limit(bytes) => bytes,
+                    crate::schedule::Action::Stop => 0,
+                },
+                stopped: action == crate::schedule::Action::Stop,
+                from_a_rule: from_a_rule.is_some(),
+                changes_in: crate::schedule::next_change(now, &rules),
+            },
+        }
+    }
+
+    /// Adds a rule or replaces one, then puts the result into effect.
+    #[allow(clippy::too_many_arguments)]
+    async fn set_bandwidth_rule(
+        &self,
+        client: &ClientInfo,
+        id: Option<i64>,
+        days: u8,
+        start_minute: u16,
+        end_minute: u16,
+        bytes_per_sec: u64,
+        stop: bool,
+    ) -> Response {
+        if let Some(refusal) = Self::refuse_browser_schedule(client) {
+            return refusal;
+        }
+        let Some(store) = self.inner.store.clone() else {
+            return Response::Rejected { reason: NO_SCHEDULE_STORE.into() };
+        };
+        if let Err(reason) = crate::schedule::vet(days, start_minute, end_minute) {
+            return Response::Rejected { reason };
+        }
+
+        if let Err(error) =
+            store.upsert_bandwidth_rule(id, days, start_minute, end_minute, bytes_per_sec, stop)
+        {
+            return Response::Rejected { reason: error.to_string() };
+        }
+
+        self.reload_rules().await;
+        self.list_bandwidth_rules(client).await
+    }
+
+    async fn remove_bandwidth_rule(&self, client: &ClientInfo, id: i64) -> Response {
+        if let Some(refusal) = Self::refuse_browser_schedule(client) {
+            return refusal;
+        }
+        let Some(store) = self.inner.store.clone() else {
+            return Response::Rejected { reason: NO_SCHEDULE_STORE.into() };
+        };
+        if let Err(error) = store.remove_bandwidth_rule(id) {
+            return Response::Rejected { reason: error.to_string() };
+        }
+
+        self.reload_rules().await;
+        self.list_bandwidth_rules(client).await
+    }
+
+    /// Re-reads the rules and puts whatever they now say into effect.
+    ///
+    /// Wholesale rather than patching the copy in memory, as the queues do:
+    /// the table is small, and a mirror edited in two places is a mirror
+    /// that can disagree with the thing it mirrors.
+    async fn reload_rules(&self) {
+        if let Some(store) = &self.inner.store {
+            *self.inner.rules.lock().await = read_rules(store.as_ref());
+        }
+        // At once, rather than at the next boundary. Somebody who has just
+        // written a rule covering this minute expects it to bite now, and
+        // the task may be asleep for another ten.
+        if apply_schedule(&self.inner).await {
+            enforce_stop(&self.inner).await;
+            pump(Arc::clone(&self.inner)).await;
+        }
+    }
+
     /// Saved passwords are refused for browser clients, all three ways.
     ///
     /// Listing is refused as firmly as changing: the list says which sites
@@ -2381,17 +2644,21 @@ impl Engine {
             .collect();
 
         let mut current = self.inner.settings.lock().await;
-        let limit_changed = current.speed_limit_bytes_per_sec != settings.speed_limit_bytes_per_sec;
         *current = settings.clone();
         drop(current);
         save_settings(&self.inner.settings_file, &settings);
 
+        // Unconditionally, and through the schedule rather than straight
+        // from the setting. This used to fire only when the number in the
+        // settings had changed, which a schedule breaks both ways: a save
+        // that changed something else would leave the schedule's limit
+        // un-asserted, and a save that changed the number would write it
+        // over a window that was supposed to be overriding it.
+        //
         // Takes effect on the next read of every running download, not only
         // on the ones started afterwards — the usual reason for changing a
         // limit is that a download already running is in the way.
-        if limit_changed {
-            self.inner.limiter.set_rate(settings.speed_limit_bytes_per_sec).await;
-        }
+        apply_schedule(&self.inner).await;
         Response::Settings(settings)
     }
 
@@ -2530,6 +2797,41 @@ fn load_settings(path: &PathBuf) -> Settings {
 /// a queue that quietly forgets itself.
 const NO_STORE: &str = "queues need the database, which could not be opened";
 
+/// The same, for the schedule, and for the same reason: a rule that did not
+/// survive a restart would be worse than no rule, because somebody would
+/// have set it and believed it.
+const NO_SCHEDULE_STORE: &str = "a download schedule needs the database, which could not be opened";
+
+/// The bandwidth rules as the store holds them, in the form the schedule
+/// module wants.
+///
+/// A failed read means no rules, which is the safe direction here in the
+/// opposite sense to queues: no rules means downloads run unthrottled,
+/// where an invented rule could stop them for hours with nothing on screen
+/// explaining why.
+fn read_rules(store: &idm_store::Store) -> Vec<crate::schedule::Rule> {
+    match store.bandwidth_rules() {
+        Ok(rules) => rules
+            .into_iter()
+            .map(|rule| crate::schedule::Rule {
+                id: rule.id,
+                days: rule.days,
+                start_minute: rule.start_minute,
+                end_minute: rule.end_minute,
+                action: if rule.stop {
+                    crate::schedule::Action::Stop
+                } else {
+                    crate::schedule::Action::Limit(rule.bytes_per_sec)
+                },
+            })
+            .collect(),
+        Err(error) => {
+            tracing::warn!(%error, "could not read the bandwidth schedule");
+            Vec::new()
+        }
+    }
+}
+
 /// The queues as the store holds them, in the form the scheduler wants.
 fn read_queues(store: &idm_store::Store) -> Vec<crate::queues::Queue> {
     match store.queues() {
@@ -2592,6 +2894,27 @@ impl Handler for Engine {
             Request::GetSettings => self.get_settings().await,
             Request::SetSettings(settings) => self.set_settings(client, settings).await,
             Request::CancelPostAction => self.cancel_post_action().await,
+            Request::ListBandwidthRules => self.list_bandwidth_rules(client).await,
+            Request::SetBandwidthRule {
+                id,
+                days,
+                start_minute,
+                end_minute,
+                bytes_per_sec,
+                stop,
+            } => {
+                self.set_bandwidth_rule(
+                    client,
+                    id,
+                    days,
+                    start_minute,
+                    end_minute,
+                    bytes_per_sec,
+                    stop,
+                )
+                .await
+            }
+            Request::RemoveBandwidthRule { id } => self.remove_bandwidth_rule(client, id).await,
             Request::ListCredentials => self.list_credentials(client),
             Request::SetCredential { scope, username, password } => {
                 self.set_credential(client, scope, username, password)
@@ -3465,6 +3788,199 @@ mod tests {
                 matches!(engine.handle(&browser, request).await, Response::Rejected { .. }),
                 "a browser must not decide what runs and when"
             );
+        }
+    }
+
+    /// Every day of the week, which makes a rule apply whenever the test
+    /// happens to run. A rule tied to a weekday would pass or fail by the
+    /// day somebody checked out the repository.
+    const EVERY_DAY: u8 = 0b0111_1111;
+
+    /// A window covering right now, however wide it needs to be.
+    ///
+    /// Midnight to midnight: the clock inside the engine is the machine's
+    /// own, and no paused tokio clock moves it, so the only rule guaranteed
+    /// to be in force is one that covers the whole day.
+    fn all_day(bytes_per_sec: u64, stop: bool) -> Request {
+        Request::SetBandwidthRule {
+            id: None,
+            days: EVERY_DAY,
+            start_minute: 0,
+            end_minute: crate::schedule::END_OF_DAY,
+            bytes_per_sec,
+            stop,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_rule_in_force_reaches_the_live_limiter() {
+        // The join that matters: the rules are proved on their own in
+        // `schedule`, but a rule that never reaches the limiter would slow
+        // nothing down and every one of those tests would still pass.
+        let (_dir, engine) = engine_with_queues();
+        engine.inner.limiter.set_rate(0).await;
+
+        let reply = engine.handle(&desktop(), all_day(500_000, false)).await;
+        assert!(matches!(reply, Response::BandwidthRules { .. }), "{reply:?}");
+
+        assert_eq!(
+            engine.inner.limiter.rate(),
+            500_000,
+            "the rule should have taken effect without waiting for a boundary",
+        );
+    }
+
+    #[tokio::test]
+    async fn a_rule_wins_over_the_everyday_limit_in_both_directions() {
+        // The decision the user made: inside a window the rule is the
+        // answer, which is what makes "slow normally, full speed
+        // overnight" expressible. Taking the lower of the two would make
+        // the second half of this impossible.
+        let (_dir, engine) = engine_with_queues();
+
+        let settings = Settings { speed_limit_bytes_per_sec: 1_000_000, ..Settings::default() };
+        engine.handle(&desktop(), Request::SetSettings(settings)).await;
+        assert_eq!(engine.inner.limiter.rate(), 1_000_000, "no rules yet");
+
+        // Tighter than the setting.
+        let slow = engine.handle(&desktop(), all_day(100_000, false)).await;
+        let Response::BandwidthRules { rules, .. } = slow else { panic!("expected the rules") };
+        assert_eq!(engine.inner.limiter.rate(), 100_000);
+
+        // And looser, which is the half a minimum would forbid. The same
+        // rule changed rather than a second one added: two rules covering
+        // the same window would both be in force, and the tighter would
+        // rightly win -- which would be testing the overlap rule, not this.
+        let open = engine
+            .handle(
+                &desktop(),
+                Request::SetBandwidthRule {
+                    id: Some(rules[0].id),
+                    days: EVERY_DAY,
+                    start_minute: 0,
+                    end_minute: crate::schedule::END_OF_DAY,
+                    bytes_per_sec: 0,
+                    stop: false,
+                },
+            )
+            .await;
+        assert_eq!(engine.inner.limiter.rate(), 0, "a rule may lift the limit too: {open:?}");
+    }
+
+    #[tokio::test]
+    async fn saving_unrelated_settings_does_not_wipe_out_a_rule() {
+        // The hazard this commit fixes. `set_rate` used to fire only when
+        // the number in the settings had changed, so a save that changed
+        // something else left the schedule un-asserted, and one that
+        // changed the number wrote straight over a window.
+        let (_dir, engine) = engine_with_queues();
+        engine.handle(&desktop(), all_day(250_000, false)).await;
+        assert_eq!(engine.inner.limiter.rate(), 250_000);
+
+        // Nothing to do with the speed limit.
+        let settings = Settings { sort_into_folders: false, ..Settings::default() };
+        engine.handle(&desktop(), Request::SetSettings(settings)).await;
+        assert_eq!(engine.inner.limiter.rate(), 250_000, "the rule still decides");
+
+        // And one that does change it.
+        let settings = Settings { speed_limit_bytes_per_sec: 9_000_000, ..Settings::default() };
+        engine.handle(&desktop(), Request::SetSettings(settings)).await;
+        assert_eq!(
+            engine.inner.limiter.rate(),
+            250_000,
+            "a rule in force is not overwritten by the everyday limit",
+        );
+    }
+
+    #[tokio::test]
+    async fn removing_the_last_rule_hands_the_limit_back_to_the_settings() {
+        let (_dir, engine) = engine_with_queues();
+        let settings = Settings { speed_limit_bytes_per_sec: 2_000_000, ..Settings::default() };
+        engine.handle(&desktop(), Request::SetSettings(settings)).await;
+
+        let reply = engine.handle(&desktop(), all_day(50_000, false)).await;
+        let Response::BandwidthRules { rules, .. } = reply else { panic!("{reply:?}") };
+        assert_eq!(engine.inner.limiter.rate(), 50_000);
+
+        engine.handle(&desktop(), Request::RemoveBandwidthRule { id: rules[0].id }).await;
+        assert_eq!(
+            engine.inner.limiter.rate(),
+            2_000_000,
+            "with no rule left, the everyday limit applies again",
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stop_window_holds_downloads_back_and_says_so() {
+        let (_dir, engine) = engine_with_queues();
+        let reply = engine.handle(&desktop(), all_day(0, true)).await;
+
+        let Response::BandwidthRules { now, .. } = reply else { panic!("{reply:?}") };
+        assert!(now.stopped, "the window should be in force: {now:?}");
+        assert!(now.from_a_rule);
+
+        // And nothing starts while it is.
+        let request = DownloadRequest {
+            url: "https://example.invalid/held.bin".into(),
+            ..Default::default()
+        };
+        let queued = engine.handle(&desktop(), Request::Enqueue(request)).await;
+        let Response::Accepted { id } = queued else { panic!("{queued:?}") };
+
+        let jobs = engine.inner.jobs.lock().await;
+        let job = jobs.get(&id).expect("the job should be registered");
+        assert!(job.waiting, "it should be waiting rather than running: {:?}", job.status.state);
+    }
+
+    #[tokio::test]
+    async fn the_schedule_says_what_it_is_doing_without_the_window_working_it_out() {
+        // So the window does not need a second copy of the overlap rules
+        // in JavaScript, free to disagree with the one that decides.
+        let (_dir, engine) = engine_with_queues();
+        let settings = Settings { speed_limit_bytes_per_sec: 7_000, ..Settings::default() };
+        engine.handle(&desktop(), Request::SetSettings(settings)).await;
+
+        let reply = engine.handle(&desktop(), Request::ListBandwidthRules).await;
+        let Response::BandwidthRules { rules, now } = reply else { panic!("{reply:?}") };
+        assert!(rules.is_empty());
+        assert!(!now.from_a_rule, "nothing is scheduled");
+        assert_eq!(now.bytes_per_sec, 7_000, "so the everyday limit is what is in force");
+        assert_eq!(now.changes_in, None, "and nothing is going to change it");
+    }
+
+    #[tokio::test]
+    async fn a_rule_that_could_never_apply_is_refused_in_words() {
+        let (_dir, engine) = engine_with_queues();
+        let request = Request::SetBandwidthRule {
+            id: None,
+            days: 0,
+            start_minute: 9 * 60,
+            end_minute: 17 * 60,
+            bytes_per_sec: 0,
+            stop: false,
+        };
+        match engine.handle(&desktop(), request).await {
+            Response::Rejected { reason } => assert!(reason.contains("day"), "{reason}"),
+            other => panic!("a rule with no days should be refused, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_browser_cannot_change_when_downloads_run() {
+        // A schedule decides what runs and when, exactly as a queue does.
+        let (_dir, engine) = engine_with_queues();
+        let browser = browser();
+        pair(&engine, &browser).await;
+
+        for request in
+            [Request::ListBandwidthRules, all_day(0, true), Request::RemoveBandwidthRule { id: 1 }]
+        {
+            match engine.handle(&browser, request).await {
+                Response::Rejected { reason } => {
+                    assert!(reason.contains("schedule"), "say what was refused: {reason}");
+                }
+                other => panic!("a browser must not touch the schedule, got {other:?}"),
+            }
         }
     }
 

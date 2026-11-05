@@ -571,6 +571,26 @@ pub enum Request {
     },
     /// Cancels an armed post-download action during its countdown.
     CancelPostAction,
+    /// The bandwidth schedule, and what it is doing now.
+    ///
+    /// Refused for browser clients along with the other two: a schedule
+    /// decides what runs and when, exactly as a queue does, and an
+    /// extension that could switch one off could stop every download
+    /// without anything in the window saying so.
+    ListBandwidthRules,
+    /// Adds a rule, or replaces the one with this id.
+    SetBandwidthRule {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<i64>,
+        days: u8,
+        start_minute: u16,
+        end_minute: u16,
+        bytes_per_sec: u64,
+        stop: bool,
+    },
+    RemoveBandwidthRule {
+        id: i64,
+    },
     /// Which sites and proxies have a password saved, never the passwords.
     ///
     /// Refused for browser clients, along with the other two: between them
@@ -743,6 +763,43 @@ pub struct CredentialView {
     pub label: String,
 }
 
+/// One rule in the bandwidth schedule, as a client sees it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BandwidthRuleView {
+    pub id: i64,
+    /// Which days, as a bitmask with Monday in bit 0.
+    pub days: u8,
+    /// Minutes past midnight, inclusive.
+    pub start_minute: u16,
+    /// Minutes past midnight, exclusive; 1440 is midnight at the end.
+    ///
+    /// An end *before* a start is a window that runs past midnight, and
+    /// the days are then the days it starts on.
+    pub end_minute: u16,
+    /// Bytes per second, where zero means no limit.
+    pub bytes_per_sec: u64,
+    /// When true nothing downloads for the length of the window.
+    pub stop: bool,
+}
+
+/// What the schedule is doing right now.
+///
+/// Sent beside the rules so the window can say so without working it out
+/// for itself -- which would mean a second implementation of the overlap
+/// rules in JavaScript, free to disagree with the one that matters.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScheduleNow {
+    /// Bytes per second in force, where zero means no limit.
+    pub bytes_per_sec: u64,
+    /// Whether downloads are being held back entirely.
+    pub stopped: bool,
+    /// Whether a rule is deciding this, rather than the ordinary setting.
+    pub from_a_rule: bool,
+    /// Minutes until this could change, when anything is scheduled at all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub changes_in: Option<u16>,
+}
+
 /// One external program, and what the app knows about it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SidecarView {
@@ -798,6 +855,10 @@ pub enum Response {
     },
     Credentials {
         entries: Vec<CredentialView>,
+    },
+    BandwidthRules {
+        rules: Vec<BandwidthRuleView>,
+        now: ScheduleNow,
     },
     Pong,
     Error {
