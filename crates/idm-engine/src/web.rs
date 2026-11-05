@@ -60,7 +60,12 @@ pub use idm_ipc::DEFAULT_WEB_PORT as DEFAULT_PORT;
 ///
 /// Under the program's own prefix, so it is listed and removed with
 /// everything else of ours and never confused with a site password.
-pub const TOKEN_TARGET: &str = "DivinePulse/web-interface";
+/// Built from `credentials::PREFIX` rather than spelled out, because that
+/// prefix is what `credentials` lists and scopes by: a target written by
+/// hand would be orphaned the moment the prefix changed.
+pub fn token_target() -> String {
+    format!("{}web-interface", crate::credentials::PREFIX)
+}
 
 /// How often the supervisor looks at the setting.
 const LOOK: Duration = Duration::from_secs(5);
@@ -83,14 +88,15 @@ struct Shared {
 /// Kept rather than regenerated on each start, so the address somebody
 /// bookmarked on their phone goes on working.
 pub fn token(vault: &dyn Vault) -> Result<idm_ipc::SessionToken, String> {
-    match vault.read(TOKEN_TARGET) {
+    let target = token_target();
+    match vault.read(&target) {
         Ok(Some(found)) if !found.secret.expose().is_empty() => {
             Ok(idm_ipc::SessionToken::from_stored(found.secret.expose().to_owned()))
         }
         Ok(_) => {
             let fresh = idm_ipc::SessionToken::generate();
             vault
-                .write(TOKEN_TARGET, "web", &Secret::new(fresh.as_str()))
+                .write(&target, "web", &Secret::new(fresh.as_str()))
                 .map_err(|error| error.to_string())?;
             Ok(fresh)
         }
@@ -253,7 +259,7 @@ async fn jobs(
         return (StatusCode::NOT_FOUND, "no").into_response();
     }
 
-    match shared.engine.handle(&remote(), Request::Status { id: None }).await {
+    match shared.engine.handle(&ClientInfo::remote(), Request::Status { id: None }).await {
         Response::Status { jobs } => {
             // Only the fields a progress list needs. The engine says more
             // than that -- where the file is going, what went wrong in
@@ -303,7 +309,7 @@ async fn act(
         _ => return (StatusCode::NOT_FOUND, "no").into_response(),
     };
 
-    match shared.engine.handle(&remote(), request).await {
+    match shared.engine.handle(&ClientInfo::remote(), request).await {
         Response::Accepted { .. } => (StatusCode::OK, "ok").into_response(),
         Response::Rejected { reason } => (StatusCode::FORBIDDEN, reason).into_response(),
         other => {
@@ -311,15 +317,6 @@ async fn act(
             (StatusCode::INTERNAL_SERVER_ERROR, "no").into_response()
         }
     }
-}
-
-/// Who the engine thinks is asking.
-///
-/// Never "desktop". Everything the engine refuses an untrusted client is
-/// refused here too, without this module having to remember what that list
-/// is.
-fn remote() -> ClientInfo {
-    ClientInfo { name: idm_ipc::REMOTE_CLIENT.to_owned(), client_id: None }
 }
 
 /// The whole page: one file, no requests to anywhere else.

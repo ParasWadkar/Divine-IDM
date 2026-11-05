@@ -38,6 +38,12 @@ pub struct ClientInfo {
 /// The name the browser native messaging host announces itself with.
 pub const BROWSER_CLIENT: &str = "browser-host";
 
+/// The name the app window announces itself with.
+pub const DESKTOP_CLIENT: &str = "desktop";
+
+/// The name the command line announces itself with.
+pub const CLI_CLIENT: &str = "cli";
+
 /// The name the web interface announces itself with.
 ///
 /// A second client that is not the person at this machine. It was once
@@ -60,11 +66,20 @@ impl ClientInfo {
     /// for a page or for whoever is on the network, so each is refused
     /// everything that is about the machine rather than about a download.
     ///
-    /// Stated as a list of the untrusted rather than of the trusted, and
-    /// deliberately: a new client added without touching this file arrives
-    /// untrusted, which is the direction a mistake should fall.
+    /// An allow-list, and that is the whole point of it. This was first
+    /// written as "not the browser, not the web interface", which answers
+    /// *yes* for every name nobody has thought of -- including one a
+    /// client picks for itself, since the name in `Hello` is something the
+    /// client says rather than something this program checked. Trust that
+    /// defaults to granted is not trust.
     pub fn is_trusted(&self) -> bool {
-        !matches!(self.name.as_str(), BROWSER_CLIENT | REMOTE_CLIENT)
+        matches!(self.name.as_str(), DESKTOP_CLIENT | CLI_CLIENT)
+    }
+
+    /// The web interface's own identity, so the one file that knows the
+    /// client names is also the one that builds them.
+    pub fn remote() -> Self {
+        Self { name: REMOTE_CLIENT.to_owned(), client_id: None }
     }
 
     /// What to call this client when refusing it, in a refusal a person
@@ -73,7 +88,7 @@ impl ClientInfo {
         match self.name.as_str() {
             BROWSER_CLIENT => "the browser integration",
             REMOTE_CLIENT => "the web interface",
-            _ => "this client",
+            _ => "a client this program does not know",
         }
     }
 }
@@ -88,14 +103,25 @@ mod client_tests {
 
     #[test]
     fn the_app_and_the_command_line_are_trusted() {
-        assert!(named("desktop").is_trusted());
-        assert!(named("cli").is_trusted());
+        assert!(named(DESKTOP_CLIENT).is_trusted());
+        assert!(named(CLI_CLIENT).is_trusted());
     }
 
     #[test]
     fn the_browser_and_the_web_interface_are_not() {
         assert!(!named(BROWSER_CLIENT).is_trusted());
         assert!(!named(REMOTE_CLIENT).is_trusted());
+    }
+
+    #[test]
+    fn a_name_nobody_has_heard_of_is_not_trusted() {
+        // The reason this is an allow-list. The name comes out of the
+        // client's own `Hello`, so a deny-list would hand trust to anything
+        // that called itself something new -- including on purpose.
+        assert!(!named("desktop ").is_trusted());
+        assert!(!named("Desktop").is_trusted());
+        assert!(!named("helper").is_trusted());
+        assert!(!named("").is_trusted());
     }
 
     #[test]

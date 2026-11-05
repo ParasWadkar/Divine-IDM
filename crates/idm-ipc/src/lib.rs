@@ -17,4 +17,6 @@ pub use protocol::{
     Settings,
 };
 pub use security::{Endpoint, SessionToken, endpoint_path, random_pipe_name, state_dir};
-pub use server::{BROWSER_CLIENT, ClientInfo, Handler, IpcServer, REMOTE_CLIENT};
+pub use server::{
+    BROWSER_CLIENT, CLI_CLIENT, ClientInfo, DESKTOP_CLIENT, Handler, IpcServer, REMOTE_CLIENT,
+};

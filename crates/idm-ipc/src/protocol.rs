@@ -730,6 +730,90 @@ pub enum Request {
     Ping,
 }
 
+impl Request {
+    /// What only the person at this machine may ask for, and the words for
+    /// refusing it.
+    ///
+    /// `None` means any client may send it; `Some(what)` completes the
+    /// sentence "the web interface cannot *what*".
+    ///
+    /// # Why this is one exhaustive match
+    ///
+    /// It used to be a check inside each handler, which meant authority was
+    /// decided by whoever remembered to thread the client through -- and
+    /// three handlers did not take one at all, so `RefreshUrl` and
+    /// `ResumeFromHistory` would accept a *replacement address* from a
+    /// browser page or from the network, pointing a download the user had
+    /// approved at somebody else's bytes. The hole was not a missing check
+    /// so much as a shape in which a missing check is invisible.
+    ///
+    /// Written out variant by variant with no `_` arm, so a request added
+    /// later does not compile until somebody has decided which side of this
+    /// it is on.
+    pub fn local_only(&self) -> Option<&'static str> {
+        match self {
+            // The browser integration's whole job, and the pairing that
+            // earns it. Nothing here reaches past one download.
+            Request::Hello { .. } | Request::Ping | Request::Enqueue(_) => None,
+            Request::RequestPairing { .. } => None,
+
+            // What the web interface may do: look at what is downloading,
+            // and stop or start it. None of these names an address, so none
+            // of them can change what a download fetches.
+            Request::Status { .. }
+            | Request::Pause { .. }
+            | Request::Resume { .. }
+            | Request::Cancel { .. } => None,
+
+            // Both of these carry a replacement address for a download that
+            // already exists. That is the dangerous shape: the file keeps
+            // the name the user approved and the bytes come from somewhere
+            // else.
+            Request::RefreshUrl { .. } => Some("change where a download fetches from"),
+            Request::ResumeFromHistory { .. } => Some("restart a download from History"),
+
+            Request::ListPairings
+            | Request::ApprovePairing { .. }
+            | Request::DenyPairing { .. }
+            | Request::RevokePairing { .. }
+            | Request::SetBrowserEnabled { .. } => Some("manage pairings"),
+
+            // Read as well as written. The settings hold the download
+            // folder, the proxy address and the program a finished download
+            // runs, and handing those out to a client that may not change
+            // them is most of the way to changing them.
+            Request::GetSettings | Request::SetSettings(_) => Some("see or change settings"),
+
+            Request::ListQueues
+            | Request::SetQueue { .. }
+            | Request::EnableQueue { .. }
+            | Request::RemoveQueue { .. }
+            | Request::AssignQueue { .. } => Some("manage queues"),
+
+            Request::ListBandwidthRules
+            | Request::SetBandwidthRule { .. }
+            | Request::RemoveBandwidthRule { .. } => Some("change the download schedule"),
+
+            Request::ListCredentials
+            | Request::SetCredential { .. }
+            | Request::RemoveCredential { .. } => Some("see or change saved passwords"),
+
+            Request::ListSidecars | Request::FetchSidecar { .. } => Some("install programs"),
+
+            // Each makes this process fetch an address somebody else chose.
+            Request::PeekArchive { .. } => Some("ask what is inside an archive"),
+            Request::GrabLinks { .. } => Some("ask for the links on a page"),
+
+            Request::ExportList => Some("read the download list"),
+            Request::ImportList { .. } => Some("import a list of downloads"),
+
+            // Shutting the machine down is cancelled from the screen that
+            // offered it.
+            Request::CancelPostAction => Some("cancel what happens after downloads finish"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum JobState {

@@ -2000,19 +2000,6 @@ async fn start(inner: &Arc<Inner>, id: JobId, config: DownloadConfig) {
     }
 }
 
-/// Refuses anything that is not the person at this machine.
-///
-/// One function rather than a check at each call site, because the set of
-/// clients that are not the person at the machine grows -- it was the
-/// browser extension, it is now the browser extension and the web
-/// interface -- and a refusal written as "is this the browser" quietly
-/// admits the next one. `what` completes the sentence: "the web interface
-/// cannot manage queues".
-fn refuse_unless_here(client: &ClientInfo, what: &str) -> Option<Response> {
-    (!client.is_trusted())
-        .then(|| Response::Rejected { reason: format!("{} cannot {what}", client.described()) })
-}
-
 async fn set_state(inner: &Inner, id: JobId, state: JobState) {
     if let Some(record) = inner.jobs.lock().await.get_mut(&id) {
         record.status.state = state;
@@ -2189,26 +2176,12 @@ impl Engine {
         config.fetch.auth = Some(state);
     }
 
-    /// Managing pairings is refused for browser clients.
-    ///
-    /// Otherwise an extension could approve itself, or enumerate what else is
-    /// connected, which is exactly what pairing exists to prevent.
-    fn refuse_browser(client: &ClientInfo) -> Option<Response> {
-        refuse_unless_here(client, "manage pairings")
-    }
-
-    async fn list_pairings(&self, client: &ClientInfo) -> Response {
-        if let Some(refusal) = Self::refuse_browser(client) {
-            return refusal;
-        }
+    async fn list_pairings(&self) -> Response {
         let mut store = self.inner.pairings.lock().await;
         Response::Pairings { paired: store.paired(), pending: store.pending() }
     }
 
-    async fn approve_pairing(&self, client: &ClientInfo, request_id: String) -> Response {
-        if let Some(refusal) = Self::refuse_browser(client) {
-            return refusal;
-        }
+    async fn approve_pairing(&self, request_id: String) -> Response {
         match self.inner.pairings.lock().await.approve(&request_id) {
             Some(paired) => {
                 eprintln!("Paired {:?}.", paired.label);
@@ -2218,10 +2191,7 @@ impl Engine {
         }
     }
 
-    async fn deny_pairing(&self, client: &ClientInfo, request_id: String) -> Response {
-        if let Some(refusal) = Self::refuse_browser(client) {
-            return refusal;
-        }
+    async fn deny_pairing(&self, request_id: String) -> Response {
         if self.inner.pairings.lock().await.deny(&request_id) {
             Response::Pong
         } else {
@@ -2229,10 +2199,7 @@ impl Engine {
         }
     }
 
-    async fn revoke_pairing(&self, client: &ClientInfo, client_id: String) -> Response {
-        if let Some(refusal) = Self::refuse_browser(client) {
-            return refusal;
-        }
+    async fn revoke_pairing(&self, client_id: String) -> Response {
         if self.inner.pairings.lock().await.revoke(&client_id) {
             Response::Pong
         } else {
@@ -2240,15 +2207,7 @@ impl Engine {
         }
     }
 
-    async fn set_browser_enabled(
-        &self,
-        client: &ClientInfo,
-        client_id: String,
-        enabled: bool,
-    ) -> Response {
-        if let Some(refusal) = Self::refuse_browser(client) {
-            return refusal;
-        }
+    async fn set_browser_enabled(&self, client_id: String, enabled: bool) -> Response {
         if self.inner.pairings.lock().await.set_enabled(&client_id, enabled) {
             Response::Pong
         } else {
@@ -2257,10 +2216,7 @@ impl Engine {
     }
 
     /// The queues, with what each is running and holding right now.
-    async fn list_queues(&self, client: &ClientInfo) -> Response {
-        if let Some(refusal) = Self::refuse_browser_queues(client) {
-            return refusal;
-        }
+    async fn list_queues(&self) -> Response {
         let queues = self.inner.queues.lock().await.clone();
         let jobs = self.inner.jobs.lock().await;
 
@@ -2297,10 +2253,7 @@ impl Engine {
     }
 
     /// Creates a queue, or changes the concurrency of the one with that name.
-    async fn set_queue(&self, client: &ClientInfo, name: String, max_concurrent: u32) -> Response {
-        if let Some(refusal) = Self::refuse_browser_queues(client) {
-            return refusal;
-        }
+    async fn set_queue(&self, name: String, max_concurrent: u32) -> Response {
         let Some(store) = self.inner.store.clone() else {
             return Response::Rejected { reason: NO_STORE.into() };
         };
@@ -2320,16 +2273,13 @@ impl Engine {
                 // not a moment ago, and nothing else would notice: a slot
                 // opening is normally a download finishing.
                 pump(Arc::clone(&self.inner)).await;
-                self.list_queues(client).await
+                self.list_queues().await
             }
             Err(error) => Response::Rejected { reason: error.to_string() },
         }
     }
 
-    async fn enable_queue(&self, client: &ClientInfo, id: i64, enabled: bool) -> Response {
-        if let Some(refusal) = Self::refuse_browser_queues(client) {
-            return refusal;
-        }
+    async fn enable_queue(&self, id: i64, enabled: bool) -> Response {
         let Some(store) = self.inner.store.clone() else {
             return Response::Rejected { reason: NO_STORE.into() };
         };
@@ -2345,14 +2295,11 @@ impl Engine {
         if enabled {
             pump(Arc::clone(&self.inner)).await;
         }
-        self.list_queues(client).await
+        self.list_queues().await
     }
 
     /// Removes a queue, keeping its downloads.
-    async fn remove_queue(&self, client: &ClientInfo, id: i64) -> Response {
-        if let Some(refusal) = Self::refuse_browser_queues(client) {
-            return refusal;
-        }
+    async fn remove_queue(&self, id: i64) -> Response {
         let Some(store) = self.inner.store.clone() else {
             return Response::Rejected { reason: NO_STORE.into() };
         };
@@ -2377,14 +2324,11 @@ impl Engine {
         }
         self.reload_queues().await;
         pump(Arc::clone(&self.inner)).await;
-        self.list_queues(client).await
+        self.list_queues().await
     }
 
     /// Moves a download into a queue, or out of one.
-    async fn assign_queue(&self, client: &ClientInfo, id: JobId, queue: Option<i64>) -> Response {
-        if let Some(refusal) = Self::refuse_browser_queues(client) {
-            return refusal;
-        }
+    async fn assign_queue(&self, id: JobId, queue: Option<i64>) -> Response {
         if let Some(wanted) = queue {
             let queues = self.inner.queues.lock().await;
             if crate::queues::find(&queues, wanted).is_none() {
@@ -2417,7 +2361,7 @@ impl Engine {
         // Taking a download out of a queue, or into one with room, may mean
         // it can start now.
         pump(Arc::clone(&self.inner)).await;
-        self.list_queues(client).await
+        self.list_queues().await
     }
 
     /// Re-reads the queues from the store into the copy the scheduler uses.
@@ -2425,11 +2369,6 @@ impl Engine {
         if let Some(store) = &self.inner.store {
             *self.inner.queues.lock().await = read_queues(store.as_ref());
         }
-    }
-
-    /// Managing queues is refused for browser clients.
-    fn refuse_browser_queues(client: &ClientInfo) -> Option<Response> {
-        refuse_unless_here(client, "manage queues")
     }
 
     /// The most of an archive's index that will be fetched.
@@ -2452,11 +2391,7 @@ impl Engine {
     /// stronger version of the same reason: this one makes the engine
     /// fetch, in sequence, a series of addresses it worked out for itself.
     /// Writes everything still to download out as a text list.
-    async fn export_list(&self, client: &ClientInfo) -> Response {
-        if let Some(refusal) = refuse_unless_here(client, "read the download list") {
-            return refusal;
-        }
-
+    async fn export_list(&self) -> Response {
         let Some(store) = self.inner.store.clone() else {
             return Response::Error { message: "there is no store to read".into() };
         };
@@ -2494,10 +2429,6 @@ impl Engine {
         text: &str,
         queue: Option<i64>,
     ) -> Response {
-        if let Some(refusal) = refuse_unless_here(client, "import a list of downloads") {
-            return refusal;
-        }
-
         let wanted = crate::list::read(name, text);
         if wanted.is_empty() {
             return Response::Rejected {
@@ -2528,16 +2459,7 @@ impl Engine {
         Response::Imported { added, skipped }
     }
 
-    async fn grab_links(
-        &self,
-        client: &ClientInfo,
-        url: String,
-        follow: idm_ipc::GrabDepth,
-    ) -> Response {
-        if let Some(refusal) = refuse_unless_here(client, "ask for the links on a page") {
-            return refusal;
-        }
-
+    async fn grab_links(&self, url: String, follow: idm_ipc::GrabDepth) -> Response {
         // The same vetting a download gets. Narrowed further inside the
         // grabber, which takes http and https only -- a magnet names a
         // swarm and has no links on it.
@@ -2579,13 +2501,10 @@ impl Engine {
         }
     }
 
-    async fn peek_archive(&self, client: &ClientInfo, url: String) -> Response {
+    async fn peek_archive(&self, url: String) -> Response {
         // A fetch of this program's choosing, to an address somebody else
         // would be naming. That is the shape of request a page, or the
         // network, should not be able to make this machine send.
-        if let Some(refusal) = refuse_unless_here(client, "ask what is inside an archive") {
-            return refusal;
-        }
 
         // The same vetting a download gets, because this is the same kind
         // of act: an address from a client, fetched by this process.
@@ -2699,17 +2618,8 @@ impl Engine {
         }
     }
 
-    /// Changing when downloads run is refused for browser clients.
-    fn refuse_browser_schedule(client: &ClientInfo) -> Option<Response> {
-        refuse_unless_here(client, "change the download schedule")
-    }
-
     /// The rules, and what the schedule is doing right now.
-    async fn list_bandwidth_rules(&self, client: &ClientInfo) -> Response {
-        if let Some(refusal) = Self::refuse_browser_schedule(client) {
-            return refusal;
-        }
-
+    async fn list_bandwidth_rules(&self) -> Response {
         let rules = self.inner.rules.lock().await.clone();
         let now = crate::schedule::now();
         let from_a_rule = crate::schedule::in_force(now, &rules);
@@ -2751,7 +2661,6 @@ impl Engine {
     #[allow(clippy::too_many_arguments)]
     async fn set_bandwidth_rule(
         &self,
-        client: &ClientInfo,
         id: Option<i64>,
         days: u8,
         start_minute: u16,
@@ -2759,9 +2668,6 @@ impl Engine {
         bytes_per_sec: u64,
         stop: bool,
     ) -> Response {
-        if let Some(refusal) = Self::refuse_browser_schedule(client) {
-            return refusal;
-        }
         let Some(store) = self.inner.store.clone() else {
             return Response::Rejected { reason: NO_SCHEDULE_STORE.into() };
         };
@@ -2776,13 +2682,10 @@ impl Engine {
         }
 
         self.reload_rules().await;
-        self.list_bandwidth_rules(client).await
+        self.list_bandwidth_rules().await
     }
 
-    async fn remove_bandwidth_rule(&self, client: &ClientInfo, id: i64) -> Response {
-        if let Some(refusal) = Self::refuse_browser_schedule(client) {
-            return refusal;
-        }
+    async fn remove_bandwidth_rule(&self, id: i64) -> Response {
         let Some(store) = self.inner.store.clone() else {
             return Response::Rejected { reason: NO_SCHEDULE_STORE.into() };
         };
@@ -2791,7 +2694,7 @@ impl Engine {
         }
 
         self.reload_rules().await;
-        self.list_bandwidth_rules(client).await
+        self.list_bandwidth_rules().await
     }
 
     /// Re-reads the rules and puts whatever they now say into effect.
@@ -2812,20 +2715,8 @@ impl Engine {
         }
     }
 
-    /// Saved passwords are refused for browser clients, all three ways.
-    ///
-    /// Listing is refused as firmly as changing: the list says which sites
-    /// this person has an account with, which is worth keeping from a web
-    /// page even with no password attached to it.
-    fn refuse_browser_credentials(client: &ClientInfo) -> Option<Response> {
-        refuse_unless_here(client, "see or change saved passwords")
-    }
-
     /// What is saved, never the passwords themselves.
-    fn list_credentials(&self, client: &ClientInfo) -> Response {
-        if let Some(refusal) = Self::refuse_browser_credentials(client) {
-            return refusal;
-        }
+    fn list_credentials(&self) -> Response {
         match crate::credentials::views(self.inner.vault.as_ref()) {
             Ok(entries) => Response::Credentials { entries },
             Err(reason) => Response::Rejected { reason },
@@ -2835,14 +2726,10 @@ impl Engine {
     /// Saves one, replacing whatever was saved for the same thing.
     fn set_credential(
         &self,
-        client: &ClientInfo,
         scope: idm_ipc::CredentialScope,
         username: String,
         password: idm_ipc::SecretString,
     ) -> Response {
-        if let Some(refusal) = Self::refuse_browser_credentials(client) {
-            return refusal;
-        }
         match crate::credentials::set(
             self.inner.vault.as_ref(),
             &scope,
@@ -2857,31 +2744,15 @@ impl Engine {
         }
     }
 
-    fn remove_credential(&self, client: &ClientInfo, scope: idm_ipc::CredentialScope) -> Response {
-        if let Some(refusal) = Self::refuse_browser_credentials(client) {
-            return refusal;
-        }
+    fn remove_credential(&self, scope: idm_ipc::CredentialScope) -> Response {
         match crate::credentials::remove(self.inner.vault.as_ref(), &scope) {
             Ok(()) => Response::Pong,
             Err(reason) => Response::Rejected { reason },
         }
     }
 
-    /// Downloading and installing a program is refused for browsers.
-    ///
-    /// Its own helper rather than `refuse_browser`, because the sentence
-    /// matters: this is the one request that would have the engine fetch an
-    /// executable and run it, so the refusal says that rather than
-    /// something about settings.
-    fn refuse_browser_sidecars(client: &ClientInfo) -> Option<Response> {
-        refuse_unless_here(client, "install programs")
-    }
-
     /// What the app can run, and whether it has each already.
-    fn list_sidecars(client: &ClientInfo) -> Response {
-        if let Some(refusal) = Self::refuse_browser_sidecars(client) {
-            return refusal;
-        }
+    fn list_sidecars() -> Response {
         Response::Sidecars { tools: crate::sidecars::views() }
     }
 
@@ -2890,10 +2761,7 @@ impl Engine {
     /// Takes no engine lock for the duration -- this is a hundred megabytes
     /// over somebody's connection, and every download and the window's own
     /// ticker have to keep running underneath it.
-    async fn fetch_sidecar(client: &ClientInfo, name: String) -> Response {
-        if let Some(refusal) = Self::refuse_browser_sidecars(client) {
-            return refusal;
-        }
+    async fn fetch_sidecar(name: String) -> Response {
         match crate::sidecars::fetch(&name).await {
             Ok(done) => {
                 tracing::info!(%done, "installed a sidecar");
@@ -2913,16 +2781,13 @@ impl Engine {
     }
 
     async fn get_settings(&self) -> Response {
-        Response::Settings(self.inner.settings.lock().await.clone())
+        Response::Settings(self.settings().await)
     }
 
-    async fn set_settings(&self, client: &ClientInfo, settings: Settings) -> Response {
+    async fn set_settings(&self, settings: Settings) -> Response {
         // Only the desktop app and CLI may change settings. Letting the
         // browser side rewrite them would hand a web page the ability to turn
         // its own kill switch back on.
-        if let Some(refusal) = refuse_unless_here(client, "change settings") {
-            return refusal;
-        }
         // Vetted before anything is stored, while the person is still at the
         // screen: a folder that cannot be written to otherwise fails later,
         // mid-transfer, on a file that may have taken an hour.
@@ -2950,8 +2815,7 @@ impl Engine {
         // Vetted against the folder that was just vetted above, so choosing
         // a hook and moving the download folder onto it in one save is
         // refused rather than half-applied.
-        let downloads =
-            vec![std::path::PathBuf::from(&settings.download_dir), self.inner.output_dir.clone()];
+        let downloads = crate::hook::landing_dirs(&settings.download_dir, &self.inner.output_dir);
         match crate::hook::vet(&settings.hook_program, &downloads) {
             Ok(vetted) => settings.hook_program = vetted,
             Err(reason) => return Response::Rejected { reason },
@@ -3202,6 +3066,18 @@ fn save_settings(path: &PathBuf, settings: &Settings) {
 
 impl Handler for Engine {
     async fn handle(&self, client: &ClientInfo, request: Request) -> Response {
+        // One check, before the dispatch, from one exhaustive match in the
+        // protocol crate. It used to be a check inside each handler, which
+        // meant three handlers that never took a client -- `RefreshUrl`,
+        // `ResumeFromHistory` and `GetSettings` among them -- were open to
+        // the browser and to the network by omission rather than by
+        // decision. See `Request::local_only`.
+        if let Some(what) = request.local_only()
+            && !client.is_trusted()
+        {
+            return Response::Rejected { reason: format!("{} cannot {what}", client.described()) };
+        }
+
         match request {
             Request::Ping => Response::Pong,
             Request::Enqueue(req) => self.enqueue_batch(client, req).await,
@@ -3212,32 +3088,30 @@ impl Handler for Engine {
             Request::Pause { id } => self.pause(id).await,
             Request::RefreshUrl { id, url } => self.refresh_url(id, url).await,
             Request::RequestPairing { label } => self.request_pairing(client, label).await,
-            Request::ListPairings => self.list_pairings(client).await,
-            Request::ApprovePairing { request_id } => {
-                self.approve_pairing(client, request_id).await
-            }
-            Request::DenyPairing { request_id } => self.deny_pairing(client, request_id).await,
-            Request::RevokePairing { client_id } => self.revoke_pairing(client, client_id).await,
+            Request::ListPairings => self.list_pairings().await,
+            Request::ApprovePairing { request_id } => self.approve_pairing(request_id).await,
+            Request::DenyPairing { request_id } => self.deny_pairing(request_id).await,
+            Request::RevokePairing { client_id } => self.revoke_pairing(client_id).await,
             Request::SetBrowserEnabled { client_id, enabled } => {
-                self.set_browser_enabled(client, client_id, enabled).await
+                self.set_browser_enabled(client_id, enabled).await
             }
-            Request::ListQueues => self.list_queues(client).await,
+            Request::ListQueues => self.list_queues().await,
             Request::SetQueue { name, max_concurrent } => {
-                self.set_queue(client, name, max_concurrent).await
+                self.set_queue(name, max_concurrent).await
             }
-            Request::EnableQueue { id, enabled } => self.enable_queue(client, id, enabled).await,
-            Request::RemoveQueue { id } => self.remove_queue(client, id).await,
-            Request::AssignQueue { id, queue } => self.assign_queue(client, id, queue).await,
+            Request::EnableQueue { id, enabled } => self.enable_queue(id, enabled).await,
+            Request::RemoveQueue { id } => self.remove_queue(id).await,
+            Request::AssignQueue { id, queue } => self.assign_queue(id, queue).await,
             Request::GetSettings => self.get_settings().await,
-            Request::SetSettings(settings) => self.set_settings(client, settings).await,
+            Request::SetSettings(settings) => self.set_settings(settings).await,
             Request::CancelPostAction => self.cancel_post_action().await,
-            Request::PeekArchive { url } => self.peek_archive(client, url).await,
-            Request::GrabLinks { url, follow } => self.grab_links(client, url, follow).await,
-            Request::ExportList => self.export_list(client).await,
+            Request::PeekArchive { url } => self.peek_archive(url).await,
+            Request::GrabLinks { url, follow } => self.grab_links(url, follow).await,
+            Request::ExportList => self.export_list().await,
             Request::ImportList { name, text, queue } => {
                 self.import_list(client, &name, &text, queue).await
             }
-            Request::ListBandwidthRules => self.list_bandwidth_rules(client).await,
+            Request::ListBandwidthRules => self.list_bandwidth_rules().await,
             Request::SetBandwidthRule {
                 id,
                 days,
@@ -3246,25 +3120,17 @@ impl Handler for Engine {
                 bytes_per_sec,
                 stop,
             } => {
-                self.set_bandwidth_rule(
-                    client,
-                    id,
-                    days,
-                    start_minute,
-                    end_minute,
-                    bytes_per_sec,
-                    stop,
-                )
-                .await
+                self.set_bandwidth_rule(id, days, start_minute, end_minute, bytes_per_sec, stop)
+                    .await
             }
-            Request::RemoveBandwidthRule { id } => self.remove_bandwidth_rule(client, id).await,
-            Request::ListCredentials => self.list_credentials(client),
+            Request::RemoveBandwidthRule { id } => self.remove_bandwidth_rule(id).await,
+            Request::ListCredentials => self.list_credentials(),
             Request::SetCredential { scope, username, password } => {
-                self.set_credential(client, scope, username, password)
+                self.set_credential(scope, username, password)
             }
-            Request::RemoveCredential { scope } => self.remove_credential(client, scope),
-            Request::ListSidecars => Self::list_sidecars(client),
-            Request::FetchSidecar { name } => Self::fetch_sidecar(client, name).await,
+            Request::RemoveCredential { scope } => self.remove_credential(scope),
+            Request::ListSidecars => Self::list_sidecars(),
+            Request::FetchSidecar { name } => Self::fetch_sidecar(name).await,
             Request::Hello { .. } => Response::Error { message: "already authenticated".into() },
         }
     }
@@ -3376,7 +3242,7 @@ mod tests {
         else {
             panic!("a new client should land as pending");
         };
-        engine.approve_pairing(&desktop(), request_id).await;
+        engine.approve_pairing(request_id).await;
     }
 
     fn request(url: &str) -> DownloadRequest {
@@ -3558,15 +3424,21 @@ mod tests {
             panic!("expected pending")
         };
 
-        // Approving itself would defeat the whole mechanism.
-        let self_approval = engine.approve_pairing(&client, request_id.clone()).await;
+        // Approving itself would defeat the whole mechanism. Through
+        // `handle`, not the method: the refusal now sits in front of the
+        // dispatch, so calling the method is not the path a client takes.
+        let approving = Request::ApprovePairing { request_id: request_id.clone() };
+        let self_approval = engine.handle(&client, approving).await;
         assert!(matches!(self_approval, Response::Rejected { .. }), "{self_approval:?}");
         // And it must not get to see what else is connected.
-        assert!(matches!(engine.list_pairings(&client).await, Response::Rejected { .. }));
+        assert!(matches!(
+            engine.handle(&client, Request::ListPairings).await,
+            Response::Rejected { .. }
+        ));
 
         // The app can.
         assert!(matches!(
-            engine.approve_pairing(&desktop(), request_id).await,
+            engine.handle(&desktop(), Request::ApprovePairing { request_id }).await,
             Response::PairingApproved
         ));
     }
@@ -3581,7 +3453,7 @@ mod tests {
             Response::Accepted { .. }
         ));
 
-        engine.revoke_pairing(&desktop(), "ext-1".into()).await;
+        engine.revoke_pairing("ext-1".into()).await;
         match engine.enqueue(&client, request("https://example.invalid/a.bin")).await {
             Response::Rejected { reason } => assert!(reason.contains("not paired"), "{reason}"),
             other => panic!("a revoked client should be refused, got {other:?}"),
@@ -3596,10 +3468,7 @@ mod tests {
         let client = browser();
         pair(&engine, &client).await;
 
-        assert!(matches!(
-            engine.set_browser_enabled(&desktop(), "ext-1".into(), false).await,
-            Response::Pong
-        ));
+        assert!(matches!(engine.set_browser_enabled("ext-1".into(), false).await, Response::Pong));
         match engine.enqueue(&client, request("https://example.invalid/a.bin")).await {
             Response::Rejected { reason } => assert!(reason.contains("switched off"), "{reason}"),
             other => panic!("a switched-off browser should be refused, got {other:?}"),
@@ -3615,7 +3484,7 @@ mod tests {
         assert_eq!(paired.len(), 1, "it must still be paired");
         assert!(!paired[0].enabled);
 
-        engine.set_browser_enabled(&desktop(), "ext-1".into(), true).await;
+        engine.set_browser_enabled("ext-1".into(), true).await;
         assert!(matches!(
             engine.enqueue(&client, request("https://example.invalid/a.bin")).await,
             Response::Accepted { .. }
@@ -3630,7 +3499,7 @@ mod tests {
         let (_dir, engine) = engine();
         let client = browser();
         pair(&engine, &client).await;
-        engine.set_browser_enabled(&desktop(), "ext-1".into(), false).await;
+        engine.set_browser_enabled("ext-1".into(), false).await;
 
         let reply = engine.request_pairing(&client, "Chrome on this PC".into()).await;
         match reply {
@@ -3644,9 +3513,14 @@ mod tests {
         let (_dir, engine) = engine();
         let client = browser();
         pair(&engine, &client).await;
-        engine.set_browser_enabled(&desktop(), "ext-1".into(), false).await;
+        engine.set_browser_enabled("ext-1".into(), false).await;
 
-        let reply = engine.set_browser_enabled(&client, "ext-1".into(), true).await;
+        let reply = engine
+            .handle(
+                &client,
+                Request::SetBrowserEnabled { client_id: "ext-1".into(), enabled: true },
+            )
+            .await;
         assert!(matches!(reply, Response::Rejected { .. }), "{reply:?}");
         assert!(
             matches!(
@@ -3660,7 +3534,7 @@ mod tests {
     #[tokio::test]
     async fn switching_off_a_browser_that_is_not_paired_is_refused() {
         let (_dir, engine) = engine();
-        let reply = engine.set_browser_enabled(&desktop(), "nobody".into(), false).await;
+        let reply = engine.set_browser_enabled("nobody".into(), false).await;
         assert!(matches!(reply, Response::Rejected { .. }), "{reply:?}");
     }
 
@@ -3677,7 +3551,7 @@ mod tests {
 
         let first = make();
         pair(&first, &browser()).await;
-        first.set_browser_enabled(&desktop(), "ext-1".into(), false).await;
+        first.set_browser_enabled("ext-1".into(), false).await;
         drop(first);
 
         let second = make();
@@ -3762,7 +3636,7 @@ mod tests {
         assert!(matches!(accepted, Response::Accepted { .. }), "{accepted:?}");
 
         let off = Settings { browser_integration: false, ..Settings::default() };
-        assert!(matches!(engine.set_settings(&desktop(), off).await, Response::Settings(_)));
+        assert!(matches!(engine.set_settings(off).await, Response::Settings(_)));
 
         match engine.enqueue(&browser(), req.clone()).await {
             Response::Rejected { reason } => assert!(reason.contains("switched off"), "{reason}"),
@@ -3780,10 +3654,13 @@ mod tests {
         // turn itself back on.
         let (_dir, engine) = engine();
         let off = Settings { browser_integration: false, ..Settings::default() };
-        engine.set_settings(&desktop(), off).await;
+        engine.set_settings(off).await;
 
         let on = Settings { browser_integration: true, ..Settings::default() };
-        assert!(matches!(engine.set_settings(&browser(), on).await, Response::Rejected { .. }));
+        assert!(matches!(
+            engine.handle(&browser(), Request::SetSettings(on)).await,
+            Response::Rejected { .. }
+        ));
 
         match engine.get_settings().await {
             Response::Settings(current) => assert!(!current.browser_integration),
@@ -3802,7 +3679,7 @@ mod tests {
                 post_action: PostActionSetting::Shutdown,
                 ..Settings::default()
             };
-            engine.set_settings(&desktop(), changed).await;
+            engine.set_settings(changed).await;
         }
         let reopened = Engine::with_settings_file(dir.path().into(), 8, file);
         match reopened.get_settings().await {
@@ -3834,7 +3711,7 @@ mod tests {
     async fn no_post_action_is_armed_while_work_is_outstanding() {
         let (_dir, engine) = engine();
         let shutdown = Settings { post_action: PostActionSetting::Shutdown, ..Settings::default() };
-        engine.set_settings(&desktop(), shutdown).await;
+        engine.set_settings(shutdown).await;
 
         // Exercises the same function the download task calls, so the test
         // covers the real path rather than a wrapper written for it.
@@ -4858,6 +4735,21 @@ mod tests {
                     text: "https://example.invalid/x.bin".into(),
                     queue: None,
                 },
+                // The three that used to slip through, because their
+                // handlers never took a client to check. The first two
+                // carry a replacement address for a download that already
+                // exists, which is the worst shape in the protocol: the
+                // file keeps the name the user approved and the bytes come
+                // from somewhere else.
+                Request::RefreshUrl { id: JobId(1), url: "https://elsewhere.invalid/x.bin".into() },
+                Request::ResumeFromHistory {
+                    row_id: 1,
+                    url: Some("https://elsewhere.invalid/x.bin".into()),
+                },
+                // And this one hands out the download folder, the proxy
+                // address and the program a finished download runs.
+                Request::GetSettings,
+                Request::CancelPostAction,
             ]
         };
 
