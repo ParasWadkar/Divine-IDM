@@ -1424,10 +1424,11 @@ select {
   font: inherit;
 }
 
-/* The only free-text setting there is. Matched to the selects beside it
-   rather than to the address bar, which is a different size and sits on a
-   different background. */
-.row input.text-input {
+/* The free-text settings: a proxy address, a hook program, its arguments.
+   Matched to the selects beside them rather than to the address bar, which
+   is a different size and sits on a different background. */
+.row input.text-input,
+.row textarea.text-input {
   min-width: 15rem;
   padding: 6px 10px;
   color: var(--text);
@@ -1436,6 +1437,13 @@ select {
   border-radius: 8px;
   font: inherit;
   user-select: text;
+}
+
+/* Grows downwards only. Dragging it wider would pull the label it sits
+   beside out of line with every other row in the panel. */
+.row textarea.text-input {
+  resize: vertical;
+  align-self: stretch;
 }
 
 /* Lines up under the address bar it belongs to, sharing the topbar's own

@@ -421,6 +421,34 @@
               <span>Have Windows Defender check finished downloads</span>
             </label>
 
+            <!-- A program and a list of arguments, not a command line. See
+                 crates/idm-engine/src/hook.rs: a command line has to be
+                 parsed back into a list by something, and a server that
+                 names a file `x & calc.exe` would then have run a command.
+                 Only a .exe for the same reason -- a .bat is read by
+                 cmd.exe, which brings the parser back. -->
+            <label
+              class="row"
+              title="The full path to a .exe. Nothing else can be run: a .bat, .cmd or .ps1 is read by another program that would treat the file name as part of a command. It cannot live in a download folder either, because a download could then replace it."
+            >
+              <span>Run this program when a download finishes</span>
+              <input
+                type="text"
+                id="hook-program"
+                class="text-input"
+                spellcheck="false"
+                placeholder="nothing"
+              />
+            </label>
+
+            <label
+              class="row"
+              title="One argument per line, each passed as one argument. {path} is the finished file, {name} just its name, and {folder} the folder it is in."
+            >
+              <span>…with these arguments, one per line</span>
+              <textarea id="hook-arguments" class="text-input" rows="3" spellcheck="false" placeholder="--file={path}"></textarea>
+            </label>
+
             <label
               class="row"
               title="Shared by every download, and applied to downloads already running, so the connection stays usable for everything else."

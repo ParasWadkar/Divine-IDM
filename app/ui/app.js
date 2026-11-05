@@ -651,6 +651,10 @@ function renderSettings(settings, force = false) {
   $("speed-limit").value = String(settings.speed_limit_bytes_per_sec ?? 0);
   $("sort-into-folders").checked = settings.sort_into_folders ?? true;
   $("scan-downloads").checked = settings.scan_downloads ?? true;
+  $("hook-program").value = settings.hook_program ?? "";
+  // One per line, because each element is one argument and a line is
+  // the only separator that cannot appear inside one.
+  $("hook-arguments").value = (settings.hook_arguments ?? []).join("\n");
   // Don't reset speed-in-bits: it's UI-only state, not persisted
   $("start-with-windows").checked = settings.start_with_windows;
   $("resume-on-start").checked = settings.resume_on_start;
@@ -1090,6 +1094,14 @@ async function refresh() {
   }
 }
 
+/** The argument box as a list: one line, one argument, blanks dropped. */
+function hookArguments(text) {
+  return text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+}
+
 async function saveSettings(overrides = {}) {
   const settings = {
     download_dir: downloadDir,
@@ -1100,6 +1112,8 @@ async function saveSettings(overrides = {}) {
     speed_limit_bytes_per_sec: Number($("speed-limit").value),
     sort_into_folders: $("sort-into-folders").checked,
     scan_downloads: $("scan-downloads").checked,
+    hook_program: $("hook-program").value.trim(),
+    hook_arguments: hookArguments($("hook-arguments").value),
     start_with_windows: $("start-with-windows").checked,
     resume_on_start: $("resume-on-start").checked,
     post_action: $("post-action").value,
@@ -2203,6 +2217,8 @@ for (const id of [
   "speed-limit",
   "sort-into-folders",
   "scan-downloads",
+  "hook-program",
+  "hook-arguments",
   "start-with-windows",
   "resume-on-start",
   "post-action",

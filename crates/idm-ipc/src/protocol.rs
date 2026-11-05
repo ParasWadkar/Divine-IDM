@@ -418,6 +418,22 @@ pub struct Settings {
     /// removed on a detection -- see `idm_engine::scan` -- so the worst
     /// this costs somebody who leaves it on is a few seconds per file.
     pub scan_downloads: bool,
+
+    /// A program to run once each download has finished; empty for none.
+    ///
+    /// The full path to an `.exe`, and nothing else: see `idm_engine::hook`
+    /// for why a `.bat` is refused and why there is no command line here.
+    /// Vetted when it is set, and again before every run, because the
+    /// download folder it must not live in can change afterwards.
+    pub hook_program: String,
+    /// The arguments the hook is given, one per element.
+    ///
+    /// A list rather than a command line, because a list is the thing
+    /// `CreateProcess` actually takes and a command line would have to be
+    /// parsed back into one by something — which is where a file name the
+    /// server chose turns into a command. `{path}`, `{name}` and `{folder}`
+    /// are substituted.
+    pub hook_arguments: Vec<String>,
 }
 
 impl Default for Settings {
@@ -453,6 +469,9 @@ impl Default for Settings {
             proxy: ProxySetting::System,
             proxy_address: String::new(),
             scan_downloads: true,
+            // Nothing runs anything until somebody says what.
+            hook_program: String::new(),
+            hook_arguments: Vec::new(),
         }
     }
 }

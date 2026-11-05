@@ -13,11 +13,12 @@
 //! start has not, and failing the download on its silence would mean a
 //! feature that breaks downloading whenever it breaks.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use idm_ipc::Settings;
 
 use crate::failure::{Failure, Kind};
+use crate::hook::{self, Ran};
 use crate::scan::{self, Verdict};
 
 /// What the steps turned up, for the record rather than for a decision.
@@ -25,6 +26,8 @@ use crate::scan::{self, Verdict};
 pub struct Report {
     /// `None` when scanning was switched off or no scanner was found.
     pub scan: Option<Verdict>,
+    /// `None` when no hook is set, or the one set was refused.
+    pub hook: Option<Ran>,
 }
 
 /// Turns a verdict into a refusal, or into nothing.
@@ -57,7 +60,14 @@ pub fn judge(verdict: &Verdict) -> Option<Failure> {
 /// Returns the refusal when one of them refuses, and the report either way,
 /// because what a step found is worth recording even when it changed
 /// nothing.
-pub async fn run(settings: &Settings, file: &Path) -> (Report, Option<Failure>) {
+/// `default_dir` is the folder the engine was started with, which together
+/// with the chosen one is where downloads can land — the two places a hook
+/// program may not live in.
+pub async fn run(
+    settings: &Settings,
+    default_dir: &Path,
+    file: &Path,
+) -> (Report, Option<Failure>) {
     let mut report = Report::default();
 
     if settings.scan_downloads
@@ -74,7 +84,37 @@ pub async fn run(settings: &Settings, file: &Path) -> (Report, Option<Failure>) 
         }
     }
 
+    report.hook = run_hook(settings, default_dir, file).await;
+
     (report, None)
+}
+
+/// Runs the user's hook, if there is one that still passes its checks.
+///
+/// Vetted again here, not only when it was chosen. The download folder can
+/// be changed afterwards to the folder the hook lives in, which would
+/// otherwise leave a program that one download can replace and the next
+/// download runs.
+async fn run_hook(settings: &Settings, default_dir: &Path, file: &Path) -> Option<Ran> {
+    if settings.hook_program.trim().is_empty() {
+        return None;
+    }
+
+    let downloads = vec![PathBuf::from(&settings.download_dir), default_dir.to_path_buf()];
+    let program = match hook::vet(&settings.hook_program, &downloads) {
+        Ok(program) if !program.is_empty() => PathBuf::from(program),
+        // Reported as not having run rather than as a failed download: the
+        // file is fine, and the thing that is wrong is a setting.
+        Ok(_) => return None,
+        Err(why) => return Some(Ran::Never { why }),
+    };
+
+    let arguments = match hook::vet_arguments(&settings.hook_arguments) {
+        Ok(arguments) => hook::fill(&arguments, file),
+        Err(why) => return Some(Ran::Never { why }),
+    };
+
+    Some(hook::run(&program, &arguments).await)
 }
 
 #[cfg(test)]
@@ -120,8 +160,86 @@ mod tests {
         // Including on a path that does not exist, which is how this test
         // knows no scanner was reached.
         let settings = Settings { scan_downloads: false, ..Settings::default() };
-        let (report, refusal) = run(&settings, Path::new("Z:/not/here.bin")).await;
+        let (report, refusal) =
+            run(&settings, Path::new("Z:/downloads"), Path::new("Z:/not/here.bin")).await;
         assert_eq!(report, Report::default());
         assert!(refusal.is_none());
+    }
+
+    #[tokio::test]
+    async fn no_hook_means_nothing_is_run() {
+        let settings = Settings { scan_downloads: false, ..Settings::default() };
+        let (report, _) =
+            run(&settings, Path::new("Z:/downloads"), Path::new("Z:/downloads/x.bin")).await;
+        assert!(report.hook.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_hook_sitting_in_the_download_folder_is_not_run() {
+        // The check is repeated here, not only where the hook was chosen,
+        // because the download folder can be changed to the hook's folder
+        // afterwards -- at which point one download could replace the
+        // program and the next download would run it.
+        let dir = tempfile::tempdir().unwrap();
+        let downloads = dir.path().join("Downloads");
+        std::fs::create_dir_all(&downloads).unwrap();
+        let program = downloads.join("after.exe");
+        std::fs::write(&program, b"MZ").unwrap();
+
+        let settings = Settings {
+            scan_downloads: false,
+            download_dir: downloads.display().to_string(),
+            hook_program: program.display().to_string(),
+            ..Settings::default()
+        };
+        let (report, refusal) = run(&settings, dir.path(), &downloads.join("finished.bin")).await;
+
+        assert!(refusal.is_none(), "a bad hook is a bad setting, not a bad download");
+        match report.hook {
+            Some(Ran::Never { why }) => assert!(why.contains("downloads are saved"), "{why}"),
+            other => panic!("it must not have been run: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    #[cfg(windows)]
+    async fn a_hook_that_runs_is_recorded_and_changes_nothing() {
+        // `where.exe` is in System32 on every Windows, takes an argument,
+        // and exits quickly either way -- so it proves the launch without
+        // the test needing to build a program of its own.
+        let system32 = PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32");
+        let program = system32.join("where.exe");
+        if !program.is_file() {
+            eprintln!("no where.exe on this machine; skipping");
+            return;
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("finished.bin");
+        std::fs::write(&file, b"x").unwrap();
+
+        let settings = Settings {
+            scan_downloads: false,
+            hook_program: program.display().to_string(),
+            hook_arguments: vec!["{path}".to_owned()],
+            ..Settings::default()
+        };
+        let (report, refusal) = run(&settings, dir.path(), &file).await;
+
+        assert!(refusal.is_none(), "a hook must never be able to fail a download");
+        assert!(matches!(report.hook, Some(Ran::Finished { .. })), "{:?}", report.hook);
+    }
+
+    #[tokio::test]
+    async fn a_hook_that_is_not_there_does_not_fail_the_download() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings = Settings {
+            scan_downloads: false,
+            hook_program: dir.path().join("gone.exe").display().to_string(),
+            ..Settings::default()
+        };
+        let (report, refusal) = run(&settings, dir.path(), &dir.path().join("x.bin")).await;
+        assert!(refusal.is_none());
+        assert!(matches!(report.hook, Some(Ran::Never { .. })));
     }
 }

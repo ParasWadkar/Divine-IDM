@@ -2067,9 +2067,12 @@ async fn after_the_bytes(inner: &Arc<Inner>, id: JobId) -> Option<Failure> {
         PathBuf::from(&record.status.output_dir).join(&record.status.filename)
     };
 
-    let (report, refusal) = crate::finish::run(&settings, &path).await;
+    let (report, refusal) = crate::finish::run(&settings, &inner.output_dir, &path).await;
     if let Some(verdict) = &report.scan {
         tracing::debug!(?verdict, path = %path.display(), "scanned a finished download");
+    }
+    if let Some(ran) = &report.hook {
+        tracing::debug!(?ran, path = %path.display(), "ran the post-download hook");
     }
     refusal
 }
@@ -2853,6 +2856,23 @@ impl Engine {
                 Ok(vetted) => settings.proxy_address = vetted,
                 Err(reason) => return Response::Rejected { reason },
             }
+        }
+
+        // Same again, and the one check here that is a boundary rather than a
+        // convenience: a hook is a program this process will launch, so the
+        // rules about what it may be belong where they cannot be skipped.
+        // Vetted against the folder that was just vetted above, so choosing
+        // a hook and moving the download folder onto it in one save is
+        // refused rather than half-applied.
+        let downloads =
+            vec![std::path::PathBuf::from(&settings.download_dir), self.inner.output_dir.clone()];
+        match crate::hook::vet(&settings.hook_program, &downloads) {
+            Ok(vetted) => settings.hook_program = vetted,
+            Err(reason) => return Response::Rejected { reason },
+        }
+        match crate::hook::vet_arguments(&settings.hook_arguments) {
+            Ok(vetted) => settings.hook_arguments = vetted,
+            Err(reason) => return Response::Rejected { reason },
         }
 
         // The hidden list is plain text from the window. Capped and trimmed so
@@ -4714,6 +4734,55 @@ mod tests {
         };
         settings.download_dir = dir.to_owned();
         engine.handle(client, Request::SetSettings(settings)).await
+    }
+
+    /// Sets the post-download hook through the same path the window uses.
+    async fn set_hook(engine: &Arc<Engine>, program: &str) -> Response {
+        let mut settings = match engine.handle(&desktop(), Request::GetSettings).await {
+            Response::Settings(settings) => settings,
+            other => panic!("expected settings, got {other:?}"),
+        };
+        settings.hook_program = program.to_owned();
+        engine.handle(&desktop(), Request::SetSettings(settings)).await
+    }
+
+    #[tokio::test]
+    async fn a_hook_that_is_not_an_exe_is_refused_when_it_is_set() {
+        // hook.rs has its own tests for every rule. This one is only about
+        // the rules being reached from the request, because a validator
+        // nothing calls would pass all of them.
+        let (dir, engine) = engine();
+        let batch = dir.path().join("after.bat");
+        std::fs::write(&batch, b"echo hi").unwrap();
+
+        let outcome = set_hook(&engine, &batch.display().to_string()).await;
+        match outcome {
+            Response::Rejected { reason } => assert!(reason.contains(".exe"), "{reason}"),
+            other => panic!("a batch file must not be accepted as a hook: {other:?}"),
+        }
+
+        match engine.handle(&desktop(), Request::GetSettings).await {
+            Response::Settings(settings) => assert_eq!(settings.hook_program, ""),
+            other => panic!("expected settings, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_hook_inside_the_download_folder_is_refused_when_it_is_set() {
+        let (dir, engine) = engine();
+        // The engine's own default folder, which is a download folder even
+        // when the setting naming one is empty.
+        let program = dir.path().join("downloads");
+        std::fs::create_dir_all(&program).unwrap();
+        let program = program.join("after.exe");
+        std::fs::write(&program, b"MZ").unwrap();
+
+        match set_hook(&engine, &program.display().to_string()).await {
+            Response::Rejected { reason } => {
+                assert!(reason.contains("downloads are saved"), "{reason}")
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
     }
 
     #[tokio::test]

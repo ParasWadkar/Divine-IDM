@@ -112,6 +112,18 @@ Being straight about this so nothing surprises you:
   Settings if you would rather it did not run. Files over 8 GB are not
   scanned -- reading a disc image twice is a long wait for a verdict -- and
   that is reported as "not scanned" rather than as a clean bill.
+- **Running a command line when a download finishes.** DivinePulse runs a
+  program, not a command. Settings takes the full path to a `.exe` and a list
+  of arguments, one per line, and hands each line to the program as one
+  argument with no shell in between. That is deliberate: a command line has
+  to be parsed back into arguments by something, and a server that names its
+  file `x & calc.exe` would then have run a command on your PC. For the same
+  reason a `.bat`, `.cmd`, `.ps1` or `.lnk` is refused -- each is read by
+  another program that would do that parsing. If you want a script, point the
+  hook at the interpreter's own `.exe` and pass the script as an argument.
+  The program also cannot live in a folder downloads are saved to, since a
+  download could then replace it. `{path}`, `{name}` and `{folder}` are
+  filled in. Whatever it exits with, the download is unaffected.
 - **macOS and Linux.** Windows only.
 
 ## If something goes wrong
