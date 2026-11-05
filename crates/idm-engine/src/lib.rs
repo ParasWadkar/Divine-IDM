@@ -6,6 +6,7 @@
 //! tray and downloads carry on. A binary crate cannot be depended on, so the
 //! engine could not live in one.
 
+pub mod archive;
 pub mod batch;
 pub mod browsers;
 pub mod category;

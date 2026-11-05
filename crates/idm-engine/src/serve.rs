@@ -2387,6 +2387,142 @@ impl Engine {
         })
     }
 
+    /// The most of an archive's index that will be fetched.
+    ///
+    /// A directory is about fifty bytes an entry, so this is tens of
+    /// thousands of files -- past the point where a list is useful, and
+    /// well short of a number a hostile archive could use to make this
+    /// hold a lot of memory.
+    const MOST_INDEX_BYTES: usize = 2 << 20;
+
+    /// Lists what is inside an archive, reading only its index.
+    ///
+    /// Two reads at most: the tail, which holds the record saying where
+    /// the index is, and then the index itself -- unless the tail already
+    /// contained it, which it does for any archive of a few thousand
+    /// files. A four-gigabyte archive costs the same as a small one.
+    async fn peek_archive(&self, client: &ClientInfo, url: String) -> Response {
+        if client.is_browser() {
+            // A fetch of this program's choosing, to an address a page
+            // would be naming. That is the shape of request somebody
+            // else's server should not be able to make this machine send.
+            return Response::Rejected {
+                reason: "the browser integration cannot ask what is inside an archive".into(),
+            };
+        }
+
+        // The same vetting a download gets, because this is the same kind
+        // of act: an address from a client, fetched by this process.
+        let request = idm_ipc::DownloadRequest { url: url.clone(), ..Default::default() };
+        if let Err(reason) = request.validate_with(true) {
+            return Response::Rejected { reason };
+        }
+
+        let settings = self.inner.settings.lock().await.clone();
+        let http = idm_net::client::HttpConfig {
+            proxy: crate::proxy::mode_for(&settings, &url).await,
+            ..Default::default()
+        };
+
+        let tail = match idm_net::range::read_suffix(
+            &http,
+            &url,
+            crate::archive::TAIL_BYTES,
+            crate::archive::TAIL_BYTES * 2,
+        )
+        .await
+        {
+            Ok(window) => window,
+            // Hitting the cap on a *tail* read means the server sent the
+            // file from the beginning instead of its end, which is the
+            // same refusal as below said from a different angle. The byte
+            // count is accurate and tells nobody anything.
+            Err(idm_net::range::RangeError::TooLarge { .. }) => {
+                return Response::Rejected { reason: WHOLE_FILE_ONLY.into() };
+            }
+            Err(error) => return Response::Rejected { reason: error.to_string() },
+        };
+
+        if !tail.is_ranged() {
+            // The server sent the whole file from the start. For a small
+            // archive that is still usable -- the index is in there -- but
+            // for a large one these are the opening bytes and the index is
+            // not among them.
+            let Some(total) = tail.total else {
+                return Response::Rejected {
+                    reason: "that server will not send part of a file, so this would mean \
+                             downloading all of it"
+                        .into(),
+                };
+            };
+            if total as usize > tail.bytes.len() {
+                return Response::Rejected {
+                    reason: "that server will not send part of a file, so this would mean \
+                             downloading all of it"
+                        .into(),
+                };
+            }
+        }
+
+        let tail_at = tail.offset.unwrap_or(0);
+        let index = match crate::archive::find_index(&tail.bytes, tail_at) {
+            Ok(index) => index,
+            Err(error) => return Response::Rejected { reason: error.to_string() },
+        };
+
+        if index.size as usize > Self::MOST_INDEX_BYTES {
+            return Response::Rejected {
+                reason: "that archive lists too many files to preview".into(),
+            };
+        }
+
+        // Already in hand when the index sits inside the tail, which it
+        // does for anything short of a few thousand files. Saves a round
+        // trip on the common case rather than always asking twice.
+        let directory = match index.offset.checked_sub(tail_at) {
+            Some(within)
+                if (within as usize).saturating_add(index.size as usize) <= tail.bytes.len() =>
+            {
+                tail.bytes[within as usize..(within + index.size) as usize].to_vec()
+            }
+            _ => match idm_net::range::read_at(
+                &http,
+                &url,
+                index.offset,
+                index.size as usize,
+                Self::MOST_INDEX_BYTES,
+            )
+            .await
+            {
+                Ok(window) if window.is_ranged() => window.bytes,
+                Ok(_) => {
+                    return Response::Rejected {
+                        reason: "that server stopped honouring ranges partway".into(),
+                    };
+                }
+                Err(error) => return Response::Rejected { reason: error.to_string() },
+            },
+        };
+
+        match crate::archive::list(&directory, index.entries) {
+            Ok(listing) => Response::Archive {
+                total_uncompressed: listing.entries.iter().map(|entry| entry.uncompressed).sum(),
+                entries: listing
+                    .entries
+                    .into_iter()
+                    .map(|entry| idm_ipc::ArchiveEntryView {
+                        name: entry.name,
+                        compressed: entry.compressed,
+                        uncompressed: entry.uncompressed,
+                        is_directory: entry.is_directory,
+                    })
+                    .collect(),
+                truncated: listing.truncated,
+            },
+            Err(error) => Response::Rejected { reason: error.to_string() },
+        }
+    }
+
     /// Changing when downloads run is refused for browser clients.
     fn refuse_browser_schedule(client: &ClientInfo) -> Option<Response> {
         client.is_browser().then(|| Response::Rejected {
@@ -2800,6 +2936,13 @@ const NO_STORE: &str = "queues need the database, which could not be opened";
 /// The same, for the schedule, and for the same reason: a rule that did not
 /// survive a restart would be worse than no rule, because somebody would
 /// have set it and believed it.
+/// Said when a server will not serve part of a file.
+///
+/// Looking inside an archive that way would mean fetching all of it, which
+/// is the opposite of what the feature is for.
+const WHOLE_FILE_ONLY: &str =
+    "that server will not send part of a file, so this would mean downloading all of it";
+
 const NO_SCHEDULE_STORE: &str = "a download schedule needs the database, which could not be opened";
 
 /// The bandwidth rules as the store holds them, in the form the schedule
@@ -2894,6 +3037,7 @@ impl Handler for Engine {
             Request::GetSettings => self.get_settings().await,
             Request::SetSettings(settings) => self.set_settings(client, settings).await,
             Request::CancelPostAction => self.cancel_post_action().await,
+            Request::PeekArchive { url } => self.peek_archive(client, url).await,
             Request::ListBandwidthRules => self.list_bandwidth_rules(client).await,
             Request::SetBandwidthRule {
                 id,

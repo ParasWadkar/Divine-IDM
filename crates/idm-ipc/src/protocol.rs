@@ -571,6 +571,15 @@ pub enum Request {
     },
     /// Cancels an armed post-download action during its countdown.
     CancelPostAction,
+    /// Lists what is inside an archive without downloading it.
+    ///
+    /// Refused for browser clients. It is a fetch of this program's
+    /// choosing to an address a page would be naming, which is the shape
+    /// of a request somebody else's server should not be able to make
+    /// this machine send.
+    PeekArchive {
+        url: String,
+    },
     /// The bandwidth schedule, and what it is doing now.
     ///
     /// Refused for browser clients along with the other two: a schedule
@@ -763,6 +772,20 @@ pub struct CredentialView {
     pub label: String,
 }
 
+/// One file inside an archive.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArchiveEntryView {
+    /// The name exactly as the archive stores it.
+    ///
+    /// For showing, not for opening: it has not been sanitised, and
+    /// anything that unpacks an archive applies its own rules about what a
+    /// name may be.
+    pub name: String,
+    pub compressed: u64,
+    pub uncompressed: u64,
+    pub is_directory: bool,
+}
+
 /// One rule in the bandwidth schedule, as a client sees it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BandwidthRuleView {
@@ -859,6 +882,13 @@ pub enum Response {
     BandwidthRules {
         rules: Vec<BandwidthRuleView>,
         now: ScheduleNow,
+    },
+    Archive {
+        entries: Vec<ArchiveEntryView>,
+        /// True when the archive holds more than was listed.
+        truncated: bool,
+        /// What the entries add up to unpacked, as far as they were read.
+        total_uncompressed: u64,
     },
     Pong,
     Error {

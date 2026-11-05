@@ -93,6 +93,109 @@ function sizeFromQuery(url, fallback = 8 * MIB) {
 const hitCounts = new Map();
 
 // ---------------------------------------------------------------------------
+// A real zip, built here
+// ---------------------------------------------------------------------------
+//
+// Built rather than kept as a fixture so the shape can be varied per
+// request -- how many files, how large, how long a comment -- and so the
+// bytes are visible in this file rather than opaque in the repository.
+//
+// Everything is STORED rather than deflated. The engine only reads the
+// index, so compression would add a dependency and prove nothing; and a
+// stored archive is larger than its contents, which is what a test about
+// reading only the tail needs.
+
+const CRC_TABLE = (() => {
+  const table = new Int32Array(256);
+  for (let n = 0; n < 256; n += 1) {
+    let c = n;
+    for (let k = 0; k < 8; k += 1) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    table[n] = c;
+  }
+  return table;
+})();
+
+function crc32(buffer) {
+  let c = 0 ^ -1;
+  for (let i = 0; i < buffer.length; i += 1) {
+    c = (c >>> 8) ^ CRC_TABLE[(c ^ buffer[i]) & 0xff];
+  }
+  return (c ^ -1) >>> 0;
+}
+
+/**
+ * A valid STORED zip holding `files`, which are `[name, size]` pairs.
+ *
+ * Real enough that any zip tool opens it: correct CRCs, correct offsets,
+ * a proper central directory and end record.
+ */
+function buildZip(files, comment = "") {
+  const locals = [];
+  const central = [];
+  let at = 0;
+
+  for (const [name, size] of files) {
+    const nameBytes = Buffer.from(name, "utf8");
+    const data = Buffer.alloc(size, "a");
+    const crc = crc32(data);
+
+    const local = Buffer.alloc(30);
+    local.writeUInt32LE(0x04034b50, 0);
+    local.writeUInt16LE(20, 4); // version needed
+    local.writeUInt16LE(0x0800, 6); // UTF-8 names
+    local.writeUInt16LE(0, 8); // stored
+    local.writeUInt16LE(0, 10); // time
+    local.writeUInt16LE(0, 12); // date
+    local.writeUInt32LE(crc, 14);
+    local.writeUInt32LE(size, 18);
+    local.writeUInt32LE(size, 22);
+    local.writeUInt16LE(nameBytes.length, 26);
+    local.writeUInt16LE(0, 28);
+    locals.push(local, nameBytes, data);
+
+    const entry = Buffer.alloc(46);
+    entry.writeUInt32LE(0x02014b50, 0);
+    entry.writeUInt16LE(20, 4); // made by
+    entry.writeUInt16LE(20, 6); // needed
+    entry.writeUInt16LE(0x0800, 8); // UTF-8 names
+    entry.writeUInt16LE(0, 10); // stored
+    entry.writeUInt16LE(0, 12);
+    entry.writeUInt16LE(0, 14);
+    entry.writeUInt32LE(crc, 16);
+    entry.writeUInt32LE(size, 20);
+    entry.writeUInt32LE(size, 24);
+    entry.writeUInt16LE(nameBytes.length, 28);
+    entry.writeUInt16LE(0, 30); // extra
+    entry.writeUInt16LE(0, 32); // comment
+    entry.writeUInt16LE(0, 34); // disk
+    entry.writeUInt16LE(0, 36); // internal
+    entry.writeUInt32LE(0, 38); // external
+    entry.writeUInt32LE(at, 42); // where its local header is
+    central.push(entry, nameBytes);
+
+    at += local.length + nameBytes.length + data.length;
+  }
+
+  const body = Buffer.concat(locals);
+  const directory = Buffer.concat(central);
+  const commentBytes = Buffer.from(comment, "utf8");
+
+  const end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50, 0);
+  end.writeUInt16LE(0, 4);
+  end.writeUInt16LE(0, 6);
+  end.writeUInt16LE(files.length, 8);
+  end.writeUInt16LE(files.length, 10);
+  end.writeUInt32LE(directory.length, 12);
+  end.writeUInt32LE(body.length, 16);
+  end.writeUInt16LE(commentBytes.length, 20);
+
+  return Buffer.concat([body, directory, end, commentBytes]);
+}
+
+
+
+// ---------------------------------------------------------------------------
 // Signing in
 // ---------------------------------------------------------------------------
 //
@@ -941,6 +1044,53 @@ const routes = {
         "Content-Type": "application/octet-stream",
       });
       return res.end(bodyFor(0, want));
+    },
+  },
+
+
+  "/archive.zip": {
+    description:
+      "A real zip, served with ranges honoured, so an archive can be listed without being " +
+      "downloaded. `?files=` sets how many it holds and `?each=` how large each one is; " +
+      "`?comment=` adds an archive comment, which is the thing that stops the index sitting " +
+      "at a fixed offset.",
+    handler: (req, res, url) => {
+      const count = Number(url.searchParams.get("files") ?? 3);
+      const each = Number(url.searchParams.get("each") ?? 64);
+      const comment = url.searchParams.get("comment") ?? "";
+      const files = Array.from({ length: count }, (_, index) => [
+        index % 4 === 3 ? `folder-${index}/` : `file-${String(index).padStart(4, "0")}.bin`,
+        index % 4 === 3 ? 0 : each,
+      ]);
+      const zip = buildZip(files, comment);
+
+      const match = /^bytes=(?:(\d+)-(\d*)|-(\d+))$/.exec(req.headers.range ?? "");
+      if (!match) {
+        res.writeHead(200, {
+          "Accept-Ranges": "bytes",
+          "Content-Length": String(zip.length),
+          "Content-Type": "application/zip",
+        });
+        return res.end(zip);
+      }
+
+      let start;
+      let end;
+      if (match[3] !== undefined) {
+        start = Math.max(0, zip.length - Number(match[3]));
+        end = zip.length - 1;
+      } else {
+        start = Number(match[1]);
+        end = match[2] === "" ? zip.length - 1 : Math.min(Number(match[2]), zip.length - 1);
+      }
+
+      res.writeHead(206, {
+        "Accept-Ranges": "bytes",
+        "Content-Range": `bytes ${start}-${end}/${zip.length}`,
+        "Content-Length": String(end - start + 1),
+        "Content-Type": "application/zip",
+      });
+      return res.end(zip.subarray(start, end + 1));
     },
   },
 
