@@ -72,6 +72,12 @@ an extension you have not approved.
   available and offers to fetch it. What arrives is checked against the exact
   build DivinePulse pins — when it downloads, and again every time before it
   runs — so a copy replaced afterwards is not the one that executes.
+- **Downloading only at certain times.** The **Schedule** tab slows downloads
+  down, or stops them altogether, between times you choose — so you can hold
+  them back during the day and let them run at full speed overnight. While a
+  rule applies it decides the speed instead of the limit in Settings, and
+  where two rules overlap the stricter one wins. A window whose end is
+  earlier than its start runs past midnight.
 - **A link that has expired.** Big downloads often use links that stop working
   after an hour or two. Click **New link** on the stopped download, paste a
   fresh address for the same file, and it carries on from where it was
@@ -94,6 +100,10 @@ Being straight about this so nothing surprises you:
   download is before you agree to it; a copy already on your PATH is used
   instead. Single-track video, and every ordinary file download, work without
   it either way.
+- **Hold torrents to a schedule, or to a speed limit changed while they are
+  running.** The torrent engine takes its limit once, when it starts, so a
+  limit or a schedule rule changed afterwards applies to torrents from the
+  next time the app opens. Ordinary downloads follow both at once.
 - **macOS and Linux.** Windows only.
 
 ## If something goes wrong
