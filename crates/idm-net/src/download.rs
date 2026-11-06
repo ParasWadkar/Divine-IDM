@@ -195,6 +195,9 @@ impl DownloadConfig {
 pub struct DownloadStats {
     pub requests: u64,
     pub steals: u64,
+    /// Claims cut short so a decision to use fewer connections could take
+    /// effect. See the yield step in the connection tick.
+    pub yields: u64,
     pub hedges: u64,
     pub refusals: u64,
     pub retries: u64,
@@ -1029,6 +1032,52 @@ pub async fn download_with_progress<F: FnMut(Progress)>(
                 ConnDecision::Reduce { to, .. } => target_connections = to.max(1),
                 ConnDecision::Settle { at, .. } => target_connections = at.max(1),
                 ConnDecision::Hold => {}
+            }
+
+            // A decision to use fewer connections has to reach the lanes, or
+            // it is only a number in a log.
+            //
+            // Lowering the target alone just stops new lanes being started,
+            // and a lane only exits when its claim runs out. On a shared
+            // bucket that is the whole problem: one of sixteen connections
+            // moves 0.5 MB/s, so an 8 MiB claim takes sixteen seconds, which
+            // is as long as the download. The controller would correctly
+            // diagnose a shared bucket, correctly decide on fewer
+            // connections, and then not have them -- the count was observed
+            // drifting from sixteen to nine with no decision taken at all,
+            // purely from claims running out.
+            //
+            // So the surplus lanes are cut short at the byte they have
+            // reached. `is_done` is one atomic load the fetcher already
+            // checks after every chunk, so each stops at the next chunk
+            // boundary, and the completion path below returns whatever the
+            // claim did not deliver. This is what aria2 does too, through
+            // `SegmentMan::cancelSegment`: a segment in flight is not
+            // sacred.
+            //
+            // Cut at the cursor rather than anywhere ahead of it, so no byte
+            // already written is given away twice, and the remainder is left
+            // reserved until the lane actually exits -- releasing it here
+            // would let another lane claim bytes this one is still inside.
+            // The cost is at most one chunk's worth of bytes already on the
+            // wire, paid once per reduction rather than per request, which
+            // is the trade cutting every claim finer in advance could not
+            // make.
+            let in_flight = tracked.len();
+            if (target_connections as usize) < in_flight {
+                // Biggest remainder first: those are the lanes that would
+                // otherwise hold the count up longest.
+                let mut widest: Vec<(u64, ClaimId)> =
+                    tracked.values().map(|t| (t.claim.remaining(), t.claim.id())).collect();
+                widest.sort_unstable_by_key(|(remaining, _)| std::cmp::Reverse(*remaining));
+                for (_, id) in widest.into_iter().take(in_flight - target_connections as usize) {
+                    if let Some(entry) = tracked.get(&id) {
+                        let reached = entry.claim.cursor();
+                        if entry.claim.try_steal_at(reached, now_ms).is_some() {
+                            stats.yields += 1;
+                        }
+                    }
+                }
             }
             // Opt-in trace: speculating about why a ramp is slow is a poor
             // substitute for watching it.

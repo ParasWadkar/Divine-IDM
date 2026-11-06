@@ -327,7 +327,7 @@ fn print_json(report: &DownloadReport) {
         concat!(
             "{{\"ok\":true,\"path\":\"{}\",\"total_bytes\":{},\"elapsed_secs\":{:.4},",
             "\"bytes_per_sec\":{:.1},\"connections\":{},\"lanes\":{},",
-            "\"requests\":{},\"steals\":{},\"hedges\":{},\"retries\":{},",
+            "\"requests\":{},\"steals\":{},\"yields\":{},\"hedges\":{},\"retries\":{},",
             "\"resumed_bytes\":{},\"write_mode\":\"{:?}\",\"settled\":\"{:?}\",",
             "\"http_version\":\"{}\"}}"
         ),
@@ -339,6 +339,7 @@ fn print_json(report: &DownloadReport) {
         report.lanes,
         report.stats.requests,
         report.stats.steals,
+        report.stats.yields,
         report.stats.hedges,
         report.stats.retries,
         report.resumed_bytes,
