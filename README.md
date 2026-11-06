@@ -187,14 +187,14 @@ Being straight about this so nothing surprises you:
 Measured, not asserted: `tests/bench/results/` has the numbers, the machine
 they came from, and the commands to repeat them. Against a server shaped
 the way a CDN edge is — each connection capped, 30 ms away — DivinePulse
-fetched a 128 MiB file at 72.3 MB/s, against 66.2 for `aria2c -x16`, 36.0
+fetched a 128 MiB file at 71.2 MB/s, against 66.7 for `aria2c -x16`, 35.5
 for Ghost Downloader and 5.1 for curl — and it reached that without being
 told how many connections to open.
 
 Two results there are not flattering and are reported anyway. On a server
-that caps the *client* rather than each connection, DivinePulse came third
-— aria2c and Ghost Downloader were both about 5% faster, though they made
-53 and 47 requests to our 19. And with no latency and no cap at all —
+that caps the *client* rather than each connection, DivinePulse comes
+third — aria2c and Ghost Downloader are about 2.5% faster, though they
+make 54 and 48 requests to our 24. And with no latency and no cap at all —
 fetching from the same machine — plain curl is 1.7 times faster than
 DivinePulse and over twice as fast as the other two, because parallel
 downloading is pure overhead when there is nothing to hide.
