@@ -43,6 +43,7 @@ import {
   closeSync,
   existsSync,
   mkdirSync,
+  mkdtempSync,
   openSync,
   rmSync,
   writeFileSync,
@@ -78,6 +79,25 @@ const ARIA2 = join(
   "aria2-1.37.0-win-64bit-build1\\aria2c.exe",
 );
 const OUR_EXE = join(REPO, "target", "release", "idm.exe");
+
+/**
+ * Our own runs get a throwaway state directory, and the reason is not
+ * tidiness.
+ *
+ * Without `IDM_STATE_DIR` the CLI opens the real one under LOCALAPPDATA --
+ * the user's actual download history and, more to the point here, the
+ * learned host profiles. A benchmark that writes profiles into it is
+ * measuring partly its own previous runs: the first download of a host
+ * learns a connection count and every later one starts from it instead of
+ * ramping, so run 1 and run 5 are not the same experiment and the median
+ * quietly mixes them.
+ *
+ * One directory for the whole invocation rather than one per run, so
+ * repeated downloads from a host still behave the way they would in life.
+ * It is removed at the end.
+ */
+const BENCH_STATE = mkdtempSync(join(tmpdir(), "idm-bench-state-"));
+const BENCH_ENV = { ...process.env, IDM_STATE_DIR: BENCH_STATE };
 
 function byteAt(offset) {
   let x = (offset + 0x9e3779b9) | 0;
@@ -149,7 +169,7 @@ function timeSpawn(command, args) {
  */
 function timeOurs(args) {
   const started = process.hrtime.bigint();
-  const result = spawnSync(OUR_EXE, args, { encoding: "utf8" });
+  const result = spawnSync(OUR_EXE, args, { encoding: "utf8", env: BENCH_ENV });
   const elapsed = Number(process.hrtime.bigint() - started) / 1e6;
 
   let said = null;
@@ -450,6 +470,7 @@ async function main() {
   }
 
   rmSync(dir, { recursive: true, force: true });
+  rmSync(BENCH_STATE, { recursive: true, force: true });
   // Ghost Downloader keeps its task list across runs, so a benchmark that
   // did not tidy up would leave dozens of finished rows in somebody's app.
   // After the directory is gone, so "unfinished files are always deleted"
