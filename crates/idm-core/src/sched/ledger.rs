@@ -24,19 +24,29 @@ use crate::extent::{ByteRange, RangeSet};
 /// than the parallelism returns.
 pub const MIN_NEW_CLAIM: u64 = 2 << 20;
 
-/// Claim size bounds. Small enough that a straggler holds little hostage,
-/// large enough that per-request overhead stays negligible.
-pub const MIN_CLAIM: u64 = 8 << 20;
+/// Largest claim worth handing to one worker. Beyond this a straggler holds
+/// too much hostage, whatever the arithmetic says.
 pub const MAX_CLAIM: u64 = 64 << 20;
 
 /// Absolute smallest claim, below which a request costs more than it moves.
 ///
-/// [`MIN_CLAIM`] is the *preferred* floor, but it cannot be the hard one: on a
-/// 16 MiB file an 8 MiB floor yields two claims however many connections are
-/// open, so the file downloads at twice one connection's rate while fourteen
-/// sit idle. Worse, the connection controller then sees aggregate throughput
-/// refusing to grow as it adds connections and misreads a
-/// per-connection-shaped origin as a per-IP-shaped one.
+/// This is the only floor. An 8 MiB *preferred* floor used to sit above it
+/// and was the thing that quietly cancelled the divisor below: on a 128 MiB
+/// file at sixteen connections the divisor asks for 2 MiB and the floor
+/// raised it back to 8 MiB, which is exactly sixteen claims for sixteen
+/// connections. One each, nothing spare, and three consequences that all
+/// read as something else when measured:
+///
+/// * a worker that finishes early finds no free work, which is what
+///   [`CLAIMS_PER_CONNECTION`] exists to prevent;
+/// * the tail is as coarse as the claim, so the last connections finish at
+///   wildly different times and a shared bucket goes under-drawn at the end
+///   while the stragglers run;
+/// * the in-flight count drains on its own as claims run out, so the
+///   connection controller's target stops describing reality.
+///
+/// The steal counter reads zero throughout, because nothing is ever left to
+/// steal — which is how this hid behind "claim sizing is not the problem".
 pub const HARD_MIN_CLAIM: u64 = 256 << 10;
 
 /// Files below this never get more than one connection, whatever the
@@ -51,14 +61,27 @@ const CLAIMS_PER_CONNECTION: u64 = 4;
 
 /// Size of the next claim to hand out.
 ///
-/// `remaining / (4 * connections)`, clamped. The divisor is what makes the
-/// tail fine-grained automatically.
-pub fn claim_size(remaining: u64, connections: u32) -> u64 {
+/// Two sizes, and the smaller wins.
+///
+/// The **working** size is `total / (4 * connections)`: enough claims that
+/// every connection has several to choose from, and fixed for the download
+/// rather than recomputed from what is left. Sizing off `remaining` instead
+/// looks tidier and is not: each claim is a quarter-of-a-connection's share
+/// of a shrinking number, so the pieces halve and halve again and the
+/// request count stops being a function of the file. Measured on 128 MiB
+/// over sixteen connections, that was 177 requests where a fixed 2 MiB is
+/// 64.
+///
+/// The **tail** size is `remaining / connections`, which only bites once
+/// less than one full round is left. It is what stops fifteen connections
+/// waiting on a sixteenth that still holds a whole working claim.
+pub fn claim_size(total: u64, remaining: u64, connections: u32) -> u64 {
     let connections = u64::from(connections.max(1));
-    let target = remaining / (CLAIMS_PER_CONNECTION * connections);
-    // Shrink the floor on small files so every connection still gets work.
-    let floor = MIN_CLAIM.min(remaining / connections).max(HARD_MIN_CLAIM);
-    target.clamp(floor, MAX_CLAIM).min(remaining.max(1))
+    let working = total / (CLAIMS_PER_CONNECTION * connections);
+    let tail = remaining / connections;
+    // Clamped by the hard floor, below which a request costs more than it
+    // moves, and the cap, above which one straggler holds too much.
+    working.min(tail.max(1)).clamp(HARD_MIN_CLAIM, MAX_CLAIM).min(remaining.max(1))
 }
 
 /// Whether a download should use a single connection regardless of tuning.
@@ -156,7 +179,7 @@ impl WorkLedger {
 
         // A gap smaller than MIN_NEW_CLAIM is still worth taking when it is all
         // that is left -- otherwise the tail of a file would never be fetched.
-        let size = claim_size(self.remaining_bytes().max(1), connections);
+        let size = claim_size(self.total, self.remaining_bytes().max(1), connections);
         let take = gap.len().min(size);
         if take == 0 {
             return None;
@@ -220,16 +243,59 @@ mod tests {
 
     #[test]
     fn claim_size_shrinks_towards_the_tail() {
+        let total = 1024 * MIB;
         // Early on, claims are capped so no single worker owns too much.
-        assert_eq!(claim_size(100 * 1024 * MIB, 8), MAX_CLAIM);
-        // Mid-download, it tracks remaining / (4 * connections).
-        assert_eq!(claim_size(1024 * MIB, 8), 32 * MIB);
-        // Near the end it bottoms out at the floor rather than issuing
-        // pointlessly tiny requests.
-        assert_eq!(claim_size(64 * MIB, 8), MIN_CLAIM);
-        // A small file must still be divisible: the preferred 8 MiB floor
-        // gives way to the hard floor rather than collapsing to one claim.
-        assert_eq!(claim_size(MIB, 16), HARD_MIN_CLAIM);
+        assert_eq!(claim_size(100 * 1024 * MIB, 100 * 1024 * MIB, 8), MAX_CLAIM);
+        // Through the body of the download the working size holds steady,
+        // which is what keeps the request count a function of the file.
+        assert_eq!(claim_size(total, total, 8), 32 * MIB);
+        assert_eq!(claim_size(total, total / 2, 8), 32 * MIB);
+        // Inside the last round it gives way to remaining / connections, so
+        // the connections finish together.
+        assert_eq!(claim_size(total, 64 * MIB, 8), 8 * MIB);
+        // And bottoms out at the hard floor rather than issuing pointlessly
+        // tiny requests.
+        assert_eq!(claim_size(total, MIB, 16), HARD_MIN_CLAIM);
+    }
+
+    #[test]
+    fn the_request_count_stays_a_function_of_the_file() {
+        // Sizing off `remaining` made the pieces halve as the file drained:
+        // 128 MiB over sixteen connections came to 177 requests where the
+        // working size alone is 64. Walked here rather than reasoned about,
+        // because the tail rule is what decides where it stops.
+        let total = 128 * MIB;
+        let mut remaining = total;
+        let mut claims = 0u64;
+        while remaining > 0 {
+            remaining -= claim_size(total, remaining, 16).min(remaining);
+            claims += 1;
+            assert!(claims < 1000, "claim sizing did not terminate");
+        }
+        // 97 as this stands: 48 working claims of 2 MiB, then the tail rule
+        // taking sixteenths of what is left down to the hard floor. The bar
+        // is set above that rather than at it, so an adjustment to the tail
+        // does not fail this test -- what it is guarding against is the
+        // runaway, which was approaching 200.
+        assert!(claims <= 120, "{claims} requests to fetch 128 MiB");
+        assert!(claims >= 32, "only {claims} claims: too coarse to steer by");
+    }
+
+    #[test]
+    fn every_connection_gets_several_claims_to_choose_from() {
+        // The case an 8 MiB preferred floor used to cancel: 128 MiB over
+        // sixteen connections asked for 2 MiB and was handed 8 MiB, which is
+        // one claim each and nothing spare. The guarantee is that the count
+        // of claims scales with the connection count, not that any particular
+        // size comes out.
+        for connections in [4u32, 8, 16] {
+            let total = 128 * MIB;
+            let claims = total / claim_size(total, total, connections);
+            assert!(
+                claims >= u64::from(connections) * 2,
+                "{connections} connections got only {claims} claims to share"
+            );
+        }
     }
 
     #[test]
@@ -238,10 +304,10 @@ mod tests {
         // smaller, so finishing workers find free work instead of stealing.
         // Sized so neither result is pinned at MAX_CLAIM, which would make the
         // comparison vacuous.
-        let remaining = 512 * MIB;
-        assert_eq!(claim_size(remaining, 4), 32 * MIB);
-        assert_eq!(claim_size(remaining, 16), 8 * MIB);
-        assert!(claim_size(remaining, 16) < claim_size(remaining, 4));
+        let total = 512 * MIB;
+        assert_eq!(claim_size(total, total, 4), 32 * MIB);
+        assert_eq!(claim_size(total, total, 16), 8 * MIB);
+        assert!(claim_size(total, total, 16) < claim_size(total, total, 4));
     }
 
     #[test]
@@ -250,7 +316,7 @@ mod tests {
         // 16 MiB file however many connections were open, so most sat idle.
         let total = 16 * MIB;
         for connections in [4u32, 8, 16] {
-            let size = claim_size(total, connections);
+            let size = claim_size(total, total, connections);
             let claims = total / size;
             assert!(
                 claims >= u64::from(connections).min(total / HARD_MIN_CLAIM),
@@ -263,7 +329,7 @@ mod tests {
     fn claims_never_shrink_below_the_hard_floor() {
         // Below this a request costs more than it moves.
         for connections in [1u32, 8, 64, 1024] {
-            assert!(claim_size(4 * MIB, connections) >= HARD_MIN_CLAIM);
+            assert!(claim_size(4 * MIB, 4 * MIB, connections) >= HARD_MIN_CLAIM);
         }
     }
 
