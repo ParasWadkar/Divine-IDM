@@ -11,10 +11,10 @@ pub mod server;
 
 pub use client::IpcClient;
 pub use protocol::{
-    ArchiveEntryView, BandwidthRuleView, CredentialScope, CredentialView, DEFAULT_RPC_PORT,
-    DEFAULT_WEB_PORT, DownloadRequest, GrabDepth, GrabbedLinkView, JobId, JobState, JobStatus,
-    PairedClient, PendingPairing, PostActionSetting, ProxySetting, Request, Response, ScheduleNow,
-    SecretString, Settings,
+    ArchiveEntryView, ArmedView, BandwidthRuleView, CredentialScope, CredentialView,
+    DEFAULT_RPC_PORT, DEFAULT_WEB_PORT, DownloadRequest, GrabDepth, GrabbedLinkView, JobId,
+    JobState, JobStatus, PairedClient, PendingPairing, PostActionSetting, ProxySetting, Request,
+    Response, ScheduleNow, SecretString, Settings,
 };
 pub use security::{Endpoint, SessionToken, endpoint_path, random_pipe_name, state_dir};
 pub use server::{

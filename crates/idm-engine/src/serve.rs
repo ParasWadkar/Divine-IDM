@@ -93,8 +93,13 @@ struct Inner {
     /// overwritten either.
     claimed: Mutex<std::collections::HashSet<PathBuf>>,
     pairings: Mutex<PairingStore>,
-    /// Cancels an armed post-download action, if one is counting down.
-    armed: Mutex<Option<Canceller>>,
+    /// The post-download action counting down, if one is.
+    ///
+    /// More than the canceller, because the window has to be able to say
+    /// *what* is about to happen and *when*: a bare "something is armed"
+    /// is not something anyone can act on, and for three of the four
+    /// actions the thing about to happen is the machine going away.
+    armed: Mutex<Option<Armed>>,
     /// The BitTorrent session, started the first time one is needed.
     ///
     /// Lazy on purpose. A session listens on a port, joins the DHT and
@@ -2859,12 +2864,36 @@ impl Engine {
     /// Cancels an armed shutdown, if one is counting down.
     async fn cancel_post_action(&self) -> Response {
         match self.inner.armed.lock().await.take() {
-            Some(canceller) => {
-                canceller.cancel();
+            Some(armed) => {
+                armed.canceller.cancel();
                 Response::Pong
             }
             None => Response::Rejected { reason: "nothing is armed".into() },
         }
+    }
+
+    /// What the machine is about to do, if anything.
+    ///
+    /// Clears the entry once the countdown has run out or been cancelled,
+    /// so a banner cannot outlive the thing it is warning about -- which
+    /// would be worse than no banner, since the one thing it offers is a
+    /// button to stop something already done.
+    async fn armed_action(&self) -> Response {
+        let mut armed = self.inner.armed.lock().await;
+        let view = match armed.as_ref() {
+            Some(current) if !current.canceller.is_cancelled() => {
+                let left = current.ends_at.saturating_duration_since(std::time::Instant::now());
+                (!left.is_zero()).then(|| idm_ipc::ArmedView {
+                    action: current.action.describe().to_owned(),
+                    seconds_left: left.as_secs(),
+                })
+            }
+            _ => None,
+        };
+        if view.is_none() {
+            *armed = None;
+        }
+        Response::Armed { armed: view }
     }
 }
 
@@ -2901,8 +2930,21 @@ async fn maybe_arm(inner: &Arc<Inner>) -> Option<(ArmedAction, bool)> {
         action,
         std::time::Duration::from_secs(settings.post_action_countdown_secs),
     );
-    *inner.armed.lock().await = Some(armed.canceller());
+    *inner.armed.lock().await = Some(Armed {
+        canceller: armed.canceller(),
+        action,
+        ends_at: std::time::Instant::now() + armed.countdown(),
+    });
     Some((armed, all_succeeded))
+}
+
+/// A post-download action in its countdown.
+struct Armed {
+    canceller: Canceller,
+    action: PostAction,
+    /// When it fires. Kept as a deadline and turned into "seconds left" on
+    /// the way out, so the number the window shows comes from one clock.
+    ends_at: std::time::Instant,
 }
 
 /// Runs an armed action, reporting the countdown so the user can stop it.
@@ -3105,6 +3147,7 @@ impl Handler for Engine {
             Request::GetSettings => self.get_settings().await,
             Request::SetSettings(settings) => self.set_settings(settings).await,
             Request::CancelPostAction => self.cancel_post_action().await,
+            Request::ArmedAction => self.armed_action().await,
             Request::PeekArchive { url } => self.peek_archive(url).await,
             Request::GrabLinks { url, follow } => self.grab_links(url, follow).await,
             Request::ExportList => self.export_list().await,
@@ -3822,6 +3865,94 @@ mod tests {
     /// Never the real one: `Engine::new` opens the live database in
     /// `%LOCALAPPDATA%`, and a test that wrote queues into it would leave
     /// them in the running app.
+    /// Arms an action directly, the way `maybe_arm` does, without having to
+    /// finish a real download first.
+    async fn arm(
+        engine: &Arc<Engine>,
+        action: PostAction,
+        countdown: std::time::Duration,
+    ) -> ArmedAction {
+        let armed = ArmedAction::new(action, countdown);
+        *engine.inner.armed.lock().await = Some(Armed {
+            canceller: armed.canceller(),
+            action,
+            ends_at: std::time::Instant::now() + countdown,
+        });
+        armed
+    }
+
+    #[tokio::test]
+    async fn an_armed_shutdown_is_something_the_window_can_see() {
+        // The whole bug. The engine armed these, counted them down, and
+        // announced it with `eprintln!` -- which for a windowed app is
+        // nowhere. Nothing reached the window, so nothing could be stopped.
+        let (_dir, engine) = engine_with_queues();
+        let _armed = arm(&engine, PostAction::Shutdown, std::time::Duration::from_secs(60)).await;
+
+        let Response::Armed { armed } = engine.handle(&desktop(), Request::ArmedAction).await
+        else {
+            panic!("the engine should say what it is about to do");
+        };
+        let view = armed.expect("something is armed");
+        assert_eq!(view.action, PostAction::Shutdown.describe());
+        assert!(view.seconds_left > 0 && view.seconds_left <= 60, "{view:?}");
+    }
+
+    #[tokio::test]
+    async fn nothing_armed_is_reported_as_nothing_rather_than_refused() {
+        // The ordinary case, asked for on every tick. A rejection here would
+        // put an error in the window's log twice a second forever.
+        let (_dir, engine) = engine_with_queues();
+        let Response::Armed { armed } = engine.handle(&desktop(), Request::ArmedAction).await
+        else {
+            panic!("expected an answer");
+        };
+        assert!(armed.is_none());
+    }
+
+    #[tokio::test]
+    async fn cancelling_really_disarms_rather_than_only_hiding_it() {
+        // A banner that goes away while the countdown carries on would be
+        // worse than no banner at all, so this checks the action itself.
+        let (_dir, engine) = engine_with_queues();
+        let armed = arm(&engine, PostAction::Shutdown, std::time::Duration::from_secs(60)).await;
+
+        engine.handle(&desktop(), Request::CancelPostAction).await;
+        assert!(armed.is_cancelled(), "the action itself must be cancelled");
+
+        let Response::Armed { armed: after } =
+            engine.handle(&desktop(), Request::ArmedAction).await
+        else {
+            panic!("expected an answer");
+        };
+        assert!(after.is_none(), "and the window must stop showing it");
+    }
+
+    #[tokio::test]
+    async fn a_countdown_that_has_run_out_stops_being_reported() {
+        // Otherwise the banner outlives the thing it warns about, offering a
+        // button to stop something that already happened.
+        let (_dir, engine) = engine_with_queues();
+        let _armed = arm(&engine, PostAction::Sleep, std::time::Duration::from_millis(1)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        let Response::Armed { armed } = engine.handle(&desktop(), Request::ArmedAction).await
+        else {
+            panic!("expected an answer");
+        };
+        assert!(armed.is_none());
+    }
+
+    #[tokio::test]
+    async fn the_network_may_not_ask_what_the_machine_is_about_to_do() {
+        // It says this machine is about to be left unattended.
+        assert!(Request::ArmedAction.local_only().is_some());
+        let (_dir, engine) = engine_with_queues();
+        let _armed = arm(&engine, PostAction::Shutdown, std::time::Duration::from_secs(60)).await;
+        let reply = engine.handle(&ClientInfo::remote(), Request::ArmedAction).await;
+        assert!(matches!(reply, Response::Rejected { .. }), "{reply:?}");
+    }
+
     fn engine_with_queues() -> (tempfile::TempDir, Arc<Engine>) {
         let dir = tempfile::tempdir().unwrap();
         let store = Arc::new(idm_store::Store::in_memory().unwrap());

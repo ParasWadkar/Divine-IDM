@@ -457,6 +457,22 @@ button.danger {
 
 /* --------------------------------------------------------------- pairing */
 
+/* Loud on purpose. Everything else in this window can wait; this cannot,
+   because the countdown it is reporting ends with the machine off. */
+.armed {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 12px 16px;
+  background: linear-gradient(90deg, #3a1d1d, #2a1420);
+  border-bottom: 1px solid var(--line);
+}
+
+#armed-text {
+  flex: 1;
+  margin: 0;
+}
+
 .pairing {
   padding: 12px 16px;
   background: linear-gradient(90deg, #2a2415, #1d2430);

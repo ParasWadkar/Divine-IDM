@@ -126,12 +126,21 @@ impl AppState {
             _ => Vec::new(),
         };
 
+        // Asked for every tick like the rest. A countdown to the machine
+        // shutting down is the one thing here the window must never be
+        // stale about: it is the only place the person can stop it.
+        let armed = match self.request(Request::ArmedAction).await {
+            Response::Armed { armed } => armed,
+            _ => None,
+        };
+
         Ok(serde_json::json!({
             "jobs": jobs,
             "settings": settings,
             "paired": paired,
             "pending": pending,
             "queues": queues,
+            "armed": armed,
         }))
     }
 

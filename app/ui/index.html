@@ -167,6 +167,16 @@
           </p>
         </details>
 
+        <!-- The machine is about to be taken away, and until this existed
+             the only place that was said was the process's stderr, which
+             nobody running a windowed app ever sees. Above the panels and
+             not inside one, because which tab happens to be open has
+             nothing to do with whether the PC is about to shut down. -->
+        <section id="armed" class="armed" hidden role="alert">
+          <p id="armed-text"></p>
+          <button type="button" id="armed-cancel" class="primary">Don't</button>
+        </section>
+
         <!-- Pairing is a security decision, so it interrupts rather than sitting
              in a settings pane the user may never open. -->
         <section id="pairing" class="pairing" hidden></section>

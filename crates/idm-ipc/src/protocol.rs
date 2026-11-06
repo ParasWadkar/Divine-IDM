@@ -660,6 +660,13 @@ pub enum Request {
     },
     /// Cancels an armed post-download action during its countdown.
     CancelPostAction,
+    /// What the machine is about to do, if anything, and how long is left.
+    ///
+    /// Asked for on every tick rather than pushed on arming, because a
+    /// countdown is only useful if the number in front of somebody keeps
+    /// going down, and a window that opened mid-countdown has missed any
+    /// event it was not there for.
+    ArmedAction,
     /// Lists what is inside an archive without downloading it.
     ///
     /// Refused for browser clients. It is a fetch of this program's
@@ -834,6 +841,9 @@ impl Request {
             // Shutting the machine down is cancelled from the screen that
             // offered it.
             Request::CancelPostAction => Some("cancel what happens after downloads finish"),
+            // Not a secret exactly, but it says this machine is about to be
+            // unattended, which is not something to hand to the network.
+            Request::ArmedAction => Some("ask what happens after downloads finish"),
         }
     }
 }
@@ -910,6 +920,20 @@ pub struct JobStatus {
     pub queue: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub queue_name: Option<String>,
+}
+
+/// A post-download action counting down, as the window needs to show it.
+///
+/// Seconds rather than a deadline: the two ends of this do not share a
+/// clock, and a window that worked out the remaining time from a timestamp
+/// would disagree with the engine by however far the two had drifted --
+/// visibly, on a number ticking down in front of somebody.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArmedView {
+    /// What will happen, in words fit to show: "shut down", "sleep".
+    pub action: String,
+    /// Whole seconds until it happens.
+    pub seconds_left: u64,
 }
 
 /// A password on its way to the engine, which does not print itself.
@@ -1095,6 +1119,10 @@ pub enum Response {
     },
     Status {
         jobs: Vec<JobStatus>,
+    },
+    /// The answer to [`Request::ArmedAction`]; `None` when nothing is armed.
+    Armed {
+        armed: Option<ArmedView>,
     },
     /// Recorded; a human must now approve it in the app.
     PairingPending {

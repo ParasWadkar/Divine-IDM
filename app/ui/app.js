@@ -312,6 +312,8 @@ function render(snapshot) {
     refreshBrowsers();
   }
 
+  renderArmed(snapshot.armed ?? null);
+
   const all = snapshot.jobs ?? [];
   const running = all.filter((job) => job.state === "running");
   const total = running.reduce((sum, job) => sum + (job.bytes_per_sec ?? 0), 0);
@@ -2579,6 +2581,50 @@ async function verifyDownload(job) {
     toast(String(error), true);
   }
 }
+
+/**
+ * The banner for a post-download action counting down.
+ *
+ * The engine has always armed these and always counted them down; what it
+ * had no way of saying was *that it was doing so*. The countdown went to
+ * the process's stderr, which for a windowed app is nowhere, and
+ * `cancel_post_action` sat registered and unreachable. So a person who
+ * ticked "shut down when downloads finish" got a silent countdown to their
+ * machine turning off and nothing to press.
+ *
+ * Re-rendered from each snapshot rather than counted down in here: the
+ * engine owns the clock, and a timer of our own would drift against it and
+ * show a number that disagrees with what actually happens.
+ */
+function renderArmed(armed) {
+  const banner = $("armed");
+  if (!armed) {
+    banner.hidden = true;
+    return;
+  }
+
+  const left = Number(armed.seconds_left ?? 0);
+  const when = left === 1 ? "1 second" : `${left} seconds`;
+  // `action` arrives as a verb phrase -- "shut this computer down", "close
+  // DivinePulse" -- so it reads as the predicate and must not be given a
+  // subject of its own. Same wording the engine already used on stderr,
+  // which is where this message used to go and die.
+  $("armed-text").textContent = `All downloads have finished. Will ${armed.action} in ${when}.`;
+  banner.hidden = false;
+}
+
+$("armed-cancel").addEventListener("click", async () => {
+  try {
+    await invoke("cancel_post_action");
+    $("armed").hidden = true;
+    toast("Left alone. Nothing will happen when downloads finish this time.");
+  } catch (error) {
+    // Most likely the countdown ran out while the button was being
+    // pressed, in which case saying so is better than a banner that
+    // quietly stays put.
+    toast(String(error), true);
+  }
+});
 
 for (const chip of document.querySelectorAll(".filter-chip")) {
   chip.addEventListener("click", () => {
