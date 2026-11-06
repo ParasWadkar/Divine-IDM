@@ -318,6 +318,80 @@ impl DownloadError {
             | Self::RepresentationChanged => false,
         }
     }
+
+    /// A stable name for what went wrong, for anything driving this that is
+    /// not a person reading English.
+    ///
+    /// Deliberately coarse and deliberately fixed. The wording of an error
+    /// is free to improve; these five names and the exit codes they carry
+    /// are an interface, and a script that branches on "storage" must keep
+    /// working when the message behind it is reworded.
+    pub fn kind(&self) -> ErrorKind {
+        match self {
+            // The link, or getting onto it at all.
+            Self::Client(_) | Self::Request(_) => ErrorKind::Network,
+            Self::Fetch(crate::fetch::FetchError::Request(_)) => ErrorKind::Network,
+            Self::Fetch(crate::fetch::FetchError::Body { .. }) => ErrorKind::Network,
+            Self::Io(error) if is_transient_io(error) => ErrorKind::Network,
+
+            // The far end answered, and the answer was no use.
+            Self::Unusable(_) | Self::Stalled { .. } => ErrorKind::Server,
+
+            // The bytes are not the bytes that were asked for.
+            Self::RepresentationChanged => ErrorKind::Integrity,
+
+            // Somewhere to put it.
+            Self::Io(_) | Self::Prealloc(_) | Self::Journal(_) => ErrorKind::Storage,
+            Self::Fetch(crate::fetch::FetchError::Write(_)) => ErrorKind::Storage,
+
+            // Nothing is broken; this file cannot be fetched this way.
+            Self::NoRangeSupport | Self::UnknownLength | Self::Extent(_) => ErrorKind::Unsupported,
+            Self::Fetch(crate::fetch::FetchError::Range(_)) => ErrorKind::Unsupported,
+        }
+    }
+}
+
+/// What kind of thing went wrong, and the exit code that carries it.
+///
+/// The codes start at 2 because 1 is what a process returns when it has
+/// nothing more specific to say, and leaving it to mean exactly that is more
+/// useful than spending it here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ErrorKind {
+    /// Could not reach the server, or lost it partway.
+    Network,
+    /// Reached it, and it was no help.
+    Server,
+    /// What arrived was not what was asked for.
+    Integrity,
+    /// Could not write it down.
+    Storage,
+    /// This file cannot be fetched in parallel at all.
+    Unsupported,
+}
+
+impl ErrorKind {
+    /// The name that goes in `--json` output.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Network => "network",
+            Self::Server => "server",
+            Self::Integrity => "integrity",
+            Self::Storage => "storage",
+            Self::Unsupported => "unsupported",
+        }
+    }
+
+    /// The process exit code.
+    pub fn code(self) -> u8 {
+        match self {
+            Self::Network => 2,
+            Self::Server => 3,
+            Self::Integrity => 4,
+            Self::Storage => 5,
+            Self::Unsupported => 6,
+        }
+    }
 }
 
 /// I/O kinds that mean the network rather than the disk.

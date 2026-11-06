@@ -2,8 +2,13 @@
 //!
 //! Exists before any GUI on purpose: the engine's throughput has to be
 //! measurable against other downloaders before it is worth putting a window on
-//! top of it. `--json` emits one machine-readable line for the benchmark
-//! harness.
+//! top of it.
+//!
+//! `--json` is an interface, not a debugging aid: exactly one JSON object on
+//! stdout per run, on failure as well as success, and an exit code that says
+//! which kind of failure it was. Anything meant for a person goes to stderr,
+//! so a caller can read stdout without filtering. See [`ErrorKind`] for the
+//! codes.
 
 use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
@@ -13,10 +18,33 @@ mod install;
 
 use clap::Parser;
 use idm_core::sched::ProfileStore;
-use idm_net::download::{DownloadConfig, DownloadReport, Progress, download_with_progress};
+use idm_net::download::{
+    DownloadConfig, DownloadReport, ErrorKind, Progress, download_with_progress,
+};
+
+/// Printed under `--help`, because an exit code nobody can look up is the
+/// same as no exit code.
+const EXIT_CODES: &str = "Exit codes:
+  0  finished
+  1  the arguments, or something with nothing more specific to say
+  2  network    could not reach the server, or lost it partway
+  3  server     reached it, and it was no help
+  4  integrity  what arrived was not what was asked for
+  5  storage    could not write it down
+  6  unsupported  this file cannot be fetched in parallel
+
+With --json, exactly one JSON object is printed on stdout either way. It
+carries \"ok\": true or false; a failure also carries \"kind\" (the name
+above) and \"code\" (the number). Everything meant for a person goes to
+stderr, so stdout needs no filtering.";
 
 #[derive(Parser, Debug)]
-#[command(name = "idm", about = "DivinePulse — a parallel, resumable downloader", version)]
+#[command(
+    name = "idm",
+    about = "DivinePulse — a parallel, resumable downloader",
+    version,
+    after_long_help = EXIT_CODES
+)]
 struct Args {
     /// URL to download. Omitted when running with --serve.
     url: Option<String>,
@@ -261,11 +289,43 @@ fn render_progress(progress: &Progress) {
     let _ = std::io::stderr().flush();
 }
 
+/// The failure half of `--json`.
+///
+/// A caller that only ever saw output on success could not tell a failed run
+/// from one that had not finished, and had to parse English from stderr to
+/// learn why. `ok` is the field to branch on; `kind` and `code` say which
+/// way to recover, and `code` is also what the process exits with.
+fn print_json_error(kind: ErrorKind, message: &str) {
+    println!(
+        "{{\"ok\":false,\"kind\":\"{}\",\"code\":{},\"error\":\"{}\"}}",
+        kind.as_str(),
+        kind.code(),
+        escape(message),
+    );
+}
+
+/// Escapes a string for a JSON value. Hand-rolled, like the rest of this.
+fn escape(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for character in text.chars() {
+        match character {
+            '\"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 fn print_json(report: &DownloadReport) {
     // Hand-rolled rather than pulling in serde for four fields.
     println!(
         concat!(
-            "{{\"path\":\"{}\",\"total_bytes\":{},\"elapsed_secs\":{:.4},",
+            "{{\"ok\":true,\"path\":\"{}\",\"total_bytes\":{},\"elapsed_secs\":{:.4},",
             "\"bytes_per_sec\":{:.1},\"connections\":{},\"lanes\":{},",
             "\"requests\":{},\"steals\":{},\"hedges\":{},\"retries\":{},",
             "\"resumed_bytes\":{},\"write_mode\":\"{:?}\",\"settled\":\"{:?}\",",
@@ -419,10 +479,14 @@ async fn main() -> std::process::ExitCode {
             if show_progress {
                 eprintln!();
             }
+            let kind = error.kind();
+            if args.json {
+                print_json_error(kind, &error.to_string());
+            }
             eprintln!("error: {error}");
             // The partial file and journal are deliberately left in place so a
             // later run can resume rather than start over.
-            std::process::ExitCode::FAILURE
+            std::process::ExitCode::from(kind.code())
         }
     }
 }
