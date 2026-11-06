@@ -98,10 +98,10 @@ they can only cost requests.
 
 | Tool | Median | Throughput | vs curl | Requests |
 |---|---|---|---|---|
-| **Ghost Downloader (ghd)** | **16.75s** | **8.0 MB/s** | **1.57x** | 50 |
-| aria2c (-x16) | 16.80s | 8.0 MB/s | 1.56x | 57 |
-| DivinePulse (adaptive) | 17.22s | 7.8 MB/s | 1.53x | 24 |
-| DivinePulse (16 conn) | 17.37s | 7.7 MB/s | 1.51x | 19 |
+| **Ghost Downloader (ghd)** | **16.77s** | **8.0 MB/s** | **1.57x** | 50 |
+| aria2c (-x16) | 16.78s | 8.0 MB/s | 1.57x | 56 |
+| DivinePulse (adaptive) | 17.27s | 7.8 MB/s | 1.52x | 33 |
+| DivinePulse (16 conn) | 17.46s | 7.7 MB/s | 1.50x | 19 |
 | curl (1 conn) | 26.27s | 5.1 MB/s | 1.00x | 1 |
 | DivinePulse (1 conn) | 26.80s | 5.0 MB/s | 0.98x | 10 |
 
@@ -110,8 +110,8 @@ rather than burying: on a per-IP-shaped origin, both of them extract more
 throughput than it does. Four attempts to close it are recorded below, and
 the one that worked cost more elsewhere than it gained here.
 
-They also made **50 and 57 requests against DivinePulse's 24**, roughly
-twice as many to fetch the same file. That is the trade, and which side of
+They also made **50 and 56 requests against DivinePulse's 33**, about half
+as many again to fetch the same file. That is the trade, and which side of
 it is right depends on the server: a few percent of throughput against
 double the request count, on exactly the kind of origin that answers too
 many requests with a 429 and a cooling-off period. This harness cannot
@@ -268,39 +268,37 @@ use. Worth stating because the table would otherwise call it a no-op.
 
 ### What is left
 
-**Per-IP is still 2.8% behind, and the lever is stealing, not claim
-sizing.** The tail on a shared bucket is ragged because workers finish
-seconds apart and the ones that finish find nothing to pick up. Cutting
-every claim smaller in advance was the obvious answer and is measurably the
-wrong one, four ways over. The right one is the mechanism already built for
-it: `sched::steal` takes the unfetched remainder of a straggler's claim,
-and it costs a request exactly when a worker would otherwise idle -- which
-is when a request is free, rather than in the body of the download where it
-is not.
+**Per-IP is 2.8% behind after three rounds, and the obstacle is now a
+measurement artefact rather than a mechanism.** The three rounds were: give
+the ramp a way back down; cut claims finer, four ways; and make a reduction
+actually reach the lanes. All three are in, all three are correct, and the
+median has not moved -- 17.18s, then 17.22s, then 17.27s.
 
-It never fires. `steals` reads zero in every run of every shape in this
-document, and the gate says why: a split must save at least
-`min_gain_secs: 2.0` **in absolute terms**, on a download that lasts 1.9
-seconds in the per-connection case; and the remainder must be at least
-8 MiB with each half at least 4 MiB, which a tail claim never is. The
-absolute threshold is the part that looks wrong -- "don't churn for a
-trivial gain" is a judgement that should scale with the download, and
-`min_gain_frac: 0.15` beside it already expresses it that way.
+What is left is that the descent lands on eight connections where the curve
+peaks at two. In-flight now follows the target down through 16, 8, 4, 2, so
+the count is genuinely reachable; the controller simply does not know two is
+the answer. Its per-count table is poisoned by its own first readings: the
+bench server's token bucket starts full, so the opening windows report
+24 MB/s on an 8 MB/s link, and those get recorded against whichever count
+happened to be current. Every later comparison is made against a number
+that was never achievable.
 
+That is fixable -- discard windows until the rate settles, or keep a mean of
+later windows per count rather than the best one -- and it is not obviously
+fixable *cheaply*, because the per-connection case decides everything in
+its first two windows and finishes in 1.9 seconds. Patience is free on a
+seventeen-second download and expensive on a two-second one. A real CDN
+with a burst allowance behaves the same way as this server, so the artefact
+is worth solving rather than engineering around.
+
+**Stealing is the other untried lever.** `steals` reads zero in every run of
+every shape here, and the gate says why: a split must save
+`min_gain_secs: 2.0` **in absolute terms**, on a download lasting 1.9
+seconds in the per-connection case, and the remainder must be 8 MiB with
+4 MiB halves. "Don't churn for a trivial gain" should scale with the
+download, and `min_gain_frac: 0.15` beside it already says it that way.
 Those constants were chosen for long downloads and have never been measured
-against a short one. Changing them touches the most load-bearing scheduling
-code here, so it wants its own round with the crash soak as arbiter, rather
-than being bolted onto this one.
-
-**The adaptive descent is correct and currently inert.** The controller now
-walks back down to the cheapest count that tied with the best, and lands at
-eight instead of sixteen on a shared bucket -- visible in the settled count,
-worth 24 requests against the pinned sixteen's 19, and worth no measurable
-time. It cannot be worth any: with 8 MiB claims at the 0.5 MB/s one of
-sixteen connections gets, a claim takes sixteen seconds, so a download that
-lasts seventeen cannot act on a decision to use fewer. The descent will
-matter on a long download, where claims complete and the count can actually
-fall, and that is not what this harness measures.
+against a short one.
 
 **Unshaped is not reachable by trimming.** We make a probe request and then
 range requests; curl makes one request and cannot resume or parallelise
@@ -330,6 +328,57 @@ Two details the harness has to get right, both learned the hard way:
 The harness finds `ghd` through `GHD_EXE` or on PATH. The portable build
 ships it in `bin/` and does not put it on PATH, so on this machine it is
 the environment variable.
+
+## Where Ghost Downloader is genuinely ahead
+
+Taken from its own README and release notes in November 2026 rather than
+from guesswork, and checked against this codebase one line at a time. Most
+of its headline features turned out not to be gaps at all:
+
+| ghd claims | Here |
+|---|---|
+| "Smart chunking without file merging" | Same thing: sparse file, each chunk written at its offset, no merge pass |
+| "Auto-detects bandwidth" | The adaptive connection controller |
+| HTTP, FTP, Magnet/BT | Yes |
+| M3U8, MPEG-DASH | Yes, `idm-media` plus `idm-net::stream`, with HLS decryption |
+| Hash verification (MD5/SHA1/SHA256) | Yes |
+| "aria2-compatible RPC API" | Yes, since this round -- loopback only, which ghd's is not |
+| Batch add, drag-drop, paste, per-task threads | Yes |
+| SOCKS5/HTTP/HTTPS proxy, optional cert verification | Yes |
+| Change the URL mid-download | Yes, "New link" |
+| Runs headless | Yes; ghd's CLI starts the app in the background |
+
+What is actually missing, in the order it would be worth doing:
+
+1. **Four platforms against one.** Windows, macOS, Linux and Android,
+   against Windows only. This is the real gap and it is not a feature, it
+   is the `win/` module, WebView2, Credential Manager and the registry.
+   Months, not an afternoon.
+2. **Browser TLS fingerprints.** ghd presents a real browser's TLS
+   handshake; this presents `DivinePulse/<version>` over a default
+   handshake, which some CDNs refuse. Rust has several BoringSSL-based
+   answers -- `wreq` with 60+ profiles, `rquest`, `impersonate-rs` -- but
+   each replaces `reqwest` across the whole network layer and adds a
+   vendored C TLS stack to the build. It is also, plainly, defeating bot
+   detection, which is a decision to take deliberately rather than slide
+   into: a configurable User-Agent, which already exists here, covers the
+   ordinary cases.
+3. **HTTP/3.** `reqwest`'s support is behind both an `http3` feature and
+   `RUSTFLAGS="--cfg reqwest_unstable"`, so taking it means the build
+   depends on an unstable cfg. `HostProfile::h3_won_race` was designed for
+   this and is still unused.
+4. **Site parsers.** YouTube and Bilibili with quality, subtitle and
+   playlist selection; GitHub and HuggingFace mirror acceleration. ghd also
+   just accepts yt-dlp tasks, which is the cheap version of most of this.
+   The mirror lists route somebody's downloads through third-party proxies,
+   which is a trust decision and not only a feature.
+5. **Changing headers or the proxy mid-download.** `RefreshUrl` carries a
+   replacement address and nothing else.
+6. **eD2k.** A whole protocol for a network that has largely gone.
+
+Not gaps despite appearances: ghd's plugin API is on its roadmap rather
+than shipped, and its "AI acceleration" is, by its own release notes, a
+feature that raises the thread count.
 
 ## Compared on features only
 
