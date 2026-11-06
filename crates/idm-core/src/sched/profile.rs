@@ -45,6 +45,27 @@ impl HostKey {
 pub trait ProfileStore: Send + Sync {
     fn load(&self, key: &HostKey, net_fingerprint: u64) -> Option<HostProfile>;
     fn save(&self, key: &HostKey, profile: &HostProfile);
+
+    /// Whether HTTP/3 beat TCP to this host on this network, if it has been
+    /// tried.
+    ///
+    /// Not keyed by [`HostKey`], and that is the point: the ALPN in that key
+    /// is the thing this answer *decides*, so looking it up by protocol
+    /// would need the answer in order to find the answer. It is also not
+    /// kept in [`HostProfile`], because the two facts become valid at
+    /// different moments -- a connection count means nothing until the ramp
+    /// settles, while a race result means something the instant it
+    /// finishes, and tying them together threw the answer away on every
+    /// download too short to settle.
+    ///
+    /// Defaulted so a store that remembers nothing, or a test stub, needs no
+    /// opinion about transports.
+    fn h3_preference(&self, _host: &str, _port: u16, _net_fingerprint: u64) -> Option<bool> {
+        None
+    }
+
+    /// Records which transport won.
+    fn save_h3_preference(&self, _host: &str, _port: u16, _net_fingerprint: u64, _h3_won: bool) {}
 }
 
 /// A store that remembers nothing, for tests and for the `--no-store` path.

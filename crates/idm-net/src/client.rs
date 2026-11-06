@@ -99,6 +99,34 @@ pub struct HttpConfig {
     /// Measurement suggests this, not the initial value, is what actually
     /// lifts single-stream throughput on a high-latency path.
     pub h2_adaptive_window: bool,
+
+    /// Fetch over HTTP/3 rather than over TCP.
+    ///
+    /// Off unless asked for, and the reasons are different from the usual
+    /// caution about new protocols. reqwest's HTTP/3 is behind an unstable
+    /// cfg (see `.cargo/config.toml`), so the surface it rests on may change
+    /// in a patch release. And a client built this way is HTTP/3 *only* --
+    /// reqwest offers prior-knowledge h3, not negotiation -- so a host that
+    /// does not speak it fails rather than falling back, which is why the
+    /// decision is made per host by racing the two and remembering what won
+    /// rather than by switching this on globally and hoping.
+    pub http3: bool,
+    /// The h3 equivalents of the h2 windows above, and they matter for the
+    /// same reason: a default per-stream window measured in tens of
+    /// kilobytes caps a single stream well below link rate on any path with
+    /// real latency. QUIC has both a stream window and a connection window,
+    /// the same two-level shape as h2.
+    pub h3_stream_window: u64,
+    pub h3_connection_window: u64,
+    pub h3_send_window: u64,
+    /// Use BBR instead of QUIC's default CUBIC.
+    ///
+    /// Bulk transfer over a link with any loss on it is the case BBR was
+    /// built for, and it is the case this program is for. CUBIC reads loss
+    /// as congestion, which on a lossy-but-fast path means repeatedly
+    /// halving a window that was not too large.
+    pub h3_congestion_bbr: bool,
+
     pub pool_idle_timeout: Duration,
     pub proxy: ProxyMode,
     /// A saved password for this host, and what it has learned about how
@@ -131,6 +159,14 @@ impl Default for HttpConfig {
             h2_max_frame_size: 1 << 18,
             h2_keep_alive: Duration::from_secs(20),
             h2_adaptive_window: true,
+            http3: false,
+            // Matched to the h2 figures above rather than chosen separately:
+            // the bandwidth-delay product a window has to cover does not
+            // depend on which transport carries it.
+            h3_stream_window: 8 << 20,
+            h3_connection_window: 32 << 20,
+            h3_send_window: 8 << 20,
+            h3_congestion_bbr: true,
             pool_idle_timeout: Duration::from_secs(90),
             proxy: ProxyMode::default(),
             auth: None,
@@ -158,6 +194,38 @@ pub enum ClientError {
         #[source]
         source: reqwest::Error,
     },
+}
+
+/// Tags a request with HTTP/3 when that is what this download should use.
+///
+/// This, and not anything on the client builder, is what actually puts a
+/// request on QUIC -- which took measuring to establish, because reqwest's
+/// `ClientBuilder::http3_prior_knowledge` is documented as "Only use
+/// HTTP/3" and does nothing of the kind. Measured against a host
+/// advertising `alt-svc: h3=":443"`:
+///
+/// | Client | Response |
+/// |---|---|
+/// | plain | HTTP/2.0 |
+/// | `http3_prior_knowledge` | **HTTP/1.1** |
+/// | `http3_prior_knowledge` + `no_proxy` | **HTTP/1.1** |
+/// | `.version(HTTP_3)` on the request | HTTP/3.0 |
+///
+/// So the builder flag is worse than useless on its own: it drops h2 from
+/// the ALPN list without routing anything to QUIC, and leaves the request
+/// on HTTP/1.1 -- a downgrade, obtained by asking for an upgrade. The
+/// request-level version works with the ordinary client, the system proxy
+/// still set, and no prior-knowledge flag at all.
+///
+/// That it works on the ordinary client is what makes the rest simple:
+/// there is no separate HTTP/3 client, no second lane pool, and falling
+/// back is just the same request without this call.
+///
+/// `crates/idm-net/src/bin/h3-probe.rs` is the diagnostic that produced
+/// the table, kept so the next person can re-run it rather than re-reason
+/// about it.
+pub fn request_version(request: reqwest::RequestBuilder, http3: bool) -> reqwest::RequestBuilder {
+    if http3 { request.version(reqwest::Version::HTTP_3) } else { request }
 }
 
 /// What a lane's requests are for, which determines redirect handling.
@@ -195,6 +263,19 @@ fn base_builder(config: &HttpConfig, role: Role) -> Result<ClientBuilder, Client
         .pool_max_idle_per_host(config.streams_per_lane)
         .connect_timeout(config.connect_timeout)
         .timeout(config.request_timeout);
+
+    // QUIC tuning, applied always rather than only when HTTP/3 is wanted.
+    //
+    // These configure an endpoint that is simply unused by a request that
+    // does not ask for HTTP/3, so there is nothing to gate: one client
+    // serves both transports, and which one a request takes is decided per
+    // request. See `request_version`, which is where the deciding happens
+    // and which documents why it is not done here.
+    let builder = builder
+        .http3_stream_receive_window(config.h3_stream_window)
+        .http3_conn_receive_window(config.h3_connection_window)
+        .http3_send_window(config.h3_send_window);
+    let builder = if config.h3_congestion_bbr { builder.http3_congestion_bbr() } else { builder };
 
     let builder = match role {
         // Follow redirects once, to learn where the file really lives.

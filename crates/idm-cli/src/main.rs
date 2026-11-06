@@ -19,7 +19,7 @@ mod install;
 use clap::Parser;
 use idm_core::sched::ProfileStore;
 use idm_net::download::{
-    DownloadConfig, DownloadReport, ErrorKind, Progress, download_with_progress,
+    DownloadConfig, DownloadReport, ErrorKind, Http3, Progress, download_with_progress,
 };
 
 /// Printed under `--help`, because an exit code nobody can look up is the
@@ -184,6 +184,19 @@ struct Args {
     /// Don't pin lanes to distinct resolved addresses.
     #[arg(long)]
     no_edge_pinning: bool,
+
+    /// Fetch over HTTP/3 instead of racing it against TCP.
+    ///
+    /// Insisting rather than preferring: a host that does not speak HTTP/3
+    /// fails instead of falling back, because reqwest's h3 client has no
+    /// negotiation in it. Without this flag HTTP/3 is tried against TCP on
+    /// first contact with a host and whichever answers first is remembered.
+    #[arg(long)]
+    http3: bool,
+
+    /// Never use HTTP/3, not even if it would win the race.
+    #[arg(long, conflicts_with = "http3")]
+    no_http3: bool,
 
     /// Another address serving the same file, to fetch from at the same
     /// time. Repeatable.
@@ -411,6 +424,14 @@ async fn main() -> std::process::ExitCode {
         config.http.h2_connection_window = window.saturating_mul(4).max(window);
     }
     config.pin_edges = !args.no_edge_pinning;
+    config.http.http3 = args.http3;
+    config.http3 = if args.http3 {
+        Http3::Insist
+    } else if args.no_http3 {
+        Http3::Never
+    } else {
+        Http3::Race
+    };
     config.mirrors = args.mirrors.clone();
     config.referrer = args.referrer.clone();
     config.cookies = args.cookies.clone();

@@ -129,6 +129,38 @@ const MIGRATIONS: &[&str] = &[
         created_at_ms INTEGER NOT NULL
     ) STRICT;
     "#,
+    // v6 -- which transport a host answered on, so HTTP/3 is not re-raced
+    // against every host on every download.
+    //
+    // Its own table rather than a column on `host_profiles`, and the reason
+    // is the shape of the fact rather than tidiness. A host profile is keyed
+    // by `(host, port, alpn)` because the right connection count differs
+    // sharply between protocols -- sixteen HTTP/1.1 connections are sixteen
+    // congestion windows, sixteen h2 streams are one. "Does this host speak
+    // HTTP/3" is not a fact about a protocol, it is the fact that *chooses*
+    // the protocol, so keying it by the answer would be circular: the
+    // lookup has to happen before anything has been negotiated.
+    //
+    // It also must not be gated on the same conditions. A host profile is
+    // only written once the connection ramp has settled, because an
+    // unsettled count was never measured and would mislead the next
+    // download. A race result is valid the moment it finishes, settled or
+    // not, and tying the two together meant every download short enough not
+    // to settle -- which is most of them -- threw the answer away.
+    //
+    // `h3_won_race` is dropped from `host_profiles` in the same step rather
+    // than left behind, so there is one home for this and not two.
+    r#"
+    CREATE TABLE host_transport (
+        host            TEXT NOT NULL,
+        port            INTEGER NOT NULL,
+        net_fingerprint INTEGER NOT NULL,
+        h3_won          INTEGER NOT NULL,
+        updated_at_ms   INTEGER NOT NULL,
+        PRIMARY KEY (host, port, net_fingerprint)
+    ) STRICT;
+    ALTER TABLE host_profiles DROP COLUMN h3_won_race;
+    "#,
 ];
 
 pub const LATEST: u32 = MIGRATIONS.len() as u32;
@@ -196,10 +228,14 @@ mod tests {
             for column in ["needs_browser_auth", "error_kind", "error_summary", "mirrors"] {
                 conn.execute(&format!("ALTER TABLE jobs DROP COLUMN {column}"), []).unwrap();
             }
-            // A table added since v1 has to go as well, for the same
-            // reason: replaying the migration that creates it would find
+            // Tables added since v1 have to go as well, for the same
+            // reason: replaying the migration that creates one would find
             // it already there.
             conn.execute("DROP TABLE bandwidth_rules", []).unwrap();
+            conn.execute("DROP TABLE host_transport", []).unwrap();
+            // And a column a later migration *removes* has to come back,
+            // or replaying that migration drops something absent.
+            conn.execute("ALTER TABLE host_profiles ADD COLUMN h3_won_race INTEGER", []).unwrap();
             conn.pragma_update(None, "user_version", 1).unwrap();
             conn.execute(
                 "INSERT INTO jobs (url, filename, output_dir, state, created_at_ms, updated_at_ms)

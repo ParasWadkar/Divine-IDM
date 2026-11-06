@@ -55,6 +55,9 @@ pub struct FetchConfig {
     /// download, not per range, and because the Digest nonce count inside
     /// it must be one counter across all of them.
     pub auth: Option<std::sync::Arc<crate::auth::AuthState>>,
+    /// Fetch segments over HTTP/3. Set from what the probe ended up on, so
+    /// the segments follow the transport that actually answered.
+    pub http3: bool,
 }
 
 impl Default for FetchConfig {
@@ -64,6 +67,7 @@ impl Default for FetchConfig {
             partial_flush_after: DEFAULT_PARTIAL_FLUSH,
             limiter: None,
             auth: None,
+            http3: false,
         }
     }
 }
@@ -156,7 +160,10 @@ pub async fn fetch_claim(
         })));
     }
 
-    let mut builder = lane.client().get(request.url).header(RANGE, wanted.to_range_header()?);
+    let mut builder = crate::client::request_version(
+        lane.client().get(request.url).header(RANGE, wanted.to_range_header()?),
+        config.http3,
+    );
     if let Some(etag) = request.if_match {
         builder = builder.header(IF_MATCH, etag);
     }

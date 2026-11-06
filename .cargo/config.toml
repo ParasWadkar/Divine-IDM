@@ -1,0 +1,21 @@
+# Build settings for the whole workspace.
+#
+# `reqwest_unstable` is what reqwest demands before it will compile its
+# HTTP/3 support, and it is not a formality: with the `http3` feature on,
+# reqwest's own `lib.rs` refuses to build without this cfg, and the crate
+# says of those features that "details about them may be changed in patch
+# releases". So `cargo update` can break this build in a way a stable
+# dependency could not.
+#
+# That cost is accepted here rather than hidden, for two reasons. HTTP/3 is
+# worth having for a downloader -- a lossy or high-latency link is exactly
+# where QUIC's lack of head-of-line blocking across streams tells, and that
+# is the link people actually download over. And the cost is bounded: the
+# cfg only changes what reqwest compiles, nothing of ours reads it, so the
+# failure mode is a build error naming reqwest rather than our own code
+# quietly behaving differently.
+#
+# Using HTTP/3 is still off at runtime unless somebody asks for it. See
+# `HttpConfig::http3`.
+[build]
+rustflags = ["--cfg", "reqwest_unstable"]

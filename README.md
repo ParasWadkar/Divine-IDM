@@ -82,6 +82,15 @@ an extension you have not approved.
   after an hour or two. Click **New link** on the stopped download, paste a
   fresh address for the same file, and it carries on from where it was
   instead of starting again.
+- **HTTP/3.** Used automatically where it helps, with nothing to switch on.
+  The first time DivinePulse fetches from a host over `https` it asks over
+  HTTP/3 and over TCP at the same time, keeps whichever answers first, and
+  remembers the answer for that host on that network — so later downloads
+  go straight there. QUIC matters most on the links people actually download
+  over: one with latency or a little packet loss, where a stall on one
+  stream no longer holds up the others. `idm --http3` insists on it and
+  `idm --no-http3` refuses it, if you want to see the difference for
+  yourself.
 - **Driving it from something else.** Two ways, both off until you switch
   them on in Settings.
 

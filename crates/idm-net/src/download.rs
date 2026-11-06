@@ -132,6 +132,9 @@ pub struct DownloadConfig {
     /// shape comes from the table in [`lane_topology`] as it always did.
     /// See [`crate::topology`] for why the measuring is so cautious.
     pub learn_topology: bool,
+
+    /// Whether to fetch over HTTP/3, and who decides.
+    pub http3: Http3,
 }
 
 impl DownloadConfig {
@@ -187,6 +190,7 @@ impl DownloadConfig {
             profiles: None,
             notes: None,
             learn_topology: false,
+            http3: Http3::default(),
         }
     }
 }
@@ -445,6 +449,114 @@ pub struct Target {
 /// Deliberately not a HEAD: HEAD is answered from a different cache tier,
 /// returns 405 on some origins, is rejected by some signed URLs, and can report
 /// a `Content-Length` that disagrees with the GET that follows.
+/// Whether to fetch over HTTP/3, and who decides.
+///
+/// reqwest's HTTP/3 client has no negotiation in it: it is prior-knowledge
+/// h3, so a client built for h3 cannot fall back to TCP on a host that does
+/// not speak it. There is no Alt-Svc cache to lean on either. That leaves
+/// the choice to us, and the only honest way to make it is to find out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Http3 {
+    /// Race HTTP/3 against TCP on first contact with a host, use whichever
+    /// answers first, and remember it. The default.
+    #[default]
+    Race,
+    /// Never, whatever a race would have said.
+    Never,
+    /// Always, and fail rather than fall back.
+    Insist,
+}
+
+/// Whether this host has already shown what it does about HTTP/3.
+///
+/// The host comes from the address the user gave rather than the resolved
+/// one, since the choice has to be made before anything is resolved. A
+/// redirect to another host therefore inherits this host's answer for one
+/// download, and what gets recorded afterwards is what the race produced.
+fn remembered_h3_preference(config: &DownloadConfig) -> Option<bool> {
+    let store = config.profiles.as_ref()?;
+    let (host, port) = host_and_port(&config.url)?;
+    store.h3_preference(&host, port, idm_core::win::network::net_fingerprint())
+}
+
+/// Host and port of an address, before anything has been resolved.
+fn host_and_port(url: &str) -> Option<(String, u16)> {
+    let parsed = crate::Url::parse(url).ok()?;
+    Some((parsed.host_str()?.to_owned(), parsed.port_or_known_default()?))
+}
+
+/// Probes over whichever transport this host should use, racing to find out
+/// when nothing is known yet.
+///
+/// Returns the target and what should be written into the host's profile:
+/// `Some(true)` if HTTP/3 answered first, `Some(false)` if TCP did, and
+/// `None` when nothing was raced and so nothing was learned.
+///
+/// The race is two probes, not two code paths: the same [`probe`] runs
+/// twice over configs that differ in one field, so redirects, authentication
+/// and every fact read off the response behave identically whichever wins.
+/// It costs one extra probe request against a host never seen before, which
+/// buys the answer with no added latency -- the alternative, trying h3 and
+/// falling back, pays a full timeout every time h3 is absent, on the
+/// commoner outcome.
+async fn probe_over_best_transport(
+    config: &DownloadConfig,
+    remembered: Option<bool>,
+) -> Result<(Target, Option<bool>), DownloadError> {
+    let with_h3 = |yes: bool| {
+        let mut copy = config.clone();
+        copy.http.http3 = yes;
+        copy
+    };
+
+    // QUIC runs over TLS and nothing else, so HTTP/3 cannot win against a
+    // plaintext address however the host is configured. Racing it there
+    // would spend a request to be told what the scheme already says.
+    let could_be_h3 = config.url.starts_with("https://");
+
+    match config.http3 {
+        _ if !could_be_h3 => Ok((probe(&with_h3(false)).await?, None)),
+        Http3::Never => Ok((probe(&with_h3(false)).await?, None)),
+        // Insisting is a statement, not a measurement, so it teaches the
+        // profile nothing.
+        Http3::Insist => Ok((probe(&with_h3(true)).await?, None)),
+        Http3::Race => match remembered {
+            // Already known. A profile is only trusted on the network it was
+            // learned on and for a week, so this is not a permanent verdict.
+            Some(known) => Ok((probe(&with_h3(known)).await?, None)),
+            None => {
+                let mut racers = tokio::task::JoinSet::new();
+                let h3 = with_h3(true);
+                let tcp = with_h3(false);
+                racers.spawn(async move { (true, probe(&h3).await) });
+                racers.spawn(async move { (false, probe(&tcp).await) });
+
+                // First *success* wins, not first to finish: h3 failing fast
+                // against a host that has never heard of it is the expected
+                // case, and must not lose the race for TCP.
+                let mut last_failure = None;
+                while let Some(joined) = racers.join_next().await {
+                    let (was_h3, result) = joined.expect("probe task panicked");
+                    match result {
+                        Ok(target) => {
+                            racers.abort_all();
+                            if std::env::var_os("IDM_TRACE_PHASES").is_some() {
+                                eprintln!(
+                                    "phase            transport race won by {}",
+                                    if was_h3 { "HTTP/3" } else { "TCP" }
+                                );
+                            }
+                            return Ok((target, Some(was_h3)));
+                        }
+                        Err(failure) => last_failure = Some(failure),
+                    }
+                }
+                Err(last_failure.expect("a race with no result and no failure"))
+            }
+        },
+    }
+}
+
 pub async fn probe(config: &DownloadConfig) -> Result<Target, DownloadError> {
     let trace = std::env::var_os("IDM_TRACE_PHASES").is_some();
     let began = Instant::now();
@@ -457,7 +569,10 @@ pub async fn probe(config: &DownloadConfig) -> Result<Target, DownloadError> {
     }
     let requested = ByteRange::try_new(0, PROBE_BYTES)?;
 
-    let mut request = resolver.get(&config.url).header(RANGE, requested.to_range_header()?);
+    let mut request = crate::client::request_version(
+        resolver.get(&config.url).header(RANGE, requested.to_range_header()?),
+        config.http.http3,
+    );
     if let Some(referrer) = &config.referrer {
         request = request.header(reqwest::header::REFERER, referrer);
     }
@@ -608,8 +723,27 @@ pub async fn download_with_progress<F: FnMut(Progress)>(
         }
     };
 
-    let target = probe(config).await?;
+    // What this machine already knows about whether this host speaks HTTP/3,
+    // looked up before the probe because the probe is the thing that has to
+    // choose a transport.
+    let remembered_h3 = remembered_h3_preference(config);
+    let (target, h3_raced) = probe_over_best_transport(config, remembered_h3).await?;
     phase("probed");
+
+    // Written here rather than with the host profile at the end, and not
+    // gated on anything. A connection count is only worth keeping once the
+    // ramp has settled, so that write sits behind several conditions and is
+    // skipped by most downloads -- which is exactly how the first version of
+    // this threw every race result away. A race result is valid the moment
+    // the race finishes, whatever happens to the download afterwards.
+    if let (Some(won), Some(store)) = (h3_raced, config.profiles.as_ref())
+        && let Some((host, port)) = host_and_port(&config.url)
+    {
+        let fingerprint = idm_core::win::network::net_fingerprint();
+        if fingerprint != 0 {
+            store.save_h3_preference(&host, port, fingerprint, won);
+        }
+    }
 
     std::fs::create_dir_all(&config.output_dir)?;
     let final_path = config.output_dir.join(&target.filename);
@@ -748,6 +882,14 @@ pub async fn download_with_progress<F: FnMut(Progress)>(
     let (lane_count, streams) = (shape.lanes, shape.streams);
     let mut http = config.http.clone();
     http.streams_per_lane = streams;
+    // The lanes fetch over whatever the probe ended up on. Reading it off
+    // the response rather than off the request is the point: a race was
+    // won by one of them, and this is the one that answered.
+    http.http3 = target.http_version.starts_with("HTTP/3");
+    // And the segment requests too: the transport is chosen per request, so
+    // a lane pool that could do either still has to be told which.
+    let mut fetch_config = config.fetch.clone();
+    fetch_config.http3 = http.http3;
 
     // Edge pinning is dropped under a proxy we were told to use. Pinning
     // works by overriding this client's own DNS, and through a proxy the
@@ -891,7 +1033,7 @@ pub async fn download_with_progress<F: FnMut(Progress)>(
             let sources = Arc::clone(&sources);
             let referrer = config.referrer.clone();
             let cookies = config.cookies.clone();
-            let fetch_config = config.fetch.clone();
+            let fetch_config = fetch_config.clone();
             stats.requests += 1;
             tracing::debug!(%id, ?range, kind, "issuing claim");
 
@@ -1424,6 +1566,37 @@ fn checkpoint(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_plaintext_address_is_never_raced_for_http3() {
+        // QUIC runs over TLS and nothing else, so the scheme settles this
+        // without spending a request to find out.
+        for (url, could) in [
+            ("https://example.invalid/a.bin", true),
+            ("http://example.invalid/a.bin", false),
+            ("ftp://example.invalid/a.bin", false),
+        ] {
+            assert_eq!(url.starts_with("https://"), could, "{url}");
+        }
+    }
+
+    #[test]
+    fn host_and_port_are_read_before_anything_is_resolved() {
+        // The transport decision has to be made before the probe, so this
+        // reads the address the user gave rather than a resolved one.
+        assert_eq!(
+            host_and_port("https://cdn.example/a.bin"),
+            Some(("cdn.example".to_owned(), 443))
+        );
+        assert_eq!(host_and_port("http://cdn.example/a.bin"), Some(("cdn.example".to_owned(), 80)));
+        assert_eq!(
+            host_and_port("https://cdn.example:8443/a.bin"),
+            Some(("cdn.example".to_owned(), 8443))
+        );
+        // Nothing to key a transport answer to.
+        assert_eq!(host_and_port("file:///C:/x.bin"), None);
+        assert_eq!(host_and_port("not a url"), None);
+    }
+
     use super::*;
 
     #[test]

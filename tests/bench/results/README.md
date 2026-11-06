@@ -363,10 +363,28 @@ What is actually missing, in the order it would be worth doing:
    detection, which is a decision to take deliberately rather than slide
    into: a configurable User-Agent, which already exists here, covers the
    ordinary cases.
-3. **HTTP/3.** `reqwest`'s support is behind both an `http3` feature and
-   `RUSTFLAGS="--cfg reqwest_unstable"`, so taking it means the build
-   depends on an unstable cfg. `HostProfile::h3_won_race` was designed for
-   this and is still unused.
+3. ~~**HTTP/3.**~~ Done, and the documentation was wrong in a way only
+   measuring caught. `reqwest`'s support is behind an `http3` feature *and*
+   `RUSTFLAGS="--cfg reqwest_unstable"`, which is accepted in
+   `.cargo/config.toml` and noted there. But `ClientBuilder::
+   http3_prior_knowledge`, documented as "Only use HTTP/3", does nothing of
+   the kind. Measured against a host advertising `alt-svc: h3=":443"`:
+
+   | Client | Response |
+   |---|---|
+   | plain | HTTP/2.0 |
+   | `http3_prior_knowledge` | **HTTP/1.1** |
+   | `http3_prior_knowledge` + `no_proxy` | **HTTP/1.1** |
+   | `.version(HTTP_3)` on the request | HTTP/3.0 |
+
+   The builder flag drops h2 from the ALPN list without routing anything to
+   QUIC, so asking for HTTP/3 that way is a downgrade to HTTP/1.1. Shipping
+   it would have been a regression advertised as a feature, on a path no
+   loopback benchmark can see. What works is the request-level version, on
+   the ordinary client with the system proxy still set --- which is also
+   simpler, since one client serves both transports and falling back is just
+   the same request without the tag. `crates/idm-net/src/bin/h3-probe.rs` is
+   the diagnostic that produced the table.
 4. **Site parsers.** YouTube and Bilibili with quality, subtitle and
    playlist selection; GitHub and HuggingFace mirror acceleration. ghd also
    just accepts yt-dlp tasks, which is the cheap version of most of this.

@@ -18,7 +18,7 @@ impl Store {
     pub fn host_profile(&self, key: &HostKey, net_fingerprint: u64) -> Result<Option<HostProfile>> {
         let conn = self.conn();
         let mut statement = conn.prepare_cached(
-            "SELECT best_conn_count, conn_ceiling, multiplexing_helped, h3_won_race, updated_at_ms
+            "SELECT best_conn_count, conn_ceiling, multiplexing_helped, updated_at_ms
                FROM host_profiles
               WHERE host = ?1 AND port = ?2 AND alpn = ?3 AND net_fingerprint = ?4",
         )?;
@@ -29,9 +29,8 @@ impl Store {
                     best_conn_count: row.get::<_, i64>(0)? as u32,
                     conn_ceiling: row.get::<_, i64>(1)? as u32,
                     multiplexing_helped: row.get::<_, i64>(2)? != 0,
-                    h3_won_race: row.get::<_, Option<i64>>(3)?.map(|v| v != 0),
                     net_fingerprint,
-                    updated_at_ms: row.get::<_, i64>(4)? as u64,
+                    updated_at_ms: row.get::<_, i64>(3)? as u64,
                 })
             })
             .optional()?;
@@ -52,15 +51,12 @@ impl Store {
         conn.prepare_cached(
             "INSERT INTO host_profiles
                  (host, port, alpn, net_fingerprint, best_conn_count, conn_ceiling,
-                  multiplexing_helped, h3_won_race, updated_at_ms)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                  multiplexing_helped, updated_at_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
              ON CONFLICT(host, port, alpn, net_fingerprint) DO UPDATE SET
                  best_conn_count     = excluded.best_conn_count,
                  conn_ceiling        = excluded.conn_ceiling,
                  multiplexing_helped = excluded.multiplexing_helped,
-                 -- A run that never raced h3 knows nothing about it, and must
-                 -- not erase the answer from a run that did.
-                 h3_won_race         = COALESCE(excluded.h3_won_race, h3_won_race),
                  updated_at_ms       = excluded.updated_at_ms",
         )?
         .execute(params![
@@ -71,8 +67,73 @@ impl Store {
             profile.best_conn_count as i64,
             profile.conn_ceiling as i64,
             profile.multiplexing_helped as i64,
-            profile.h3_won_race.map(|won| won as i64),
             profile.updated_at_ms as i64,
+        ])?;
+        Ok(())
+    }
+
+    /// Whether HTTP/3 beat TCP to this host on this network, if it has been
+    /// tried.
+    ///
+    /// Keyed by host and port with no protocol in the key, because this is
+    /// the fact that decides the protocol: keying it by the answer would
+    /// mean needing the answer to look it up. Stored apart from
+    /// [`Store::host_profile`] for the same reason it is not gated like one
+    /// -- a race result is valid as soon as it finishes, while a connection
+    /// count is only valid once the ramp has settled.
+    pub fn host_prefers_h3(
+        &self,
+        host: &str,
+        port: u16,
+        net_fingerprint: u64,
+    ) -> Result<Option<bool>> {
+        let conn = self.conn();
+        let found = conn
+            .prepare_cached(
+                "SELECT h3_won FROM host_transport
+                  WHERE host = ?1 AND port = ?2 AND net_fingerprint = ?3",
+            )?
+            .query_row(params![host.to_lowercase(), port, net_fingerprint as i64], |row| {
+                Ok(row.get::<_, i64>(0)? != 0)
+            })
+            .optional()?;
+        Ok(found)
+    }
+
+    /// Records which transport won, replacing any earlier answer.
+    ///
+    /// Replacing rather than preserving, unlike a connection count: a host
+    /// that has stopped offering HTTP/3, or started, should be believed the
+    /// next time it is raced rather than held to what it did last month.
+    pub fn save_host_transport(
+        &self,
+        host: &str,
+        port: u16,
+        net_fingerprint: u64,
+        h3_won: bool,
+        now_ms: u64,
+    ) -> Result<()> {
+        if net_fingerprint == 0 {
+            // Zero means "could not tell which network this is", and a row
+            // keyed to nothing would be matched by every later unknown.
+            return Err(StoreError::Invalid(
+                "a transport answer keyed to an unknown network is not worth keeping".into(),
+            ));
+        }
+        let conn = self.conn();
+        conn.prepare_cached(
+            "INSERT INTO host_transport (host, port, net_fingerprint, h3_won, updated_at_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(host, port, net_fingerprint) DO UPDATE SET
+                 h3_won        = excluded.h3_won,
+                 updated_at_ms = excluded.updated_at_ms",
+        )?
+        .execute(params![
+            host.to_lowercase(),
+            port,
+            net_fingerprint as i64,
+            h3_won as i64,
+            now_ms as i64
         ])?;
         Ok(())
     }
@@ -123,6 +184,17 @@ impl ProfileStore for Store {
             tracing::warn!(%error, host = %key.host, "could not save the host profile");
         }
     }
+    fn h3_preference(&self, host: &str, port: u16, net_fingerprint: u64) -> Option<bool> {
+        self.host_prefers_h3(host, port, net_fingerprint).ok().flatten()
+    }
+
+    fn save_h3_preference(&self, host: &str, port: u16, net_fingerprint: u64, h3_won: bool) {
+        if let Err(error) =
+            self.save_host_transport(host, port, net_fingerprint, h3_won, crate::now_ms())
+        {
+            tracing::debug!(%error, host, "could not record which transport won");
+        }
+    }
 }
 
 #[cfg(test)]
@@ -134,7 +206,6 @@ mod tests {
             best_conn_count: connections,
             conn_ceiling: connections + 2,
             multiplexing_helped: false,
-            h3_won_race: None,
             net_fingerprint: fingerprint,
             updated_at_ms: 1_000,
         }
@@ -212,20 +283,53 @@ mod tests {
     }
 
     #[test]
-    fn a_run_that_did_not_race_h3_does_not_erase_the_answer() {
+    fn the_transport_answer_outlives_a_download_that_learned_no_count() {
+        // The bug this table exists to fix. The answer used to live on the
+        // host profile, which is only written once the connection ramp has
+        // settled -- so every download short enough not to settle raced
+        // HTTP/3, found out, and threw the answer away.
         let store = Store::in_memory().unwrap();
-        let key = HostKey::new("cdn.example", 443, "h2");
+        store.save_host_transport("cdn.example", 443, 1, true, 1_000).unwrap();
+        assert_eq!(store.host_prefers_h3("cdn.example", 443, 1).unwrap(), Some(true));
+        // And no host profile was written at all.
+        assert_eq!(store.host_profile_count().unwrap(), 0);
+    }
 
-        let mut raced = profile(8, 1);
-        raced.h3_won_race = Some(true);
-        store.save_host_profile(&key, &raced).unwrap();
+    #[test]
+    fn a_later_race_replaces_an_earlier_answer() {
+        // Unlike a connection count, which is preserved when a later run
+        // learned nothing: a host that has stopped offering HTTP/3, or
+        // started, should be believed rather than held to last month.
+        let store = Store::in_memory().unwrap();
+        store.save_host_transport("cdn.example", 443, 1, true, 1_000).unwrap();
+        store.save_host_transport("cdn.example", 443, 1, false, 2_000).unwrap();
+        assert_eq!(store.host_prefers_h3("cdn.example", 443, 1).unwrap(), Some(false));
+    }
 
-        // A later download with h3 disabled knows nothing about it.
-        store.save_host_profile(&key, &profile(10, 1)).unwrap();
+    #[test]
+    fn the_transport_answer_is_per_network_and_per_port() {
+        // A CDN reachable over HTTP/3 from home and not from a hotel is the
+        // ordinary case, and the fingerprint is what keeps the two apart.
+        let store = Store::in_memory().unwrap();
+        store.save_host_transport("cdn.example", 443, 1, true, 1_000).unwrap();
+        assert_eq!(store.host_prefers_h3("cdn.example", 443, 2).unwrap(), None);
+        assert_eq!(store.host_prefers_h3("cdn.example", 8443, 1).unwrap(), None);
+        assert_eq!(store.host_prefers_h3("other.example", 443, 1).unwrap(), None);
+    }
 
-        let loaded = store.host_profile(&key, 1).unwrap().unwrap();
-        assert_eq!(loaded.best_conn_count, 10, "the fresh measurement should win");
-        assert_eq!(loaded.h3_won_race, Some(true), "the older answer should survive");
+    #[test]
+    fn a_transport_answer_keyed_to_an_unknown_network_is_refused() {
+        // Zero means "could not tell which network this is", and a row
+        // keyed to nothing would be matched by every later unknown.
+        let store = Store::in_memory().unwrap();
+        assert!(store.save_host_transport("cdn.example", 443, 0, true, 1_000).is_err());
+    }
+
+    #[test]
+    fn the_transport_host_is_matched_without_regard_to_case() {
+        let store = Store::in_memory().unwrap();
+        store.save_host_transport("CDN.Example", 443, 1, true, 1_000).unwrap();
+        assert_eq!(store.host_prefers_h3("cdn.example", 443, 1).unwrap(), Some(true));
     }
 
     #[test]

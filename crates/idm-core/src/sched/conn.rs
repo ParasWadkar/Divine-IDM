@@ -37,7 +37,6 @@ pub struct HostProfile {
     /// Did extra streams on one connection actually add throughput? If not,
     /// this origin needs separate connections rather than more streams.
     pub multiplexing_helped: bool,
-    pub h3_won_race: Option<bool>,
     /// Gateway MAC plus interface, so a profile learned on one network is not
     /// trusted on another.
     pub net_fingerprint: u64,
@@ -619,7 +618,6 @@ impl ConnController {
             best_conn_count: self.best().1,
             conn_ceiling: self.ceiling,
             multiplexing_helped,
-            h3_won_race: None,
             net_fingerprint: fingerprint,
             updated_at_ms: now_ms,
         }
@@ -1101,7 +1099,6 @@ mod tests {
             best_conn_count: 12,
             conn_ceiling: 14,
             multiplexing_helped: false,
-            h3_won_race: None,
             net_fingerprint: FINGERPRINT,
             updated_at_ms: now - 1000,
         };
@@ -1118,7 +1115,6 @@ mod tests {
             best_conn_count: 12,
             conn_ceiling: 14,
             multiplexing_helped: false,
-            h3_won_race: None,
             net_fingerprint: FINGERPRINT,
             updated_at_ms: now - 1000,
         };
@@ -1137,7 +1133,6 @@ mod tests {
             best_conn_count: 12,
             conn_ceiling: 14,
             multiplexing_helped: false,
-            h3_won_race: None,
             net_fingerprint: FINGERPRINT,
             updated_at_ms: now - PROFILE_MAX_AGE_MS - 1,
         };
