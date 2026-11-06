@@ -255,20 +255,39 @@ pub struct ConnController {
     baseline_per_conn_bps: f64,
     quiet_until_ms: u64,
     next_decision_ms: u64,
-    /// The best aggregate rate seen, and the count that produced it.
+    /// The best aggregate rate measured at each connection count, indexed by
+    /// the count itself. Index zero is never written and never matches.
     ///
-    /// Climbing is cheap to undo and expensive to get wrong, so the ramp
-    /// remembers where it was happiest rather than only where it stopped.
-    /// Without this, settling means keeping every connection the climb
-    /// added, including the ones that measurably made things worse.
-    best_bps: f64,
-    best_at: u32,
+    /// A single high-water mark was not enough, and the reason is worth
+    /// keeping: it can only ever name a count the ramp actually stood on
+    /// while climbing, and it updates only on a *better* reading. On a
+    /// shared token bucket every count from the knee upwards reads the
+    /// *same* rate, so "better" never fires and the mark stays wherever the
+    /// climb happened to stop. A table can say something the mark cannot —
+    /// that two counts were equally fast — which is the fact that makes
+    /// coming back down possible.
+    seen: Vec<f64>,
+    /// Walking back down, one count per window, to find where the rate stops
+    /// holding. See [`ConnController::step_down`].
+    descending: bool,
 }
+
+/// The descent stops here rather than at one.
+///
+/// A single connection is the thing this program exists to beat, and it is
+/// slower for a reason the controller cannot measure away: one stream's
+/// in-flight bytes are capped by its congestion window, so on any path with
+/// real latency it leaves a shared bucket under-drawn where two streams fill
+/// it. Measured on an 8 MB/s bucket at 30 ms: one connection 5.0 MB/s, two
+/// 8.36. Probing one would cost a window at two-thirds of the rate to learn
+/// something already known.
+const DESCENT_FLOOR: u32 = 2;
 
 impl ConnController {
     pub fn new(policy: ConnPolicy, now_ms: u64) -> Self {
         let start = policy.start.min(policy.per_host_max);
         let ceiling = policy.per_host_max;
+        let policy_max = policy.per_host_max;
         Self {
             policy,
             current: start,
@@ -281,8 +300,8 @@ impl ConnController {
             baseline_per_conn_bps: 0.0,
             quiet_until_ms: 0,
             next_decision_ms: now_ms,
-            best_bps: 0.0,
-            best_at: start,
+            seen: vec![0.0; policy_max as usize + 1],
+            descending: false,
         }
     }
 
@@ -328,6 +347,7 @@ impl ConnController {
     pub fn allow_one_probe(&mut self, now_ms: u64) {
         self.settled = None;
         self.weak_gains = 0;
+        self.descending = false;
         self.next_decision_ms = now_ms;
     }
 
@@ -357,6 +377,10 @@ impl ConnController {
             self.current = reduced.min(self.ceiling);
             self.weak_gains = 0;
             self.settled = None;
+            // A throttle outranks the search for a cheaper count: the server
+            // has just said this many is too many, which is a stronger
+            // statement than anything the descent was about to measure.
+            self.descending = false;
             self.ever_throttled = true;
             self.quiet_until_ms = now_ms + self.policy.throttle_quiet.as_millis() as u64;
             self.next_decision_ms = self.quiet_until_ms;
@@ -367,14 +391,26 @@ impl ConnController {
         // Noted on every window, including the ones too early to act on:
         // the measurement belongs to the count that produced it, and that
         // is what makes a later retreat possible.
-        if observation.aggregate_bps > self.best_bps {
-            self.best_bps = observation.aggregate_bps;
-            self.best_at = self.current;
+        if let Some(slot) = self.seen.get_mut(self.current as usize)
+            && observation.aggregate_bps > *slot
+        {
+            *slot = observation.aggregate_bps;
         }
 
         if now_ms < self.quiet_until_ms || now_ms < self.next_decision_ms {
             return ConnDecision::Hold;
         }
+
+        // The descent gets the *steady* interval even though it is not
+        // steady state. A window taken straight after connections close
+        // measures them draining rather than the count that remains, and
+        // judging the new count on the drain was what made an earlier
+        // attempt at this walk straight back up again.
+        if self.descending {
+            self.next_decision_ms = now_ms + self.policy.probe_interval_ms(observation.rtt);
+            return self.step_down();
+        }
+
         if let Some(reason) = self.settled {
             // Settled means settled; only `allow_one_probe` or a throttle
             // moves the count again.
@@ -394,10 +430,10 @@ impl ConnController {
 
         // Signals that mean another connection cannot possibly help.
         if observation.writer_backpressure {
-            return self.settle(SettleReason::DiskBound, observation.aggregate_bps);
+            return self.settle(SettleReason::DiskBound);
         }
         if observation.interarrival_p95_ratio > self.policy.queueing_p95_multiple {
-            return self.settle(SettleReason::Queueing, observation.aggregate_bps);
+            return self.settle(SettleReason::Queueing);
         }
 
         // The first window is only a baseline; there is nothing to compare to.
@@ -420,7 +456,7 @@ impl ConnController {
             if gain < self.policy.flat_gain_frac
                 && observation.per_conn_spread_frac < self.policy.low_variance_frac
             {
-                return self.settle(SettleReason::PerIpShaping, observation.aggregate_bps);
+                return self.settle(SettleReason::PerIpShaping);
             }
 
             // A severe collapse means the connections are fighting rather than
@@ -429,13 +465,13 @@ impl ConnController {
                 let drop = (self.baseline_per_conn_bps - observation.mean_per_conn_bps)
                     / self.baseline_per_conn_bps;
                 if drop > self.policy.per_conn_collapse_frac {
-                    return self.settle(SettleReason::PerConnCollapse, observation.aggregate_bps);
+                    return self.settle(SettleReason::PerConnCollapse);
                 }
             }
 
             self.weak_gains += 1;
             if self.weak_gains >= self.policy.weak_gains_before_settling {
-                return self.settle(SettleReason::DiminishingReturns, observation.aggregate_bps);
+                return self.settle(SettleReason::DiminishingReturns);
             }
             return ConnDecision::Hold;
         }
@@ -477,7 +513,7 @@ impl ConnController {
         if target <= self.current {
             // The one settle with no window of its own: `try_add` is reached
             // only on a gain, so the best is the count we are already at.
-            return self.settle(SettleReason::AtCap, self.best_bps);
+            return self.settle(SettleReason::AtCap);
         }
         self.current = target;
         if fast {
@@ -486,47 +522,86 @@ impl ConnController {
         ConnDecision::Add { to: target }
     }
 
-    fn settle(&mut self, reason: SettleReason, aggregate_bps: f64) -> ConnDecision {
+    /// The best rate recorded at any count, and the **lowest** count that
+    /// came within noise of it.
+    ///
+    /// Lowest, not fastest, and that is the whole point. On a shared token
+    /// bucket the rate is flat across counts, so several counts tie; the
+    /// cheapest of them is the right answer, because every connection above
+    /// it buys nothing and adds one more ragged tail to wait for at the end.
+    /// On an origin that shapes per connection nothing ties, the lowest
+    /// within noise *is* the highest count, and this returns it — which is
+    /// why the descent needs no separate guard to stay away from that case.
+    ///
+    /// The bar is `flat_gain_frac`, the same number the ramp uses to call an
+    /// aggregate unchanged. Using one threshold for both means the
+    /// controller never treats a difference as real on the way down that it
+    /// called noise on the way up.
+    fn best(&self) -> (f64, u32) {
+        let best_bps = self.seen.iter().copied().fold(0.0, f64::max);
+        if best_bps <= 0.0 {
+            return (0.0, self.current);
+        }
+        let bar = best_bps * (1.0 - self.policy.flat_gain_frac);
+        let at = self.seen.iter().position(|&bps| bps >= bar).unwrap_or(self.current as usize);
+        (best_bps, (at as u32).max(1))
+    }
+
+    /// One step of the walk back down, a window apart.
+    ///
+    /// Two moves, in order: drop to any lower count already known to tie
+    /// with the best, and failing that halve into untried ground. When
+    /// neither applies the way down is exhausted and the ramp lands on the
+    /// lowest count within noise.
+    fn step_down(&mut self) -> ConnDecision {
+        let (_, best_at) = self.best();
+
+        if best_at < self.current {
+            self.current = best_at;
+            return ConnDecision::Reduce { to: self.current, ceiling: self.ceiling };
+        }
+
+        let next = (self.current / 2).max(DESCENT_FLOOR);
+        if next < self.current && self.seen.get(next as usize).copied().unwrap_or(0.0) <= 0.0 {
+            self.current = next;
+            return ConnDecision::Reduce { to: self.current, ceiling: self.ceiling };
+        }
+
+        // Nothing lower ties and there is nothing left to try, so the count
+        // below the last one measured came back genuinely worse. That is the
+        // answer the descent was looking for.
+        self.current = best_at;
+        self.descending = false;
+        let reason = self.settled.unwrap_or(SettleReason::DiminishingReturns);
+        ConnDecision::Settle { at: self.current, reason }
+    }
+
+    fn settle(&mut self, reason: SettleReason) -> ConnDecision {
         self.settled = Some(reason);
 
-        // Settling means the climb is over. Keeping connections that were
-        // measured to be worse than a smaller number is never right, and on
-        // a per-IP-shaped origin it is actively expensive: the rate is one
-        // bucket split N ways, so the extra connections buy nothing and the
-        // ragged tail they produce leaves the bucket under-drawn.
+        // Settling means additions have stopped paying. It does not follow
+        // that the count the climb reached is the one to keep: on a per-IP
+        // shaped origin the rate is one bucket split N ways, so the extra
+        // connections buy nothing and the ragged tail they produce leaves
+        // the bucket under-drawn at the end.
         //
         // Measured against a shared 8 MB/s bucket, 128 MiB: two connections
         // 8.36 MB/s, three 8.19, four 7.90, eight 7.55, sixteen 7.64. The
         // controller diagnosed this correctly and then held at sixteen,
         // because settling only ever stopped the climb.
         //
-        // The bar is `flat_gain_frac`, the same number that decides whether
-        // an aggregate counts as unchanged: retreat only when going up cost
-        // more than a difference this module already calls noise.
-        let lost = self.best_bps > 0.0
-            && aggregate_bps < self.best_bps * (1.0 - self.policy.flat_gain_frac);
-        if lost && self.best_at < self.current {
-            self.current = self.best_at;
+        // So if some lower count already tied with the best, step down to it
+        // and keep going rather than committing here — if that count holds
+        // the rate, half of it may too. The ramp opens at eight and never
+        // measures below, so without this walk the peak at two is simply out
+        // of reach.
+        let (best_bps, best_at) = self.best();
+        if best_bps > 0.0 && best_at < self.current {
+            self.current = best_at;
+            self.descending = true;
+            return ConnDecision::Reduce { to: self.current, ceiling: self.ceiling };
         }
 
-        // A downward probe was tried here and taken out again. The ramp
-        // only ever measures counts at or above the one it opens with, so
-        // against a shared bucket the best it can find is the number it
-        // started from -- and the real curve on an 8 MB/s bucket peaks
-        // lower: two connections 8.36 MB/s, four 7.90, eight 7.55.
-        //
-        // Halving and re-measuring did not get there. A window taken right
-        // after connections close measures the drain rather than the new
-        // count, and giving each step a full probe interval fixed that
-        // without changing the outcome: the descent's windows come back
-        // *equal* to the best rather than better, equal never updates the
-        // best, so the probe walks back to where it started. Landing lower
-        // needs the lowest count within noise of the best, which means
-        // per-count bookkeeping rather than one high-water mark.
-        //
-        // Measured over four runs it moved throughput not at all and cost
-        // about 40% more requests, which is the trade this program declines
-        // to make elsewhere. Written down rather than left in.
         ConnDecision::Settle { at: self.current, reason }
     }
 
@@ -541,7 +616,7 @@ impl ConnController {
             // Where it was fastest, which after a retreat is where it is --
             // but a download that ended mid-climb should still pass on the
             // count that worked rather than the one it happened to reach.
-            best_conn_count: if self.best_bps > 0.0 { self.best_at } else { self.current },
+            best_conn_count: self.best().1,
             conn_ceiling: self.ceiling,
             multiplexing_helped,
             h3_won_race: None,
@@ -590,6 +665,98 @@ mod tests {
             }
         }
         panic!("the ramp never settled");
+    }
+
+    /// Runs the controller against a rate curve until it commits, recording
+    /// every count it stood on. Returns the counts visited and where it
+    /// landed.
+    fn walk(mut rate_at: impl FnMut(u32) -> f64) -> (Vec<u32>, SettleReason, u32) {
+        let mut clock = 10_000;
+        let mut controller = ConnController::new(ConnPolicy::default(), clock);
+        let mut visited = vec![controller.connections()];
+        for _ in 0..40 {
+            let count = controller.connections();
+            let observation = Observation::healthy(rate_at(count), count);
+            let decision = step(&mut controller, &mut clock, &observation);
+            match decision {
+                ConnDecision::Settle { at, reason } => return (visited, reason, at),
+                ConnDecision::Add { to } | ConnDecision::Reduce { to, .. } => visited.push(to),
+                ConnDecision::Hold => {}
+            }
+        }
+        panic!("the ramp never settled");
+    }
+
+    /// The curve measured against one shared 8 MB/s token bucket at 30 ms,
+    /// fetching 128 MiB. Counts in between are interpolated by the nearest
+    /// measured neighbour, which is enough to steer by.
+    fn shared_bucket(connections: u32) -> f64 {
+        MBPS * match connections {
+            0 | 1 => 5.00,
+            2 => 8.36,
+            3 => 8.19,
+            4..=6 => 7.90,
+            7..=12 => 7.55,
+            _ => 7.64,
+        }
+    }
+
+    #[test]
+    fn a_shared_bucket_is_walked_back_down_to_its_knee() {
+        // The whole point of the per-count table. The ramp opens at eight and
+        // climbs to sixteen, where the rate is flat; the real peak is at two,
+        // a count the climb never stands on. Landing anywhere above the knee
+        // means leaving measured throughput on the table and waiting on a
+        // longer tail for nothing.
+        let (visited, _, at) = walk(shared_bucket);
+        assert_eq!(at, 2, "visited {visited:?}");
+        assert!(visited.contains(&16), "it should still have climbed: {visited:?}");
+    }
+
+    #[test]
+    fn the_descent_stops_short_of_a_single_connection() {
+        // One connection is two-thirds of the rate here, and measuring it
+        // would cost a window to learn what `DESCENT_FLOOR` already knows.
+        let (visited, _, at) = walk(shared_bucket);
+        assert!(at >= DESCENT_FLOOR);
+        assert!(
+            visited.iter().all(|&count| count >= DESCENT_FLOOR),
+            "probed below the floor: {visited:?}"
+        );
+    }
+
+    #[test]
+    fn per_connection_shaping_is_never_walked_back_down() {
+        // The guard against the descent costing us the case we win. Here each
+        // connection gets its own 8 MB/s, so no lower count ties with the
+        // best and `best` returns the top of the climb -- no separate check
+        // keeps the walk away from this shape, the tie test simply fails.
+        let ceiling = 72.0 * MBPS;
+        let (visited, _, at) =
+            walk(|connections| (f64::from(connections) * 8.0 * MBPS).min(ceiling));
+        assert_eq!(at, 16, "visited {visited:?}");
+        let mut counts = visited.clone();
+        counts.dedup();
+        assert!(
+            counts.windows(2).all(|pair| pair[0] < pair[1]),
+            "the count came back down on a per-connection-shaped origin: {visited:?}"
+        );
+    }
+
+    #[test]
+    fn the_profile_passes_on_the_cheapest_count_that_tied() {
+        // What the next download from this host starts at. Remembering
+        // sixteen would make the walk happen again every time.
+        let mut clock = 10_000;
+        let mut controller = ConnController::new(ConnPolicy::default(), clock);
+        for _ in 0..40 {
+            let count = controller.connections();
+            let observation = Observation::healthy(shared_bucket(count), count);
+            if let ConnDecision::Settle { .. } = step(&mut controller, &mut clock, &observation) {
+                break;
+            }
+        }
+        assert_eq!(controller.to_profile(clock, FINGERPRINT, false).best_conn_count, 2);
     }
 
     #[test]
