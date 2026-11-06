@@ -654,7 +654,10 @@ function renderSettings(settings, force = false) {
   $("extract-zips").checked = settings.extract_zips ?? false;
   $("web-interface").checked = settings.web_interface ?? false;
   $("web-port").value = String(settings.web_port || 8077);
+  $("rpc-interface").checked = settings.rpc_interface ?? false;
+  $("rpc-port").value = String(settings.rpc_port || 6800);
   showWebInterface();
+  showRpcInterface();
   $("hook-program").value = settings.hook_program ?? "";
   // One per line, because each element is one argument and a line is
   // the only separator that cannot appear inside one.
@@ -709,6 +712,51 @@ $("web-interface").addEventListener("change", async () => {
   $("web-port-row").hidden = !$("web-interface").checked;
   await saveSettings();
   await showWebInterface();
+});
+
+/**
+ * The RPC rows, and the secret to paste into a client.
+ *
+ * Asked for rather than held here for the same reason as the web
+ * interface's link: it lives in Credential Manager, and the page only ever
+ * sees it because somebody pressed the button that shows it.
+ */
+async function showRpcInterface() {
+  const on = $("rpc-interface").checked;
+  $("rpc-port-row").hidden = !on;
+  $("rpc-secret-row").hidden = !on;
+  if (!on) {
+    rpcSecret = null;
+    return;
+  }
+  try {
+    rpcSecret = await invoke("rpc_secret");
+  } catch {
+    // The setting still shows what was asked for; the secret is simply
+    // not offered.
+    rpcSecret = null;
+  }
+}
+
+/** The RPC secret, or null while the endpoint is off. */
+let rpcSecret = null;
+
+// Saved before the secret is asked for, because the engine only writes one
+// once the setting says the endpoint is wanted.
+$("rpc-interface").addEventListener("change", async () => {
+  $("rpc-port-row").hidden = !$("rpc-interface").checked;
+  await saveSettings();
+  await showRpcInterface();
+});
+
+$("copy-rpc-secret").addEventListener("click", async () => {
+  if (!rpcSecret) return;
+  try {
+    await navigator.clipboard.writeText(rpcSecret);
+    toast("Secret copied. Paste it into the client's RPC secret box.");
+  } catch {
+    toast("Could not copy the secret", true);
+  }
 });
 
 $("copy-web-address").addEventListener("click", async () => {
@@ -1170,6 +1218,8 @@ async function saveSettings(overrides = {}) {
     extract_zips: $("extract-zips").checked,
     web_interface: $("web-interface").checked,
     web_port: Number($("web-port").value) || 0,
+    rpc_interface: $("rpc-interface").checked,
+    rpc_port: Number($("rpc-port").value) || 0,
     hook_program: $("hook-program").value.trim(),
     hook_arguments: hookArguments($("hook-arguments").value),
     start_with_windows: $("start-with-windows").checked,

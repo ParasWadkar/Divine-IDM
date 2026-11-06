@@ -451,6 +451,17 @@ pub struct Settings {
     pub web_interface: bool,
     /// The port it listens on; zero means the default.
     pub web_port: u16,
+
+    /// Whether the aria2-compatible JSON-RPC endpoint listens.
+    ///
+    /// Off by default, like the web interface, and a separate switch
+    /// because the two are not the same risk. The web interface cannot add
+    /// a download; this one exists to. It binds loopback only -- see
+    /// `idm_engine::rpc` -- so switching it on exposes nothing to the
+    /// network on its own.
+    pub rpc_interface: bool,
+    /// The port it listens on; zero means the default.
+    pub rpc_port: u16,
 }
 
 /// The port the web interface listens on when nothing else is chosen.
@@ -459,12 +470,23 @@ pub struct Settings {
 /// on does not collide with a web server or a media box already running.
 pub const DEFAULT_WEB_PORT: u16 = 8077;
 
+/// The port the RPC endpoint listens on when nothing else is chosen.
+///
+/// aria2's own default, because the whole point is that a client which has
+/// never been configured finds it.
+pub const DEFAULT_RPC_PORT: u16 = 6800;
+
 impl Settings {
     /// The web interface's port, with zero read as "whatever the default
     /// is" so a settings file written before the field existed, or by
     /// somebody clearing the box, still names a real port.
     pub fn web_port_or_default(&self) -> u16 {
         if self.web_port == 0 { DEFAULT_WEB_PORT } else { self.web_port }
+    }
+
+    /// The RPC endpoint's port, with zero read the same way.
+    pub fn rpc_port_or_default(&self) -> u16 {
+        if self.rpc_port == 0 { DEFAULT_RPC_PORT } else { self.rpc_port }
     }
 }
 
@@ -509,6 +531,8 @@ impl Default for Settings {
             // Nothing listens on the network unless somebody says so.
             web_interface: false,
             web_port: DEFAULT_WEB_PORT,
+            rpc_interface: false,
+            rpc_port: DEFAULT_RPC_PORT,
         }
     }
 }

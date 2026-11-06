@@ -52,6 +52,8 @@ pub const CLI_CLIENT: &str = "cli";
 /// lets it through, which is exactly the wrong default for the next one
 /// after that too.
 pub const REMOTE_CLIENT: &str = "remote";
+/// The aria2-compatible JSON-RPC endpoint. Untrusted, like the other two.
+pub const RPC_CLIENT: &str = "rpc";
 
 impl ClientInfo {
     pub fn is_browser(&self) -> bool {
@@ -82,12 +84,17 @@ impl ClientInfo {
         Self { name: REMOTE_CLIENT.to_owned(), client_id: None }
     }
 
+    pub fn rpc() -> Self {
+        Self { name: RPC_CLIENT.to_owned(), client_id: None }
+    }
+
     /// What to call this client when refusing it, in a refusal a person
     /// reads.
     pub fn described(&self) -> &'static str {
         match self.name.as_str() {
             BROWSER_CLIENT => "the browser integration",
             REMOTE_CLIENT => "the web interface",
+            RPC_CLIENT => "the RPC interface",
             _ => "a client this program does not know",
         }
     }

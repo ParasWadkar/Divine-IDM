@@ -527,6 +527,35 @@
               <button type="button" id="copy-web-address" class="ghost">Copy link</button>
             </div>
 
+            <!-- A separate switch from the one above, because the two are
+                 not the same risk. The web interface cannot add a download;
+                 this exists so other people's tools can. It listens on this
+                 PC only, which is why there is no warning about networks
+                 here and why there is no option to change that. -->
+            <label
+              class="row switch"
+              title="Lets tools written for aria2 — AriaNg, Motrix, browser add-ons, scripts — drive DivinePulse instead. Listens on this PC only."
+            >
+              <input type="checkbox" id="rpc-interface" />
+              <span>Let aria2-compatible tools on this PC control downloads</span>
+            </label>
+
+            <label class="row" id="rpc-port-row" hidden title="aria2's usual port. Change it if you also run aria2 itself.">
+              <span>On port</span>
+              <input type="number" id="rpc-port" class="text-input" min="1024" max="65535" step="1" />
+            </label>
+
+            <div class="row" id="rpc-secret-row" hidden>
+              <span>
+                The secret these tools must present
+                <small
+                  >Paste it into the client's "RPC secret" box. It stays on
+                  this PC and never crosses the network.</small
+                >
+              </span>
+              <button type="button" id="copy-rpc-secret" class="ghost">Copy secret</button>
+            </div>
+
             <h2>Connection</h2>
 
             <!-- Three choices rather than an address box with a switch,

@@ -145,6 +145,26 @@ async fn web_address(state: State<'_, AppState>) -> Result<Option<String>, Strin
     Ok(Some(idm_engine::web::where_to_open(settings.web_port_or_default(), token.as_str())))
 }
 
+/// The secret aria2-compatible clients must present, or nothing when the
+/// endpoint is off.
+///
+/// Shown on the user's own screen so they can paste it into a client's
+/// "RPC secret" box. Unlike the web interface's there is no address to go
+/// with it: the endpoint is on loopback at a port the user can already see.
+#[tauri::command]
+async fn rpc_secret(state: State<'_, AppState>) -> Result<Option<String>, String> {
+    let settings = match state.request(Request::GetSettings).await {
+        Response::Settings(settings) => settings,
+        other => return Err(format!("unexpected reply: {other:?}")),
+    };
+    if !settings.rpc_interface {
+        return Ok(None);
+    }
+
+    let vault = idm_core::win::credentials::WindowsVault;
+    Ok(Some(idm_engine::rpc::secret(&vault)?))
+}
+
 /// Writes everything still to download out to a file the user picks.
 ///
 /// The list the engine builds is aria2's input-file format, so what comes
@@ -873,6 +893,7 @@ fn main() {
             add_links,
             export_list,
             web_address,
+            rpc_secret,
             import_list,
             bandwidth_rules,
             set_bandwidth_rule,
@@ -911,6 +932,7 @@ fn main() {
             start_ticker(app.handle().clone());
             start_endpoint(app.handle().clone());
             start_web(app.handle().clone());
+            start_rpc(app.handle().clone());
 
             // Started by the Run key at sign-in: come up in the tray rather
             // than throwing a window at someone who has just logged in.
@@ -1001,6 +1023,18 @@ fn start_web(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
         let engine = Arc::clone(&app.state::<AppState>().engine);
         idm_engine::web::supervise(engine).await;
+    });
+}
+
+/// The same, for the aria2-compatible RPC endpoint.
+///
+/// Its own supervisor rather than a branch inside the web one: they are
+/// separate switches on separate ports, and one failing to bind must not
+/// stop the other from trying.
+fn start_rpc(app: AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        let engine = Arc::clone(&app.state::<AppState>().engine);
+        idm_engine::rpc::supervise(engine).await;
     });
 }
 
