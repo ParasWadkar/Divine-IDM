@@ -27,9 +27,18 @@
 /// profile rather than save one keyed to nothing.
 ///
 /// [`HostProfile::is_usable`]: crate::sched::HostProfile::is_usable
+/// Enumerating every adapter and its gateways costs about four
+/// milliseconds, and it was paid once per download — on a download that
+/// takes a tenth of a second, that is four percent of it to answer a
+/// question whose answer cannot change while the process runs for any
+/// reason that matters here. A machine that moves from one network to
+/// another mid-session is the case this gives up, and what it costs there
+/// is one stale profile: a count learned on the old link being trusted on
+/// the new one, which the ramp re-measures anyway.
 #[cfg(windows)]
 pub fn net_fingerprint() -> u64 {
-    platform::fingerprint().unwrap_or(0)
+    static SEEN: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *SEEN.get_or_init(|| platform::fingerprint().unwrap_or(0))
 }
 
 #[cfg(not(windows))]

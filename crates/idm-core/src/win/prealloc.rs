@@ -112,9 +112,6 @@ impl PreallocOptions {
 pub struct Preallocation {
     pub mode: WriteMode,
     pub caps: VolumeCaps,
-    /// How many writer shards this device can usefully take. More than one on a
-    /// device with a seek penalty is seek thrash, not parallelism.
-    pub max_writer_shards: u8,
 }
 
 /// Bytes as the window says them, so one number reads the same wherever it
@@ -168,7 +165,7 @@ pub fn preallocate(
     // by the writer every SPACE_CHECK_INTERVAL bytes, because this check
     // cannot know what another program will do during the hour that
     // follows.
-    let space = volume::disk_space(path)?;
+    let space = caps.space;
     let needed = options.total_len.saturating_add(FREE_SPACE_HEADROOM);
     if space.available_to_caller < needed {
         return Err(PreallocError::InsufficientSpace {
@@ -223,13 +220,17 @@ pub fn preallocate(
         WriteMode::OrderedWindow { window: ORDERED_WINDOW }
     };
 
-    // A seek penalty, or a device that will not say, means one shard.
-    let max_writer_shards = match volume::has_seek_penalty(path) {
-        Ok(Some(false)) => 4,
-        _ => 1,
-    };
-
-    Ok(Preallocation { mode, caps, max_writer_shards })
+    // `volume::has_seek_penalty` used to be called here, to work out how
+    // many writer shards the device could take. Nothing ever read the
+    // answer: `download` builds its writer with a hardcoded one shard, and
+    // has since the writer was written. So the only effect left was opening
+    // the volume device on every download to ask a question with no reader.
+    //
+    // The query itself is still there, and wiring sharding up is still
+    // worth doing -- it would parallelise the writer's per-block checksum,
+    // which is the one thing on that thread that touches every byte. That
+    // is a change with its own benchmark, not a line to slip in here.
+    Ok(Preallocation { mode, caps })
 }
 
 /// Drops sparseness once the file is complete and has no holes left.

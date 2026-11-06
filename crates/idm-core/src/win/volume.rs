@@ -42,6 +42,12 @@ pub struct VolumeCaps {
     /// then fail with `ERROR_DISK_QUOTA_EXCEEDED`, so the sparse path is
     /// skipped up front rather than discovered mid-download.
     pub quota_restricted: bool,
+    /// What was free when the capabilities were read.
+    ///
+    /// Carried rather than re-read: working this out is what tells
+    /// `quota_restricted` its answer, so the syscalls have already been
+    /// made and the caller asking again is the same two questions twice.
+    pub space: DiskSpace,
     /// A local fixed disk. `SetFileValidData` is only ever attempted here.
     pub is_fixed: bool,
 }
@@ -161,6 +167,7 @@ mod platform {
             supports_sparse: flags & FILE_SUPPORTS_SPARSE_FILES != 0,
             supports_quotas: flags & FILE_VOLUME_QUOTAS != 0,
             quota_restricted: space.quota_restricted(),
+            space,
             is_fixed: drive_type == DRIVE_FIXED,
             root,
         })

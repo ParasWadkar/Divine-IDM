@@ -48,9 +48,25 @@ use crate::facts::OwnedFacts;
 use crate::fetch::{FetchConfig, FetchOutcome, FetchStop, SegmentRequest, fetch_claim};
 use crate::mirror::{Source, Sources};
 
-/// The probe reads this much, and it doubles as the first segment, so no round
-/// trip is wasted learning the file's shape.
-const PROBE_BYTES: u64 = 1 << 20;
+/// How much the probe asks for: one byte.
+///
+/// This used to be a megabyte, with a comment saying it "doubles as the
+/// first segment, so no round trip is wasted learning the file's shape".
+/// It never did. The response is read for its headers, its filename and
+/// its `Content-Range`, and then dropped at the match below — `classify`
+/// returns `Ranged { got, .. }` and the caller discards `got`. So the
+/// megabyte was fetched, paid for, and thrown away on every download.
+/// Measured on loopback it was 42ms of a 131ms transfer.
+///
+/// One byte asks the only question the probe actually has: does this
+/// server honour a range, and what does `Content-Range` say the total is.
+/// `classify` reads `requested.start()` and never its length, so nothing
+/// downstream can tell the difference.
+///
+/// Making the old comment true instead — feeding the body in as the first
+/// segment — is the better end state and a much larger change: at probe
+/// time there is no part file, no journal and no ledger to write it into.
+const PROBE_BYTES: u64 = 1;
 
 #[derive(Clone)]
 pub struct DownloadConfig {
@@ -353,7 +369,15 @@ pub struct Target {
 /// returns 405 on some origins, is rejected by some signed URLs, and can report
 /// a `Content-Length` that disagrees with the GET that follows.
 pub async fn probe(config: &DownloadConfig) -> Result<Target, DownloadError> {
+    let trace = std::env::var_os("IDM_TRACE_PHASES").is_some();
+    let began = Instant::now();
     let resolver = crate::client::redirect_resolver(&config.http)?;
+    if trace {
+        eprintln!(
+            "phase   {:>7.1}ms  resolver client built",
+            began.elapsed().as_secs_f64() * 1000.0
+        );
+    }
     let requested = ByteRange::try_new(0, PROBE_BYTES)?;
 
     let mut request = resolver.get(&config.url).header(RANGE, requested.to_range_header()?);
@@ -382,6 +406,13 @@ pub async fn probe(config: &DownloadConfig) -> Result<Target, DownloadError> {
         config.note(&refusal);
     }
     let probe_rtt = sent_at.elapsed() / 2;
+    if trace {
+        eprintln!(
+            "phase   {:>7.1}ms  probe response ({:.1}ms on the wire)",
+            began.elapsed().as_secs_f64() * 1000.0,
+            sent_at.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
     let facts = OwnedFacts::from_response(&response);
     let outcome = classify(requested, &facts.as_facts());
 
@@ -566,7 +597,9 @@ pub async fn download_with_progress<F: FnMut(Progress)>(
         .as_ref()
         .map(|host| HostKey::new(host.as_str(), port, alpn_label(&target.http_version)));
 
+    phase("journal ready");
     let fingerprint = idm_core::win::net_fingerprint();
+    phase("fingerprint");
 
     // Whether the speed limit held anything back during this download, read
     // as a before-and-after count. If it did, the throughput the controller
@@ -652,6 +685,7 @@ pub async fn download_with_progress<F: FnMut(Progress)>(
     // one goes. Multiplying would mean adding a mirror quietly doubled the
     // load this download puts on everything, which is not what asking for a
     // second address means.
+    phase("profile read");
     let mirrors = usable_mirrors(config, &target).await;
     let per_source = (lane_count / (1 + mirrors.len() as u16)).max(1);
 
@@ -1252,7 +1286,12 @@ fn checkpoint(
         crcs.extend(ack.block_crcs);
     }
 
-    writer.flush_all()?;
+    // Flushed once, not twice. The second call used to sit here, and
+    // between the two nothing runs but `try_recv` on the ack channel, which
+    // issues no writes -- so every shard was already drained and synced and
+    // the second flush could only find nothing to do. The ordering the
+    // journal's invariant needs is unchanged: `commit` does its own
+    // `sync_data` on the data file before it appends a record.
     journal.commit(data, &ranges, &crcs)?;
     for range in ranges {
         ledger.mark_durable(range);
