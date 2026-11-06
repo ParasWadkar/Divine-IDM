@@ -1,5 +1,5 @@
 {
-  "measuredAt": "2026-11-06T05:33:54.778Z",
+  "measuredAt": "2026-11-06T14:17:23.508Z",
   "sizeBytes": 134217728,
   "shaping": {
     "mode": "per-conn",
@@ -9,25 +9,25 @@
   "runs": 5,
   "sha256": "1dcc211ab7a8b5565484edd53078c7354f404e66e40f368cdfdda145341b9310",
   "diskCeiling": {
-    "rate": 2786565793.2981777,
-    "lowest": 2746080967.9986744,
-    "highest": 3315106639.9583073,
+    "rate": 2947398046.014621,
+    "lowest": 2769637229.5730124,
+    "highest": 2974571614.1014194,
     "steady": true
   },
   "server": null,
   "tools": [
     {
       "label": "DivinePulse (adaptive)",
-      "ms": 419.2777,
+      "ms": 429.9216,
       "times": [
-        511.3837,
-        467.6925,
-        419.2777,
-        359.2538,
-        363.9297
+        458.093,
+        416.894,
+        421.5791,
+        444.8811,
+        429.9216
       ],
       "requestsPerRun": 17,
-      "peakConnections": 15,
+      "peakConnections": 9,
       "settled": "None",
       "connectionsSettledAt": 8,
       "steals": 0,
@@ -35,20 +35,20 @@
       "retries": 0,
       "writeMode": "Sparse",
       "bound": "the scheduler",
-      "bytesPerSec": 320116543.2838427
+      "bytesPerSec": 312191171.5996591
     },
     {
       "label": "DivinePulse (1 conn)",
-      "ms": 491.2563,
+      "ms": 647.0032,
       "times": [
-        496.8444,
-        475.9008,
-        486.5153,
-        491.2563,
-        505.3084
+        647.0032,
+        669.0083,
+        631.9015,
+        650.4908,
+        637.6679
       ],
       "requestsPerRun": 5,
-      "peakConnections": 2,
+      "peakConnections": 1,
       "settled": "None",
       "connectionsSettledAt": 1,
       "steals": 0,
@@ -56,17 +56,17 @@
       "retries": 0,
       "writeMode": "Sparse",
       "bound": "the scheduler",
-      "bytesPerSec": 273213245.3059635
+      "bytesPerSec": 207445230.56454745
     },
     {
       "label": "DivinePulse (16 conn)",
-      "ms": 353.7713,
+      "ms": 413.3439,
       "times": [
-        338.9566,
-        353.4202,
-        353.7713,
-        366.3204,
-        365.1272
+        413.3439,
+        421.7061,
+        409.9874,
+        436.5825,
+        412.213
       ],
       "requestsPerRun": 17,
       "peakConnections": 16,
@@ -77,17 +77,17 @@
       "retries": 0,
       "writeMode": "Sparse",
       "bound": "the scheduler",
-      "bytesPerSec": 379391228.1748124
+      "bytesPerSec": 324712008.5720389
     },
     {
       "label": "curl (1 conn)",
-      "ms": 202.1946,
+      "ms": 315.4091,
       "times": [
-        234.313,
-        219.7879,
-        202.1946,
-        174.0788,
-        179.1833
+        338.7537,
+        284.8126,
+        355.42,
+        292.126,
+        315.4091
       ],
       "requestsPerRun": 1,
       "peakConnections": 1,
@@ -98,20 +98,20 @@
       "retries": null,
       "writeMode": null,
       "bound": "the scheduler",
-      "bytesPerSec": 663804710.9072151
+      "bytesPerSec": 425535369.7784877
     },
     {
       "label": "Ghost Downloader (ghd)",
-      "ms": 511.5145,
+      "ms": 684.4325,
       "times": [
-        511.5145,
-        548.5774,
-        497.2753,
-        521.1033,
-        498.9198
+        721.1145,
+        495.5492,
+        684.4325,
+        638.8466,
+        760.1628
       ],
-      "requestsPerRun": 41,
-      "peakConnections": 10,
+      "requestsPerRun": 39,
+      "peakConnections": 9,
       "settled": null,
       "connectionsSettledAt": null,
       "steals": null,
@@ -119,20 +119,20 @@
       "retries": null,
       "writeMode": null,
       "bound": "the scheduler",
-      "bytesPerSec": 262392811.93397257
+      "bytesPerSec": 196100752.08293003
     },
     {
       "label": "aria2c (-x16)",
-      "ms": 486.0026,
+      "ms": 673.0085,
       "times": [
-        478.4241,
-        498.9157,
-        479.5002,
-        486.0026,
-        508.3036
+        678.033,
+        666.2749,
+        615.6756,
+        673.0085,
+        717.2502
       ],
-      "requestsPerRun": 28,
-      "peakConnections": 18,
+      "requestsPerRun": 27,
+      "peakConnections": 16,
       "settled": null,
       "connectionsSettledAt": null,
       "steals": null,
@@ -140,7 +140,7 @@
       "retries": null,
       "writeMode": null,
       "bound": "the scheduler",
-      "bytesPerSec": 276166687.1741016
+      "bytesPerSec": 199429469.31576645
     }
   ]
 }

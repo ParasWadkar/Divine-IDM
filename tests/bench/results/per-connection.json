@@ -1,5 +1,5 @@
 {
-  "measuredAt": "2026-11-06T05:33:17.427Z",
+  "measuredAt": "2026-11-06T14:06:48.298Z",
   "sizeBytes": 134217728,
   "shaping": {
     "mode": "per-conn",
@@ -9,22 +9,22 @@
   "runs": 5,
   "sha256": "1dcc211ab7a8b5565484edd53078c7354f404e66e40f368cdfdda145341b9310",
   "diskCeiling": {
-    "rate": 4334050025.510039,
-    "lowest": 4261840859.3683023,
-    "highest": 4445252388.75917,
+    "rate": 4428751006.401373,
+    "lowest": 4297373825.342191,
+    "highest": 4441604193.485405,
     "steady": true
   },
   "server": null,
   "tools": [
     {
       "label": "DivinePulse (adaptive)",
-      "ms": 1884.2687,
+      "ms": 1919.8586,
       "times": [
-        2090.8545,
-        1881.18,
-        1894.118,
-        1874.537,
-        1884.2687
+        2651.7653,
+        1902.3363,
+        1905.5926,
+        1919.8586,
+        1920.3999
       ],
       "requestsPerRun": 17,
       "peakConnections": 16,
@@ -35,17 +35,17 @@
       "retries": 0,
       "writeMode": "Sparse",
       "bound": "the scheduler",
-      "bytesPerSec": 71230673.20494153
+      "bytesPerSec": 69910215.2627282
     },
     {
       "label": "DivinePulse (1 conn)",
-      "ms": 26835.9698,
+      "ms": 26782.2679,
       "times": [
-        26807.2711,
-        26831.2956,
-        26933.9135,
-        26873.2216,
-        26835.9698
+        26721.7274,
+        26764.2472,
+        27544.2911,
+        26822.2227,
+        26782.2679
       ],
       "requestsPerRun": 10,
       "peakConnections": 2,
@@ -56,17 +56,17 @@
       "retries": 0,
       "writeMode": "Sparse",
       "bound": "the scheduler",
-      "bytesPerSec": 5001411.501066752
+      "bytesPerSec": 5011439.975925266
     },
     {
       "label": "DivinePulse (16 conn)",
-      "ms": 1874.0547,
+      "ms": 1915.2049,
       "times": [
-        1866.4106,
-        1834.6372,
-        1874.0547,
-        1888.638,
-        1886.0041
+        1938.2009,
+        1933.4768,
+        1912.5238,
+        1912.3088,
+        1915.2049
       ],
       "requestsPerRun": 17,
       "peakConnections": 16,
@@ -77,17 +77,17 @@
       "retries": 0,
       "writeMode": "Sparse",
       "bound": "the scheduler",
-      "bytesPerSec": 71618895.64909711
+      "bytesPerSec": 70080088.03653333
     },
     {
       "label": "curl (1 conn)",
-      "ms": 26446.3861,
+      "ms": 26268.7309,
       "times": [
-        26384.1729,
-        26455.5277,
-        26455.6515,
-        26446.3861,
-        26369.4114
+        26294.0392,
+        26269.8498,
+        26268.7309,
+        26263.8378,
+        26251.2594
       ],
       "requestsPerRun": 1,
       "peakConnections": 1,
@@ -98,17 +98,17 @@
       "retries": null,
       "writeMode": null,
       "bound": "the scheduler",
-      "bytesPerSec": 5075087.669539847
+      "bytesPerSec": 5109410.443577996
     },
     {
       "label": "Ghost Downloader (ghd)",
-      "ms": 3781.3015,
+      "ms": 3914.3159,
       "times": [
-        3781.3015,
-        3796.1492,
-        3786.5311,
-        3753.7028,
-        3736.6439
+        4012.4822,
+        3770.8334,
+        3922.6374,
+        3914.3159,
+        3888.5704
       ],
       "requestsPerRun": 10,
       "peakConnections": 9,
@@ -119,19 +119,19 @@
       "retries": null,
       "writeMode": null,
       "bound": "the scheduler",
-      "bytesPerSec": 35495114.0500169
+      "bytesPerSec": 34288936.15867846
     },
     {
       "label": "aria2c (-x16)",
-      "ms": 2013.7597,
+      "ms": 2096.4444,
       "times": [
-        1995.3011,
-        2013.7597,
-        2042.0614,
-        2033.3101,
-        2010.7179
+        2106.095,
+        2102.8492,
+        2096.4444,
+        2074.1872,
+        2075.9024
       ],
-      "requestsPerRun": 16,
+      "requestsPerRun": 17,
       "peakConnections": 16,
       "settled": null,
       "connectionsSettledAt": null,
@@ -140,7 +140,7 @@
       "retries": null,
       "writeMode": null,
       "bound": "the scheduler",
-      "bytesPerSec": 66650319.797342256
+      "bytesPerSec": 64021601.526851855
     }
   ]
 }

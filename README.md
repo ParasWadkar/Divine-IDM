@@ -82,6 +82,22 @@ an extension you have not approved.
   after an hour or two. Click **New link** on the stopped download, paste a
   fresh address for the same file, and it carries on from where it was
   instead of starting again.
+- **Driving it from something else.** Two ways, both off until you switch
+  them on in Settings.
+
+  The `idm` command line takes a URL and exits when the file is done, so it
+  works in a script without a window open. With `--json` it prints exactly
+  one JSON object on stdout — on failure as well as success — and exits with
+  a code saying which kind of failure it was; `idm --help` lists them.
+
+  The **aria2-compatible interface** lets tools written for aria2 drive
+  DivinePulse instead: AriaNg, Motrix, the Android remotes, browser add-ons,
+  anything that speaks aria2's JSON-RPC. Switch it on, copy the secret, and
+  paste that into the client's "RPC secret" box. It listens on this PC only
+  and there is no setting to change that, which is deliberate: unlike the
+  web interface it *can* start downloads, so it is not something to expose
+  to a network. It will not change settings or shut the program down — those
+  belong to whoever is at the window.
 
 ## What it does not do
 
