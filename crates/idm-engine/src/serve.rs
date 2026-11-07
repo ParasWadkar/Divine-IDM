@@ -1857,7 +1857,10 @@ async fn run_video(
         },
     )
     .await
-    .map_err(|error| Some(Failure::from_transport(error)))?;
+    // Not `from_transport`: yt-dlp refusing an address is a verdict, not a
+    // blip, and retrying it respawns the whole program every few seconds
+    // to be told the same thing.
+    .map_err(|error| Some(Failure::from_tool(error)))?;
 
     // The name comes from the video's title, so the one guessed from the
     // address at enqueue is wrong by the time this finishes -- and it is

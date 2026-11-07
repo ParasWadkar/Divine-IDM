@@ -149,6 +149,29 @@ impl Failure {
         Self { kind: Kind::Unclassified, summary: first_sentence(&detail), detail, transient: true }
     }
 
+    /// A helper program that ran and refused.
+    ///
+    /// Not transient, unlike [`Failure::from_transport`], and the
+    /// difference is the point. A network transport failing is a bet worth
+    /// taking again: the link may come back. A tool that has just examined
+    /// the address and said it cannot handle it will say so again, every
+    /// few seconds, for as long as the retry loop keeps asking -- and each
+    /// ask is a fresh process. Measured: an "Unsupported URL" from yt-dlp
+    /// cycled running, reconnecting, running, indefinitely.
+    ///
+    /// Erring towards permanent on purpose. A genuine blip inside the tool
+    /// is possible and is the rarer case, and "Try again" is one click
+    /// away; the opposite mistake spins forever on its own.
+    pub fn from_tool(error: impl std::fmt::Display) -> Self {
+        let detail = error.to_string();
+        Self {
+            kind: Kind::Unclassified,
+            summary: first_sentence(&detail),
+            detail,
+            transient: false,
+        }
+    }
+
     /// A download that stopped sending without anyone saying why.
     ///
     /// The stall watchdog notices an absence rather than catching an error,
@@ -355,6 +378,22 @@ mod tests {
         assert!(!failure.transient, "a full disk is not fixed by waiting");
         // The arithmetic's operands are not lost, only moved out of the way.
         assert!(failure.detail.contains("not enough space"));
+    }
+
+    #[test]
+    fn a_tool_that_refused_is_not_asked_again() {
+        // Found by running the real yt-dlp: an "Unsupported URL" came back
+        // as transient, so the engine retried it, which respawned a 23 MB
+        // program every few seconds to be told the same thing. The retry
+        // loop cannot tell a verdict from a blip, so the classification
+        // has to.
+        let refused = Failure::from_tool("ERROR: Unsupported URL: https://example.invalid/page");
+        assert!(!refused.transient, "a tool's refusal is a verdict, not a blip");
+        assert!(refused.summary.contains("Unsupported URL"), "{}", refused.summary);
+
+        // And the transport constructor still bets the other way, because
+        // a link that went away may come back.
+        assert!(Failure::from_transport("connection reset").transient);
     }
 
     #[test]
