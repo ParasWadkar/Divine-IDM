@@ -123,6 +123,13 @@ pub fn arguments(url: &str, output_dir: &Path, filename: Option<&str>) -> Vec<St
         // One line per update, never the redrawing bar.
         "--newline".to_owned(),
         "--no-colors".to_owned(),
+        // Without this there is no progress at all. `--print`, below,
+        // implies `--quiet`, and quiet silences the progress template
+        // along with everything else -- so the download runs, succeeds,
+        // and reports nothing from start to finish. The window showed
+        // 0 B at 0 B/s for the whole of a six-megabyte fetch and then
+        // jumped to done, which is how this was found.
+        "--progress".to_owned(),
         "--progress-template".to_owned(),
         format!(
             "download:{MARKER} %(progress.status)s %(progress.downloaded_bytes)s \
@@ -324,6 +331,17 @@ mod tests {
         // this avoids.
         let args = arguments("https://x.invalid/v", Path::new("D:/out"), None);
         assert!(args.iter().any(|a| a == "--no-playlist"));
+    }
+
+    #[test]
+    fn progress_is_asked_for_loudly_enough_to_survive_quiet() {
+        // `--print` implies `--quiet`, and quiet silences the progress
+        // template too. Without `--progress` the only output is the final
+        // path: the download works and reports nothing, which looks like a
+        // stalled download for as long as it runs.
+        let args = arguments("https://x.invalid/v", Path::new("D:/out"), None);
+        assert!(args.iter().any(|a| a == "--progress"), "{args:?}");
+        assert!(args.iter().any(|a| a == "--newline"));
     }
 
     #[test]
