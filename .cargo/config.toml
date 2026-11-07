@@ -17,5 +17,14 @@
 #
 # Using HTTP/3 is still off at runtime unless somebody asks for it. See
 # `HttpConfig::http3`.
+#
+# **Anything that sets a RUSTFLAGS environment variable must repeat this
+# flag.** An environment RUSTFLAGS does not merge with the setting below --
+# it replaces it outright -- so a shell, a script or a CI job that exports
+# RUSTFLAGS for any other reason silently drops the cfg, and the build then
+# fails inside reqwest with a message about an environment variable that
+# looks nothing like the thing that actually went wrong. That is how this
+# first reached CI: the workflow sets `-D warnings`, which was enough to
+# throw the cfg away.
 [build]
 rustflags = ["--cfg", "reqwest_unstable"]

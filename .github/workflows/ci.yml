@@ -8,7 +8,12 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  RUSTFLAGS: -D warnings
+  # The cfg has to be repeated here, and leaving it out is not a warning
+  # but a hard failure: an environment RUSTFLAGS *replaces* `[build]
+  # rustflags` in .cargo/config.toml rather than merging with it, so
+  # setting this variable at all silently discards the HTTP/3 cfg and
+  # reqwest refuses to compile. See .cargo/config.toml.
+  RUSTFLAGS: -D warnings --cfg reqwest_unstable
 
 jobs:
   check:
@@ -27,6 +32,27 @@ jobs:
 
       - name: Formatting
         run: cargo fmt --all -- --check
+
+      # Before Clippy, not after, and that ordering is load-bearing. The
+      # Tauri app bundles `idm.exe`, `idm-host.exe` and the built extension
+      # as resources, and its build script fails outright when they are
+      # absent -- so `cargo clippy --all-targets` cannot even check the app
+      # on a clean checkout. Locally it passes anyway, because a developer
+      # has those files lying around from the last release build, which is
+      # exactly why this went unnoticed: CI was the only place that ever
+      # started from nothing. The same artefacts are what the end-to-end
+      # scripts run against further down, so this is a reordering rather
+      # than extra work.
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Build the extension the app bundles
+        run: node extension/build.mjs
+
+      - name: Build the binaries the app bundles and the scripts drive
+        run: cargo build --release -p idm-cli -p idm-host -p idm-net --bins
 
       - name: Clippy
         run: cargo clippy --all-targets --all-features
@@ -53,17 +79,6 @@ jobs:
       # the rest) stay manual: they want a real Chrome or Firefox, or ffmpeg.
       # tests/bench stays out on purpose -- wall clock on a shared runner
       # measures the runner.
-      - name: Install Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-
-      # Only the three packages the scripts actually launch. Building the whole
-      # workspace would pull in the Tauri app, which needs a webview toolchain
-      # to link and is tested by its own unit tests anyway.
-      - name: Build the binaries the end-to-end scripts drive
-        run: cargo build --release -p idm-cli -p idm-host -p idm-net --bins
-
       - name: End-to-end
         shell: bash
         run: |
