@@ -27,6 +27,14 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+
+import {
+  chromiumExtensionId,
+  restore,
+  restoreManifests,
+  snapshot,
+  snapshotManifests,
+} from "./host-registration.mjs";
 import { fileURLToPath } from "node:url";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -34,6 +42,11 @@ const REPO = resolve(HERE, "..", "..");
 const IDM = join(REPO, "target", "release", "idm.exe");
 const MOCK = join(REPO, "tests", "mock-server", "server.mjs");
 const ADDON = join(REPO, "extension", "dist", "firefox");
+
+/** The add-on's own id, which the host manifest has to name to allow it. */
+const ADDON_ID = JSON.parse(
+  readFileSync(join(ADDON, "manifest.json"), "utf8"),
+).browser_specific_settings.gecko.id;
 
 const FIREFOX = [
   "C:/Program Files/Mozilla Firefox/firefox.exe",
@@ -243,6 +256,34 @@ async function main() {
   const browserDownloads = mkdtempSync(join(tmpdir(), "idm-ffbrowser-"));
   const profile = makeProfile(browserDownloads);
 
+  // Register the native messaging host, pointing it at this add-on's id.
+  //
+  // Without this the add-on installs, loads, and then finds nothing to
+  // connect to: Firefox looks the host up in the registry, and if no key
+  // points at a manifest there is nothing to launch. The chain then fails
+  // four checks in a row -- no pairing request, no label, no takeover, and
+  // Firefox quietly downloading the files itself -- which reads exactly
+  // like the product being broken rather than the host being unregistered.
+  // That is how this guard spent a while looking like a real failure.
+  //
+  // Registering writes to the user's own registry and manifest folder, so
+  // the whole surface is photographed first and put back in `finally`,
+  // the same bargain extra-root-chain makes.
+  const registryBefore = snapshot();
+  const manifestsBefore = snapshotManifests();
+  const installed = spawnSync(
+    IDM,
+    // The Chromium id as well, though nothing here uses it: the installer
+    // writes to every browser it finds and will not start without one.
+    ["--install-host", "--gecko-id", ADDON_ID, "--extension-id", chromiumExtensionId()],
+    { encoding: "utf8" },
+  );
+  check(
+    "the native messaging host registers",
+    installed.status === 0,
+    installed.status === 0 ? ADDON_ID : (installed.stderr ?? "").trim(),
+  );
+
   const mock = await startMock(PORT);
   const engine = spawn(IDM, ["--serve", "-o", downloads], {
     stdio: ["ignore", "pipe", "pipe"],
@@ -397,6 +438,11 @@ async function main() {
     } catch {}
     engine.kill();
     mock.kill();
+    // Before the directories go, and whatever happened above: this is the
+    // part that touched something outside the test's own temp folders.
+    const putBack = restore(registryBefore) + restoreManifests(manifestsBefore);
+    if (putBack) console.log(`
+restored ${putBack} host registration item(s)`);
     await sleep(1000);
     for (const dir of [downloads, browserDownloads, profile, stateDir]) {
       try {

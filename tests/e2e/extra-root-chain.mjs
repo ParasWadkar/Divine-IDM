@@ -22,6 +22,18 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
+
+import {
+  KNOWN_ROOTS,
+  keyPath,
+  registrationOf,
+  removeRegistration,
+  restore,
+  restoreManifests,
+  setRegistration,
+  snapshot,
+  snapshotManifests,
+} from "./host-registration.mjs";
 import { fileURLToPath } from "node:url";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -34,101 +46,15 @@ const HOST = join(REPO, "target", "release", "idm-host.exe");
 const CHROMIUM_ROOT = String.raw`DivinePulseTest\ExtraRootChromium`;
 const GECKO_ROOT = String.raw`DivinePulseTest\ExtraRootGecko`;
 
-// Every root the installer knows, so "put it back" means the whole surface
-// rather than the ones this test happened to touch.
-const KNOWN_ROOTS = [
-  String.raw`Google\Chrome`, String.raw`Google\Chrome Beta`, String.raw`Google\Chrome Dev`,
-  String.raw`Google\Chrome SxS`, "Chromium", String.raw`Microsoft\Edge`,
-  String.raw`Microsoft\Edge Beta`, String.raw`Microsoft\Edge Dev`,
-  String.raw`BraveSoftware\Brave-Browser`, String.raw`BraveSoftware\Brave-Browser-Beta`,
-  "Vivaldi", String.raw`Opera Software\Opera Stable`, String.raw`Opera Software\Opera GX Stable`,
-  String.raw`Yandex\YandexBrowser`, String.raw`TheBrowserCompany\Arc`, String.raw`CocCoc\Browser`,
-  "Thorium", "Mozilla", "LibreWolf", "Waterfox", "Zen",
-  CHROMIUM_ROOT, GECKO_ROOT,
-];
+// Registry and manifest handling is shared with firefox-chain, which needs
+// exactly the same put-it-back guarantee; see host-registration.mjs.
+const ALL_ROOTS = [...KNOWN_ROOTS, CHROMIUM_ROOT, GECKO_ROOT];
 
 let failures = 0;
 
 function check(label, ok, detail = "") {
   console.log(`${ok ? "  ok  " : "  FAIL"}  ${label}${detail ? ` — ${detail}` : ""}`);
   if (!ok) failures += 1;
-}
-
-function keyPath(root) {
-  return "HKCU\\Software\\" + root + "\\NativeMessagingHosts\\com.divine.pulse";
-}
-
-/** The manifest a root is registered to, or null when it is not registered. */
-function registrationOf(root) {
-  const out = spawnSync("reg", ["query", keyPath(root), "/ve"], { encoding: "utf8" });
-  if (out.status !== 0) return null;
-  const line = out.stdout.split(/\r?\n/).find((l) => l.includes("REG_SZ"));
-  return line ? line.split("REG_SZ")[1].trim() : null;
-}
-
-function snapshot() {
-  const state = new Map();
-  for (const root of KNOWN_ROOTS) state.set(root, registrationOf(root));
-  return state;
-}
-
-// The manifests have to be snapshotted alongside the registry, because
-// --uninstall-host deletes them. Restoring only the keys leaves every
-// browser pointing at a file that is no longer there, which is a worse
-// state than the one the test started from and looks identical in the
-// registry. Found the hard way.
-const MANIFEST_DIR = join(
-  process.env.LOCALAPPDATA ?? "",
-  "DivineIDM",
-  "hosts",
-);
-const MANIFEST_NAMES = ["com.divine.pulse.chromium.json", "com.divine.pulse.gecko.json"];
-
-function snapshotManifests() {
-  const state = new Map();
-  for (const name of MANIFEST_NAMES) {
-    const path = join(MANIFEST_DIR, name);
-    state.set(path, existsSync(path) ? readFileSync(path, "utf8") : null);
-  }
-  return state;
-}
-
-function restoreManifests(before) {
-  let changed = 0;
-  for (const [path, was] of before) {
-    const now = existsSync(path) ? readFileSync(path, "utf8") : null;
-    if (now === was) continue;
-    changed += 1;
-    if (was === null) rmSync(path, { force: true });
-    else {
-      mkdirSync(dirname(path), { recursive: true });
-      writeFileSync(path, was);
-    }
-  }
-  return changed;
-}
-
-function removeRegistration(root) {
-  spawnSync("reg", ["delete", keyPath(root), "/f"], { encoding: "utf8" });
-}
-
-function setRegistration(root, value) {
-  spawnSync("reg", ["add", keyPath(root), "/ve", "/t", "REG_SZ", "/d", value, "/f"], {
-    encoding: "utf8",
-  });
-}
-
-/** Puts every root back to exactly what `before` recorded. */
-function restore(before) {
-  let changed = 0;
-  for (const [root, was] of before) {
-    const now = registrationOf(root);
-    if (now === was) continue;
-    changed += 1;
-    if (was === null) removeRegistration(root);
-    else setRegistration(root, was);
-  }
-  return changed;
 }
 
 function runInstall(extraArgs) {
@@ -154,7 +80,7 @@ for (const [label, path] of [["idm.exe", IDM], ["idm-host.exe", HOST]]) {
 }
 
 console.log("extra-root-chain");
-const before = snapshot();
+const before = snapshot(ALL_ROOTS);
 const manifestsBefore = snapshotManifests();
 let restored = 0;
 
