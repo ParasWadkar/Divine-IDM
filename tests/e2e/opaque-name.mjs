@@ -15,7 +15,7 @@
 //   node opaque-name.mjs
 
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readdirSync, statSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -38,9 +38,17 @@ function check(label, ok, detail = "") {
 function listing(dir) {
   const out = [];
   const walk = (d, prefix) => {
-    for (const name of readdirSync(d)) {
-      const full = join(d, name);
-      if (statSync(full).isDirectory()) walk(full, `${prefix}${name}/`);
+    // `withFileTypes`, so the kind comes back with the name and nothing
+    // has to be asked about a second time. Reading the name and then
+    // stat-ing it is two trips, and this walks a folder that is being
+    // written to: the journal and the part file are deleted the moment a
+    // download finishes, so the entry could be gone by the second trip
+    // and `stat` would throw ENOENT at the whole guard. It threw on CI,
+    // on a `.idmjrn` -- a file this function only stats in order to
+    // decide to ignore it.
+    for (const entry of readdirSync(d, { withFileTypes: true })) {
+      const name = entry.name;
+      if (entry.isDirectory()) walk(join(d, name), `${prefix}${name}/`);
       else if (!/\.idm(part|jrn)$/.test(name)) out.push(`${prefix}${name}`);
     }
   };
