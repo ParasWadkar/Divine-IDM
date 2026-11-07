@@ -21,7 +21,7 @@ import {
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { loadOrCreate } from "./keygen.mjs";
+import { readExisting } from "./keygen.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const TARGETS = ["chromium", "firefox"];
@@ -89,7 +89,16 @@ for (const file of NEEDED_FILES) {
   }
 }
 
-const chromiumKey = CHECK_ONLY ? null : loadOrCreate();
+const chromiumKey = CHECK_ONLY ? null : readExisting();
+if (!CHECK_ONLY && !chromiumKey) {
+  // Built without the pinned key rather than minting one. The result is a
+  // perfectly good extension for loading unpacked, but Chromium will derive
+  // its id from the folder path, so it is not the one the installer
+  // registers -- say so, because a release built this way would pair with
+  // nothing.
+  console.log("no signing key in extension/keys; building without a pinned id.");
+  console.log("  run `node extension/keygen.mjs` first if this build is for release.");
+}
 let builtId = null;
 
 let failed = false;
@@ -147,11 +156,14 @@ for (const target of TARGETS) {
   for (const stale of readdirSync(out)) {
     if (!written.has(stale)) rmSync(join(out, stale), { recursive: true, force: true });
   }
-  if (target === "chromium") {
+  if (target === "chromium" && chromiumKey) {
     // Pinning the public key fixes the extension ID. Without it Chromium
     // derives the ID from the folder path, so the native messaging manifest
     // -- which names the ID in allowed_origins -- would stop matching the
-    // moment the folder moved, and would differ on every machine.
+    // moment the folder moved, and would differ on every machine. Omitted
+    // rather than invented when there is no key: a path-derived id is the
+    // honest outcome of building without one, and minting a key here would
+    // change the id this project ships under.
     manifest.key = chromiumKey.key;
     builtId = chromiumKey.id;
   }
@@ -168,7 +180,16 @@ if (!CHECK_ONLY) {
   console.log("  Firefox family:  about:debugging -> This Firefox -> Load Temporary Add-on");
   console.log("                   -> extension/dist/firefox/manifest.json");
   console.log("\nThen register the native messaging host:");
-  console.log(`  idm --install-host --extension-id ${builtId}`);
-  console.log("\nThat id is pinned by the key in extension/keys/, so it is the");
-  console.log("same wherever the folder sits and on every machine.");
+  if (builtId) {
+    console.log(`  idm --install-host --extension-id ${builtId}`);
+    console.log("\nThat id is pinned by the key in extension/keys/, so it is the");
+    console.log("same wherever the folder sits and on every machine.");
+  } else {
+    // No pinned id to print, and guessing one would be worse than
+    // saying so: Chromium derives it from wherever this folder sits.
+    console.log("  idm --install-host --extension-id <the id Chromium shows>");
+    console.log("\nThis build has no pinned key, so that id comes from the folder");
+    console.log("path and changes if it moves. Run `node extension/keygen.mjs`");
+    console.log("for a stable one.");
+  }
 }

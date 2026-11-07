@@ -40,6 +40,31 @@ function spkiOf(privatePem) {
   return createPublicKey(privatePem).export({ type: "spki", format: "der" });
 }
 
+/**
+ * The existing keypair's id and public key, or null when there is none.
+ *
+ * Reads; never writes. That distinction is the whole point of this being
+ * separate from `loadOrCreate`: the private key is deliberately not in git,
+ * so on a fresh clone -- a new machine, a CI runner -- `loadOrCreate` would
+ * quietly mint a *new* key and overwrite the tracked `chromium.pub.txt`
+ * with a different extension id. Nothing would say so, and the id the
+ * installer registers would no longer be the id the extension has, which
+ * is the silent drift `the_installer_registers_the_id_the_extension_
+ * actually_has` exists to catch. A build must not be able to cause it.
+ */
+export function readExisting() {
+  if (!existsSync(PRIVATE)) return null;
+  const spki = spkiOf(readFileSync(PRIVATE, "utf8"));
+  return { key: spki.toString("base64"), id: extensionId(spki) };
+}
+
+/**
+ * The keypair, making one if there is none, and pinning the id in
+ * `chromium.pub.txt`.
+ *
+ * Writes tracked files, so this is for `keygen.mjs` being run on purpose
+ * and not for anything that merely needs to build.
+ */
 export function loadOrCreate({ force = false } = {}) {
   mkdirSync(KEY_DIR, { recursive: true });
 
