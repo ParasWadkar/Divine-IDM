@@ -27,11 +27,35 @@ const PREFIX: &str = "DivinePulse/test/";
 ///
 /// A guard rather than a call at the end of each test, because the end of a
 /// test is exactly what a failed assertion skips.
-struct Scope(String);
+struct Scope {
+    prefix: String,
+    /// Held and never read: dropping it at the end of the test is the
+    /// entire point of keeping it.
+    _guard: std::sync::MutexGuard<'static, ()>,
+}
+
+/// Held for the length of every test in this file, so they take the vault
+/// one at a time.
+///
+/// A prefix each is enough to keep the tests from reading each other's
+/// entries, and is not enough to let them run at once: the thing they
+/// share is not the prefix, it is Windows' credential store, and it does
+/// not take concurrent writes from several threads well. Measured on this
+/// file -- six failures in fifteen parallel runs, none in ten serial ones
+/// -- with three different symptoms that are all the same cause: a write
+/// that never landed, and two listings that came back the wrong length.
+///
+/// Serialising here rather than passing `--test-threads=1` in CI, because
+/// the constraint belongs to these tests and not to whoever runs them, and
+/// the rest of the suite has no reason to go slower for it.
+static VAULT: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 impl Scope {
     fn new(name: &str) -> Self {
-        let scope = Self(format!("{PREFIX}{name}/"));
+        // A failed test poisons the lock, and the next test would then fail
+        // for a reason that has nothing to do with it.
+        let guard = VAULT.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let scope = Self { prefix: format!("{PREFIX}{name}/"), _guard: guard };
         // Anything a previous interrupted run left behind, so a test does
         // not inherit it and fail for somebody else's reason.
         scope.clear();
@@ -39,16 +63,16 @@ impl Scope {
     }
 
     fn prefix(&self) -> &str {
-        &self.0
+        &self.prefix
     }
 
     fn target(&self, name: &str) -> String {
-        format!("{}{name}", self.0)
+        format!("{}{name}", self.prefix)
     }
 
     fn clear(&self) {
         let vault = WindowsVault;
-        if let Ok(entries) = vault.list(&self.0) {
+        if let Ok(entries) = vault.list(&self.prefix) {
             for entry in entries {
                 let _ = vault.remove(&entry.target);
             }
