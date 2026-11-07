@@ -27,6 +27,25 @@ fn main() {
         std::process::exit(1);
     }
 
+    // A video behind a sign-in, which is the ordinary case and not an
+    // exotic one. This stands in for every site that serves a stranger a
+    // consent wall instead of a video: it needs the referrer the page was
+    // loaded with and the cookies that signed the person in, and without
+    // them it fails in a way that reads as the site being unsupported.
+    if url.contains("gated") {
+        let referrer = value_of("--referer");
+        let cookies = args
+            .iter()
+            .position(|a| a == "--add-header")
+            .and_then(|i| args.get(i + 1))
+            .and_then(|header| header.strip_prefix("Cookie:"))
+            .filter(|value| !value.is_empty());
+        if referrer.is_none() || cookies.is_none() {
+            eprintln!("ERROR: Sign in to confirm you are not a bot");
+            std::process::exit(1);
+        }
+    }
+
     let dir = PathBuf::from(value_of("-P").unwrap_or_else(|| ".".into()));
     let template = value_of("-o").unwrap_or_else(|| "%(title)s.%(ext)s".into());
     let name = template.replace("%(title)s", "a video").replace("%(ext)s", "mp4");

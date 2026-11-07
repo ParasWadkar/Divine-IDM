@@ -104,14 +104,46 @@ fn number(field: &str) -> Option<u64> {
     field.split('.').next()?.parse().ok()
 }
 
+/// What to fetch, and what the page needed in order to be read.
+///
+/// A struct rather than six parameters, and the referrer and the cookies
+/// are the reason it exists. The engine has carried both since the browser
+/// extension did -- a video behind a sign-in is the ordinary case, not the
+/// exotic one -- and this path dropped them on the floor, so handing a page
+/// to yt-dlp lost exactly the credentials that made the page readable. The
+/// download then failed with whatever the site shows a stranger, which
+/// looks like yt-dlp not supporting the site.
+#[derive(Debug, Clone)]
+pub struct Wanted {
+    pub url: String,
+    pub output_dir: PathBuf,
+    /// The name to save under, or `None` to take the video's title.
+    pub filename: Option<String>,
+    pub referrer: Option<String>,
+    /// A `Cookie` header value, as the extension and the UI supply it.
+    pub cookies: Option<String>,
+}
+
+impl Wanted {
+    pub fn new(url: impl Into<String>, output_dir: impl Into<PathBuf>) -> Self {
+        Self {
+            url: url.into(),
+            output_dir: output_dir.into(),
+            filename: None,
+            referrer: None,
+            cookies: None,
+        }
+    }
+}
+
 /// The arguments for one fetch.
 ///
 /// Built separately from running it so the whole command line is something
 /// a test can look at. Nothing is passed through a shell: the address comes
 /// from the person and goes in as one argument, where no amount of quoting
 /// in it can become a second one.
-pub fn arguments(url: &str, output_dir: &Path, filename: Option<&str>) -> Vec<String> {
-    let template = match filename {
+pub fn arguments(wanted: &Wanted) -> Vec<String> {
+    let template = match wanted.filename.as_deref() {
         // An extension yt-dlp chooses, because the container depends on
         // which streams it ends up merging and a name ending `.mp4` on a
         // `.webm` would be a lie this program tells about its own output.
@@ -119,7 +151,7 @@ pub fn arguments(url: &str, output_dir: &Path, filename: Option<&str>) -> Vec<St
         None => "%(title)s.%(ext)s".to_owned(),
     };
 
-    vec![
+    let mut args = vec![
         // One line per update, never the redrawing bar.
         "--newline".to_owned(),
         "--no-colors".to_owned(),
@@ -142,7 +174,7 @@ pub fn arguments(url: &str, output_dir: &Path, filename: Option<&str>) -> Vec<St
         // because an absolute output template makes yt-dlp ignore `-P` and
         // the two would then disagree about the destination.
         "-P".to_owned(),
-        output_dir.display().to_string(),
+        wanted.output_dir.display().to_string(),
         "-o".to_owned(),
         template,
         // The real path, after any merging has renamed it. `--print` alone
@@ -151,11 +183,33 @@ pub fn arguments(url: &str, output_dir: &Path, filename: Option<&str>) -> Vec<St
         "--no-simulate".to_owned(),
         "--print".to_owned(),
         "after_move:filepath".to_owned(),
-        // Last, and after `--`, so an address beginning with a dash is an
-        // address rather than an option.
-        "--".to_owned(),
-        url.to_owned(),
-    ]
+    ];
+
+    // What the browser sent when it loaded the page. Sites that check it do
+    // so on the page, not on the stream, so this has to be on the request
+    // that does the extracting.
+    if let Some(referrer) = &wanted.referrer {
+        args.push("--referer".to_owned());
+        args.push(referrer.clone());
+    }
+
+    // As a header rather than through `--cookies`, because a header is what
+    // we have: one `Cookie:` line, from the extension or typed in. Writing
+    // it out as a Netscape cookie file would mean inventing a domain, a
+    // path and an expiry for every pair and leaving the person's session on
+    // disk for yt-dlp to read -- worse on both counts. yt-dlp calls this
+    // deprecated and scopes the cookies to the address being downloaded,
+    // which is the scoping we would have wanted anyway.
+    if let Some(cookies) = &wanted.cookies {
+        args.push("--add-header".to_owned());
+        args.push(format!("Cookie:{cookies}"));
+    }
+
+    // Last, and after `--`, so an address beginning with a dash is an
+    // address rather than an option.
+    args.push("--".to_owned());
+    args.push(wanted.url.clone());
+    args
 }
 
 fn strip_extension(name: &str) -> &str {
@@ -172,14 +226,12 @@ fn strip_extension(name: &str) -> &str {
 /// something that behaves like yt-dlp without one being installed.
 pub async fn fetch_with(
     program: &Path,
-    url: &str,
-    output_dir: &Path,
-    filename: Option<&str>,
+    wanted: &Wanted,
     mut on_progress: impl FnMut(Progress),
 ) -> Result<Fetched, VideoError> {
     let mut command = tokio::process::Command::new(program);
     command
-        .args(arguments(url, output_dir, filename))
+        .args(arguments(wanted))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -253,6 +305,10 @@ pub fn find(sidecar_dir: &Path) -> Result<PathBuf, VideoError> {
 mod tests {
     use super::*;
 
+    fn plain() -> Wanted {
+        Wanted::new("https://x.invalid/v", "D:/out")
+    }
+
     #[test]
     fn a_progress_line_is_read() {
         let got = read_progress("idmprogress downloading 1024 4096 4096").unwrap();
@@ -303,7 +359,7 @@ mod tests {
     #[test]
     fn the_address_cannot_become_an_option() {
         // `--` before it, so a file named like a flag is still a file.
-        let args = arguments("-oh-dear", Path::new("D:/out"), None);
+        let args = arguments(&Wanted::new("-oh-dear", "D:/out"));
         let dashes = args.iter().position(|a| a == "--").expect("a -- separator");
         assert_eq!(args[dashes + 1], "-oh-dear");
         assert_eq!(args.len(), dashes + 2, "the address is the last argument");
@@ -313,14 +369,14 @@ mod tests {
     fn a_chosen_name_keeps_its_stem_and_lets_yt_dlp_pick_the_container() {
         // The extension depends on which streams get merged, so claiming
         // one up front would be this program lying about its own output.
-        let args = arguments("https://x.invalid/v", Path::new("D:/out"), Some("holiday.mp4"));
+        let args = arguments(&Wanted { filename: Some("holiday.mp4".to_owned()), ..plain() });
         let template = &args[args.iter().position(|a| a == "-o").unwrap() + 1];
         assert_eq!(template, "holiday.%(ext)s");
     }
 
     #[test]
     fn a_name_with_no_extension_is_left_alone() {
-        let args = arguments("https://x.invalid/v", Path::new("D:/out"), Some("holiday"));
+        let args = arguments(&Wanted { filename: Some("holiday".to_owned()), ..plain() });
         let template = &args[args.iter().position(|a| a == "-o").unwrap() + 1];
         assert_eq!(template, "holiday.%(ext)s");
     }
@@ -329,7 +385,7 @@ mod tests {
     fn it_asks_for_one_video_rather_than_a_playlist() {
         // One address quietly becoming ninety downloads is the surprise
         // this avoids.
-        let args = arguments("https://x.invalid/v", Path::new("D:/out"), None);
+        let args = arguments(&plain());
         assert!(args.iter().any(|a| a == "--no-playlist"));
     }
 
@@ -339,7 +395,7 @@ mod tests {
         // template too. Without `--progress` the only output is the final
         // path: the download works and reports nothing, which looks like a
         // stalled download for as long as it runs.
-        let args = arguments("https://x.invalid/v", Path::new("D:/out"), None);
+        let args = arguments(&plain());
         assert!(args.iter().any(|a| a == "--progress"), "{args:?}");
         assert!(args.iter().any(|a| a == "--newline"));
     }
@@ -348,8 +404,53 @@ mod tests {
     fn printing_the_path_does_not_turn_the_download_into_a_rehearsal() {
         // `--print` implies `--simulate`, which would print a filename and
         // fetch nothing at all.
-        let args = arguments("https://x.invalid/v", Path::new("D:/out"), None);
+        let args = arguments(&plain());
         assert!(args.iter().any(|a| a == "--no-simulate"));
         assert!(args.iter().any(|a| a == "after_move:filepath"));
+    }
+
+    #[test]
+    fn the_referrer_the_page_needed_is_passed_on() {
+        // A site that gates its pages on the referrer gates the page, which
+        // is the request yt-dlp makes to find the video at all.
+        let args =
+            arguments(&Wanted { referrer: Some("https://x.invalid/watch".to_owned()), ..plain() });
+        let at = args.iter().position(|a| a == "--referer").expect("a --referer");
+        assert_eq!(args[at + 1], "https://x.invalid/watch");
+    }
+
+    #[test]
+    fn the_cookies_the_page_needed_are_passed_on() {
+        // The case this exists for: a video behind a sign-in. Without the
+        // cookies yt-dlp is shown whatever a stranger is shown, and the
+        // failure reads as yt-dlp not supporting the site.
+        let args =
+            arguments(&Wanted { cookies: Some("session=abc; lang=en".to_owned()), ..plain() });
+        let at = args.iter().position(|a| a == "--add-header").expect("an --add-header");
+        assert_eq!(args[at + 1], "Cookie:session=abc; lang=en");
+    }
+
+    #[test]
+    fn neither_appears_when_there_is_nothing_to_say() {
+        // An empty `--referer` is not the same as no referrer, and a bare
+        // `Cookie:` header is a request to be treated as signed out by a
+        // site that would otherwise not have looked.
+        let args = arguments(&plain());
+        assert!(!args.iter().any(|a| a == "--referer"), "{args:?}");
+        assert!(!args.iter().any(|a| a == "--add-header"), "{args:?}");
+    }
+
+    #[test]
+    fn credentials_still_cannot_turn_into_options() {
+        // Everything added goes before the `--`, so the address stays the
+        // last argument and a cookie value starting with a dash is a value.
+        let args = arguments(&Wanted {
+            referrer: Some("-r".to_owned()),
+            cookies: Some("-c".to_owned()),
+            ..plain()
+        });
+        let dashes = args.iter().position(|a| a == "--").expect("a -- separator");
+        assert_eq!(args.len(), dashes + 2, "the address is the last argument: {args:?}");
+        assert_eq!(args[dashes + 1], "https://x.invalid/v");
     }
 }

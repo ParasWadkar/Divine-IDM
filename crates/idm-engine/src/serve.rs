@@ -1835,12 +1835,22 @@ async fn run_video(
 ) -> std::result::Result<Option<u64>, Option<Failure>> {
     let program = crate::video::find(&crate::sidecars::dir()).map_err(|_| None)?;
 
+    let wanted = crate::video::Wanted {
+        url: config.url.clone(),
+        output_dir: config.output_dir.clone(),
+        filename: config.filename.clone(),
+        // The page is what yt-dlp has to read, and these are what made the
+        // page readable. The engine has had both all along; this path threw
+        // them away, so a video behind a sign-in failed with whatever the
+        // site shows a stranger.
+        referrer: config.referrer.clone(),
+        cookies: config.cookies.clone(),
+    };
+
     let progress_inner = Arc::clone(inner);
     let fetched = crate::video::fetch_with(
         &program,
-        &config.url,
-        &config.output_dir,
-        config.filename.as_deref(),
+        &wanted,
         move |progress| {
             if let Ok(mut jobs) = progress_inner.jobs.try_lock()
                 && let Some(record) = jobs.get_mut(&id)

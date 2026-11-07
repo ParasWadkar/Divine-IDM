@@ -13,7 +13,7 @@
 
 use std::path::Path;
 
-use idm_engine::video::{self, Progress};
+use idm_engine::video::{self, Progress, Wanted};
 
 fn stub() -> &'static Path {
     Path::new(env!("CARGO_BIN_EXE_stub-ytdlp"))
@@ -22,9 +22,13 @@ fn stub() -> &'static Path {
 #[tokio::test]
 async fn a_video_is_fetched_and_its_path_comes_back() {
     let dir = tempfile::tempdir().unwrap();
-    let got = video::fetch_with(stub(), "https://example.invalid/watch", dir.path(), None, |_| {})
-        .await
-        .expect("the fetch should succeed");
+    let got = video::fetch_with(
+        stub(),
+        &Wanted::new("https://example.invalid/watch", dir.path()),
+        |_| {},
+    )
+    .await
+    .expect("the fetch should succeed");
 
     assert!(got.path.exists(), "the file it named should be there: {:?}", got.path);
     assert_eq!(got.bytes, 4096, "the size comes from the file, not the progress line");
@@ -41,9 +45,11 @@ async fn progress_arrives_while_it_runs() {
     // same as no progress bar.
     let dir = tempfile::tempdir().unwrap();
     let mut seen: Vec<Progress> = Vec::new();
-    video::fetch_with(stub(), "https://example.invalid/watch", dir.path(), None, |p| seen.push(p))
-        .await
-        .unwrap();
+    video::fetch_with(stub(), &Wanted::new("https://example.invalid/watch", dir.path()), |p| {
+        seen.push(p)
+    })
+    .await
+    .unwrap();
 
     assert!(seen.len() >= 3, "expected several updates, got {}", seen.len());
     assert!(
@@ -60,9 +66,11 @@ async fn a_stream_with_no_known_size_still_reports_what_it_has() {
     // a total has to survive the trip rather than arriving as a zero.
     let dir = tempfile::tempdir().unwrap();
     let mut seen: Vec<Progress> = Vec::new();
-    video::fetch_with(stub(), "https://example.invalid/live", dir.path(), None, |p| seen.push(p))
-        .await
-        .unwrap();
+    video::fetch_with(stub(), &Wanted::new("https://example.invalid/live", dir.path()), |p| {
+        seen.push(p)
+    })
+    .await
+    .unwrap();
 
     assert!(seen.iter().all(|p| p.total.is_none()), "no total was known: {seen:?}");
     assert!(seen.last().unwrap().downloaded > 0);
@@ -71,10 +79,13 @@ async fn a_stream_with_no_known_size_still_reports_what_it_has() {
 #[tokio::test]
 async fn a_refusal_comes_back_as_one() {
     let dir = tempfile::tempdir().unwrap();
-    let error =
-        video::fetch_with(stub(), "https://example.invalid/refuse", dir.path(), None, |_| {})
-            .await
-            .expect_err("it should fail");
+    let error = video::fetch_with(
+        stub(),
+        &Wanted::new("https://example.invalid/refuse", dir.path()),
+        |_| {},
+    )
+    .await
+    .expect_err("it should fail");
 
     // Carrying what the tool said, because "yt-dlp failed" on its own tells
     // somebody nothing about whether to try a different address.
@@ -86,9 +97,10 @@ async fn a_chosen_name_is_honoured() {
     let dir = tempfile::tempdir().unwrap();
     let got = video::fetch_with(
         stub(),
-        "https://example.invalid/watch",
-        dir.path(),
-        Some("holiday.mp4"),
+        &Wanted {
+            filename: Some("holiday.mp4".to_owned()),
+            ..Wanted::new("https://example.invalid/watch", dir.path())
+        },
         |_| {},
     )
     .await
@@ -106,4 +118,45 @@ fn yt_dlp_is_only_used_when_it_is_already_installed() {
     let empty = tempfile::tempdir().unwrap();
     let error = video::find(empty.path()).expect_err("nothing is installed there");
     assert!(format!("{error}").contains("yt-dlp"), "{error}");
+}
+
+#[tokio::test]
+async fn a_video_behind_a_sign_in_is_fetched_with_the_credentials_the_job_carries() {
+    // The engine has carried a referrer and a cookie header since the
+    // browser extension did, and this path dropped both: yt-dlp was handed
+    // the address and nothing else, so a page the person was signed in to
+    // was fetched as a stranger. The stub refuses without them, exactly as
+    // a site serving a consent wall does, so this fails if they stop
+    // arriving at the process.
+    let dir = tempfile::tempdir().unwrap();
+    let got = video::fetch_with(
+        stub(),
+        &Wanted {
+            referrer: Some("https://example.invalid/watch".to_owned()),
+            cookies: Some("session=abc".to_owned()),
+            ..Wanted::new("https://example.invalid/gated", dir.path())
+        },
+        |_| {},
+    )
+    .await
+    .expect("with the credentials it should succeed");
+
+    assert!(got.path.exists(), "{:?}", got.path);
+}
+
+#[tokio::test]
+async fn without_them_the_sign_in_wall_comes_back_as_the_reason() {
+    // The other half, and the half that was happening: the failure has to
+    // be the site's own words. "yt-dlp failed" would send somebody looking
+    // for a bug in the extractor rather than at their own session.
+    let dir = tempfile::tempdir().unwrap();
+    let error = video::fetch_with(
+        stub(),
+        &Wanted::new("https://example.invalid/gated", dir.path()),
+        |_| {},
+    )
+    .await
+    .expect_err("a stranger is refused");
+
+    assert!(format!("{error}").contains("Sign in"), "{error}");
 }
