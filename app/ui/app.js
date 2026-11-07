@@ -2385,12 +2385,14 @@ for (const id of [
   "scan-downloads",
   "extract-zips",
   "web-port",
+  "rpc-port",
   "hook-program",
   "hook-arguments",
   "start-with-windows",
   "resume-on-start",
   "post-action",
   "countdown",
+  "video-quality",
 ]) {
   // A fresh call, not the listener itself: addEventListener would pass the
   // Event as `overrides`, whose properties would then be spread into the

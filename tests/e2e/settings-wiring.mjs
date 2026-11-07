@@ -124,6 +124,49 @@ for (const field of fields) {
 }
 
 // ---------------------------------------------------------------------------
+// Every control in the save must also be a control that triggers a save
+// ---------------------------------------------------------------------------
+//
+// `saveSettings` rebuilds the whole object, so a control that is read there
+// is saved correctly -- whenever a save happens. Nothing makes one happen by
+// itself. A control fires a save either by being in the `for (const id of
+// [...])` list near the bottom of app.js, or by having a listener written
+// for it because it needs to do something else first.
+//
+// Leave a control out of both and it is the quietest failure in the panel:
+// the dropdown moves, it stays moved, it reads back correctly from the
+// window's own state, and nothing is ever written. It only comes undone on
+// the next restart, by which time it looks like the setting not persisting
+// rather than the setting never having been sent. That happened to
+// `video-quality` the day it was added, with the rest of this file passing,
+// because the rest of this file checks the save and not what causes one.
+
+const autoSaveAt = app.indexOf("for (const id of [");
+const autoSave = new Set(
+  autoSaveAt < 0
+    ? []
+    : [...app.slice(autoSaveAt, app.indexOf("]", autoSaveAt)).matchAll(/"([^"]+)"/g)].map(
+        (m) => m[1],
+      ),
+);
+
+console.log("\nControls: changing one must save it");
+
+// Every `$("id")` the save literal reads from.
+const read = [...literal.matchAll(/\$\("([^"]+)"\)/g)].map((m) => m[1]);
+
+for (const id of new Set(read)) {
+  const own = app.includes(`$("${id}").addEventListener("change"`);
+  check(
+    autoSave.has(id) || own,
+    `#${id} triggers a save`,
+    autoSave.has(id) || own
+      ? ""
+      : "in neither the auto-save list nor a listener of its own, so changing it writes nothing",
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Dropdowns: the values the window offers must be names the engine knows
 // ---------------------------------------------------------------------------
 //

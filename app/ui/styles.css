@@ -2,6 +2,26 @@
    and the icon is built for the same palette. */
 
 :root {
+  /* The page says it is dark at the top, and everything below sets its own
+     colours -- but a `<select>`'s open list, the scrollbars, and the inside
+     of a date or number field are drawn by the browser, not from here.
+     `select { background }` styles the closed control and reaches nothing
+     inside the open one. Without this declaration those are drawn for a
+     light page on top of a dark one.
+
+     One line at the root rather than a rule per control: the page was not
+     styling them wrongly, it was never saying which scheme it is.
+
+     Honesty about what this is not: I went looking at the dropdowns in the
+     real window, could not read the options, and wrote this as the fix. The
+     popup is drawn by a separate WebView2 process that the screenshot tool
+     masks out, so what I was looking at was very probably the mask and not
+     the window. The declaration is still the right one for a dark-only
+     page, and it is kept on that ground alone -- not on the strength of a
+     bug nobody has confirmed. If somebody does find an unreadable dropdown
+     here, this is the first thing to check, and the second is whether the
+     app was rebuilt: the UI is embedded at build time. */
+  color-scheme: dark;
   --bg: #090d15;
   --panel: #0f1520;
   --panel-2: #151d2b;
