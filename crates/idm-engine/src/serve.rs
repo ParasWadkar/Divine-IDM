@@ -1845,6 +1845,13 @@ async fn run_video(
         // site shows a stranger.
         referrer: config.referrer.clone(),
         cookies: config.cookies.clone(),
+        // Resolved by this engine's own search, which prefers a trusted
+        // copy over whatever is on PATH, rather than leaving yt-dlp to the
+        // reverse precedence.
+        ffmpeg: idm_media::sidecar::find(
+            idm_media::sidecar::Tool::Ffmpeg,
+            Some(&crate::sidecars::dir()),
+        ),
     };
 
     let progress_inner = Arc::clone(inner);

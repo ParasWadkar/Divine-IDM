@@ -7,7 +7,9 @@
 //! arguments rather than as shell text, and that a failure is reported
 //! rather than swallowed.
 //!
-//! So this answers `-version` like ffmpeg does, writes whatever output file
+//! So this answers `-version` like ffmpeg does, prints the banner on
+//! stderr for every other invocation as ffmpeg also does -- which is how
+//! callers detect it -- writes whatever output file
 //! it is told to, and records the exact argument vector it received so a
 //! test can assert on it. It converts nothing.
 //!
@@ -25,6 +27,17 @@ fn main() {
     if arguments.iter().any(|argument| argument == "-version") {
         println!("ffmpeg version 0.0-stub Copyright (c) nobody");
         println!("built with nothing at all");
+        return;
+    }
+
+    // The banner, on stderr, whatever it was asked to do. Real ffmpeg does
+    // this on every invocation and it is not decoration: it is how other
+    // programs decide an ffmpeg is there. yt-dlp runs `ffmpeg -bsfs` and
+    // reads the version out of the banner, so a stub that answers only
+    // `-version` is undetectable by the one caller whose detection we most
+    // need to test.
+    eprintln!("ffmpeg version 0.0-stub Copyright (c) nobody");
+    if arguments.iter().any(|argument| argument == "-bsfs") {
         return;
     }
 

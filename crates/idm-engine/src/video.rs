@@ -122,6 +122,21 @@ pub struct Wanted {
     pub referrer: Option<String>,
     /// A `Cookie` header value, as the extension and the UI supply it.
     pub cookies: Option<String>,
+    /// The ffmpeg this engine would use, so yt-dlp uses the same one.
+    ///
+    /// Not a fix for ffmpeg going unfound: yt-dlp searches its own
+    /// directory, and the managed ffmpeg sits beside the managed yt-dlp, so
+    /// that case already worked -- measured, not assumed. It is about
+    /// *which* ffmpeg. Left to itself yt-dlp falls back to `PATH`, and this
+    /// program's own search deliberately prefers a trusted copy over
+    /// `PATH` precisely so that "an unrelated ffmpeg somewhere in the
+    /// user's environment" cannot silently take over the muxing. Saying so
+    /// explicitly gives yt-dlp that same precedence instead of the one we
+    /// refused. It also covers the layout where the two are not together:
+    /// an ffmpeg bundled beside the app and a yt-dlp fetched into the
+    /// state folder are in different directories, and there yt-dlp finds
+    /// nothing.
+    pub ffmpeg: Option<PathBuf>,
 }
 
 impl Wanted {
@@ -132,6 +147,7 @@ impl Wanted {
             filename: None,
             referrer: None,
             cookies: None,
+            ffmpeg: None,
         }
     }
 }
@@ -203,6 +219,16 @@ pub fn arguments(wanted: &Wanted) -> Vec<String> {
     if let Some(cookies) = &wanted.cookies {
         args.push("--add-header".to_owned());
         args.push(format!("Cookie:{cookies}"));
+    }
+
+    // The directory, not the file. yt-dlp wants ffprobe from the same
+    // place, and giving it the folder lets it find both; naming the ffmpeg
+    // binary alone leaves ffprobe to `PATH` again.
+    if let Some(ffmpeg) = &wanted.ffmpeg
+        && let Some(folder) = ffmpeg.parent()
+    {
+        args.push("--ffmpeg-location".to_owned());
+        args.push(folder.display().to_string());
     }
 
     // Last, and after `--`, so an address beginning with a dash is an
@@ -452,5 +478,26 @@ mod tests {
         let dashes = args.iter().position(|a| a == "--").expect("a -- separator");
         assert_eq!(args.len(), dashes + 2, "the address is the last argument: {args:?}");
         assert_eq!(args[dashes + 1], "https://x.invalid/v");
+    }
+
+    #[test]
+    fn yt_dlp_is_pointed_at_the_ffmpeg_this_engine_uses() {
+        // The folder rather than the file, because yt-dlp wants ffprobe
+        // from the same place and naming only the binary leaves ffprobe to
+        // be found on PATH.
+        let args = arguments(&Wanted {
+            ffmpeg: Some(PathBuf::from("D:/state/sidecars/ffmpeg.exe")),
+            ..plain()
+        });
+        let at = args.iter().position(|a| a == "--ffmpeg-location").expect("a location");
+        assert_eq!(args[at + 1], Path::new("D:/state/sidecars").display().to_string());
+    }
+
+    #[test]
+    fn nothing_is_claimed_about_ffmpeg_when_there_is_none() {
+        // An empty `--ffmpeg-location` is not "look as you normally
+        // would"; it is a directory that does not exist.
+        let args = arguments(&plain());
+        assert!(!args.iter().any(|a| a == "--ffmpeg-location"), "{args:?}");
     }
 }
