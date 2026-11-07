@@ -25,6 +25,7 @@ const protocol = readFileSync(
   "utf8",
 );
 const app = readFileSync(join(REPO, "app", "ui", "app.js"), "utf8");
+const html = readFileSync(join(REPO, "app", "ui", "index.html"), "utf8");
 
 let failures = 0;
 function check(ok, label, detail = "") {
@@ -119,6 +120,92 @@ for (const field of fields) {
     beforeGuard.includes(`settings?.${field}`)
       ? ""
       : "renderSettings() must refresh it before its early return, or it goes stale",
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Dropdowns: the values the window offers must be names the engine knows
+// ---------------------------------------------------------------------------
+//
+// A setting sent from a `<select>` goes over as the chosen option's value
+// verbatim, and the engine deserialises it into an enum. An option value
+// that is not one of that enum's serde names does not fail politely: the
+// whole Settings object fails to parse, and the engine's answer to an
+// unreadable settings object is to use the defaults. So one wrong option
+// value in the markup resets every setting the person has, with no error --
+// the exact fault the rest of this file exists for, arriving by another
+// door.
+//
+// The names come from the table in `protocol.rs`'s own test rather than
+// being converted from the variant names here. That test serialises each
+// variant and compares, so its table is checked against serde itself at run
+// time; converting again in JavaScript would be a second guess at whether
+// `UpTo1080` becomes `up_to1080` or `up_to_1080`, and a guard that is wrong
+// about the thing it guards is worse than no guard. Checking the table
+// covers every variant also means neither file can quietly get ahead of the
+// other.
+
+/** Every variant of `pub enum <name>`, in order. */
+function variantsOf(name) {
+  const at = protocol.indexOf(`pub enum ${name} {`);
+  if (at < 0) return null;
+  return [...blockAt(protocol, at).matchAll(/^\s*([A-Z]\w*),/gm)].map((m) => m[1]);
+}
+
+/** The `(Enum::Variant, "name")` pairs pinned by a test in protocol.rs. */
+function pinnedNames(name) {
+  const pattern = new RegExp(`\\(${name}::(\\w+),\\s*"([^"]+)"\\)`, "g");
+  return new Map([...protocol.matchAll(pattern)].map((m) => [m[1], m[2]]));
+}
+
+/** The `value="..."` list of `<select id="...">` in index.html. */
+function optionsOf(id) {
+  const at = html.indexOf(`<select id="${id}">`);
+  if (at < 0) return null;
+  const end = html.indexOf("</select>", at);
+  return [...html.slice(at, end).matchAll(/value="([^"]*)"/g)].map((m) => m[1]);
+}
+
+console.log("\nDropdowns: window ↔ engine");
+
+// field -> the Rust enum behind it. Only the ones whose value is an enum
+// name on the wire; a select that sends a number or a free string is not
+// this kind of risk.
+const DROPDOWNS = [
+  { field: "video_quality", select: "video-quality", enumName: "VideoQuality" },
+];
+
+for (const { field, select, enumName } of DROPDOWNS) {
+  const variants = variantsOf(enumName);
+  const pinned = pinnedNames(enumName);
+  const options = optionsOf(select);
+
+  if (!variants || !options) {
+    check(
+      false,
+      field,
+      !variants ? `no \`pub enum ${enumName}\`` : `no <select id="${select}">`,
+    );
+    continue;
+  }
+
+  const unpinned = variants.filter((variant) => !pinned.has(variant));
+  check(
+    unpinned.length === 0,
+    `${enumName}: every variant has a name pinned by a test`,
+    unpinned.length === 0
+      ? ""
+      : `${unpinned.join(", ")} missing from the table in protocol.rs`,
+  );
+
+  const expected = variants.map((variant) => pinned.get(variant)).filter(Boolean).sort();
+  const offered = [...options].sort();
+  const same =
+    expected.length === offered.length && expected.every((value, i) => value === offered[i]);
+  check(
+    same,
+    `#${select} offers exactly what ${enumName} accepts`,
+    same ? "" : `engine: ${expected.join(", ")} | window: ${offered.join(", ")}`,
   );
 }
 

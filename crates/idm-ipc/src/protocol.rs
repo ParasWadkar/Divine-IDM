@@ -282,6 +282,47 @@ pub enum PostActionSetting {
     Shutdown,
 }
 
+/// How good a video to fetch when a page is handed to yt-dlp.
+///
+/// A short list rather than a height in pixels. The sites this applies to
+/// offer a handful of renditions, a free-text box invites `1079`, and the
+/// window wants a dropdown either way. `Best` is the default and passes
+/// nothing at all, so yt-dlp's own default choice stands rather than being
+/// reimplemented here and left to drift.
+///
+/// What a cap means: a ceiling where the site offers something under it.
+/// Where it does not -- a video published only at 1080p, with a 720p
+/// ceiling -- the video is fetched anyway rather than refused. The
+/// alternative is a download manager that declines to download a video
+/// because it is too good, which nobody wants, and "worst available"
+/// would answer a request for 720p with 144p.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VideoQuality {
+    #[default]
+    Best,
+    UpTo1080,
+    UpTo720,
+    UpTo480,
+    /// The audio only, in whatever container the site serves it in.
+    ///
+    /// Not a conversion to mp3: that needs ffmpeg and re-encodes what was
+    /// already fine. This asks for the audio stream the site already has.
+    AudioOnly,
+}
+
+impl VideoQuality {
+    /// The height ceiling, or `None` for no ceiling.
+    pub fn max_height(self) -> Option<u32> {
+        match self {
+            Self::UpTo1080 => Some(1080),
+            Self::UpTo720 => Some(720),
+            Self::UpTo480 => Some(480),
+            Self::Best | Self::AudioOnly => None,
+        }
+    }
+}
+
 /// Where the engine's own requests go on their way out.
 ///
 /// Three choices rather than an optional address, because "no proxy" and
@@ -396,6 +437,12 @@ pub struct Settings {
     /// rather than as a flag on each row because most of these browsers are
     /// not paired with anything, so there is no row of ours to hang it on.
     pub hidden_browsers: Vec<String>,
+    /// How good a video to fetch when a page is handed to yt-dlp.
+    ///
+    /// Only the video path reads this. An ordinary download of a file that
+    /// happens to be a video has one rendition -- the one at the address --
+    /// and there is nothing for a quality preference to choose between.
+    pub video_quality: VideoQuality,
     pub proxy: ProxySetting,
     /// The proxy to use when [`Settings::proxy`] is `Manual`.
     ///
@@ -520,6 +567,10 @@ impl Default for Settings {
             // what every other program on it does, and a download manager
             // that quietly ignored it would look broken on exactly the
             // networks where a proxy is mandatory.
+            // The best the site has, which is what somebody who has not
+            // thought about it wants. A ceiling is a deliberate trade of
+            // quality for bytes and nobody should get it by accident.
+            video_quality: VideoQuality::Best,
             proxy: ProxySetting::System,
             proxy_address: String::new(),
             scan_downloads: true,
@@ -1264,6 +1315,38 @@ where
 
 #[cfg(test)]
 mod tests {
+
+    /// The window's dropdown values are these exact strings.
+    ///
+    /// Not a tidiness test. The Schedule tab shipped broken because a
+    /// field was `start_minute` on one side and `startMinute` on the
+    /// other, and Save silently did nothing -- no error, no clue. A
+    /// setting whose name the two halves disagree about fails the same
+    /// quiet way, and `UpTo1080` is exactly the shape where nobody can
+    /// tell `up_to1080` from `up_to_1080` by looking. These strings
+    /// appear verbatim as option values in `index.html`.
+    #[test]
+    fn the_quality_names_are_what_the_window_sends() {
+        for (quality, name) in [
+            (VideoQuality::Best, "best"),
+            (VideoQuality::UpTo1080, "up_to1080"),
+            (VideoQuality::UpTo720, "up_to720"),
+            (VideoQuality::UpTo480, "up_to480"),
+            (VideoQuality::AudioOnly, "audio_only"),
+        ] {
+            let written = serde_json::to_string(&quality).expect("it should serialise");
+            assert_eq!(written, format!("\"{name}\""), "{quality:?}");
+            let read: VideoQuality = serde_json::from_str(&written).expect("it should read back");
+            assert_eq!(read, quality);
+        }
+    }
+
+    /// A settings file written before this field existed still loads.
+    #[test]
+    fn an_older_settings_file_gets_the_best_quality() {
+        let settings: Settings = serde_json::from_str("{}").expect("every field has a default");
+        assert_eq!(settings.video_quality, VideoQuality::Best);
+    }
     use super::*;
 
     fn request(url: &str) -> DownloadRequest {

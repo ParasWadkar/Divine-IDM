@@ -1845,6 +1845,11 @@ async fn run_video(
         // site shows a stranger.
         referrer: config.referrer.clone(),
         cookies: config.cookies.clone(),
+        // The person's choice, turned into yt-dlp's format language here
+        // rather than in the protocol: what "720p" means to yt-dlp is this
+        // module's business, and what the person asked for is the
+        // protocol's.
+        format: crate::video::selector(inner.settings.lock().await.video_quality),
         // Resolved by this engine's own search, which prefers a trusted
         // copy over whatever is on PATH, rather than leaving yt-dlp to the
         // reverse precedence.

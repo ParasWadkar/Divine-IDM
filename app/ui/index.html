@@ -678,6 +678,25 @@
                 when it arrives, and again every time before it runs.
               </p>
               <div id="tools-list" class="browser-list"></div>
+
+              <!-- A short list rather than a box to type a height into: the
+                   sites this applies to offer a handful of renditions, and a
+                   free-text height invites 1079. A ceiling is a ceiling where
+                   the site has something under it; where it does not, the
+                   video is fetched anyway rather than refused. -->
+              <label
+                class="row"
+                title="Only applies to a video fetched from a page by yt-dlp. A file downloaded straight from a link has one version — the one at that address — and there is nothing to choose between."
+              >
+                <span>Fetch video at</span>
+                <select id="video-quality">
+                  <option value="best">the best the site has</option>
+                  <option value="up_to1080">1080p or under</option>
+                  <option value="up_to720">720p or under</option>
+                  <option value="up_to480">480p or under</option>
+                  <option value="audio_only">sound only</option>
+                </select>
+              </label>
             </section>
 
             <!-- Which browsers are connected, and how to connect the rest. One

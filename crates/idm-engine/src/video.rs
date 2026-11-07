@@ -34,6 +34,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
+use idm_ipc::protocol::VideoQuality;
 use idm_media::sidecar::{self, Tool};
 use tokio::io::{AsyncBufReadExt, BufReader};
 
@@ -122,6 +123,12 @@ pub struct Wanted {
     pub referrer: Option<String>,
     /// A `Cookie` header value, as the extension and the UI supply it.
     pub cookies: Option<String>,
+    /// A yt-dlp format selector, or `None` for whatever yt-dlp picks.
+    ///
+    /// A string rather than the setting, because deciding what "720p"
+    /// means in yt-dlp's format language is this module's job and not the
+    /// protocol's -- the protocol says what the person asked for.
+    pub format: Option<String>,
     /// The ffmpeg this engine would use, so yt-dlp uses the same one.
     ///
     /// Not a fix for ffmpeg going unfound: yt-dlp searches its own
@@ -147,6 +154,7 @@ impl Wanted {
             filename: None,
             referrer: None,
             cookies: None,
+            format: None,
             ffmpeg: None,
         }
     }
@@ -221,6 +229,15 @@ pub fn arguments(wanted: &Wanted) -> Vec<String> {
         args.push(format!("Cookie:{cookies}"));
     }
 
+    // Omitted entirely for the default, rather than spelled out as
+    // whatever yt-dlp's default happens to be today: copying it here would
+    // freeze a decision that yt-dlp revises as sites change, and the whole
+    // reason to hand a page to yt-dlp is that it keeps up and we do not.
+    if let Some(format) = &wanted.format {
+        args.push("-f".to_owned());
+        args.push(format.clone());
+    }
+
     // The directory, not the file. yt-dlp wants ffprobe from the same
     // place, and giving it the folder lets it find both; naming the ffmpeg
     // binary alone leaves ffprobe to `PATH` again.
@@ -242,6 +259,31 @@ fn strip_extension(name: &str) -> &str {
     match name.rsplit_once('.') {
         Some((stem, ext)) if !stem.is_empty() && ext.len() <= 5 => stem,
         _ => name,
+    }
+}
+
+/// What to ask yt-dlp for, given what the person chose.
+///
+/// `None` for `Best`: no `-f` at all, so yt-dlp's own default stands.
+///
+/// The capped form is `bv*[height<=N]+ba/b[height<=N]/b` -- the best video
+/// under the ceiling merged with the best audio; failing that a single
+/// combined format under the ceiling, for sites that serve one file; and
+/// failing that the best there is. That last fallback is the deliberate
+/// part. A video published only at 1080p, asked for at 720p, is fetched at
+/// 1080p rather than refused, because a download manager that declines to
+/// download a video for being too good is useless, and the other option --
+/// worst available -- would answer a request for 720p with 144p.
+pub fn selector(quality: VideoQuality) -> Option<String> {
+    match quality {
+        VideoQuality::Best => None,
+        // The audio the site already has, in the container it already has
+        // it in. Converting it would need ffmpeg and would re-encode
+        // something that was fine.
+        VideoQuality::AudioOnly => Some("ba/b".to_owned()),
+        other => other
+            .max_height()
+            .map(|height| format!("bv*[height<={height}]+ba/b[height<={height}]/b")),
     }
 }
 
@@ -499,5 +541,53 @@ mod tests {
         // would"; it is a directory that does not exist.
         let args = arguments(&plain());
         assert!(!args.iter().any(|a| a == "--ffmpeg-location"), "{args:?}");
+    }
+
+    #[test]
+    fn the_default_quality_asks_for_nothing() {
+        // yt-dlp's own default, not a copy of it frozen here: the point of
+        // handing a page to yt-dlp is that it keeps up with sites and we do
+        // not.
+        assert_eq!(selector(VideoQuality::Best), None);
+        let args = arguments(&plain());
+        assert!(!args.iter().any(|a| a == "-f"), "{args:?}");
+    }
+
+    #[test]
+    fn a_ceiling_caps_the_height_and_still_gets_something() {
+        let chosen = selector(VideoQuality::UpTo720).expect("a selector");
+        assert!(chosen.contains("height<=720"), "{chosen}");
+        // The trailing fallback, which is why a 1080p-only video asked for
+        // at 720p is fetched rather than refused.
+        assert!(chosen.ends_with("/b"), "{chosen}");
+    }
+
+    #[test]
+    fn each_ceiling_is_the_height_it_says() {
+        for (quality, height) in [
+            (VideoQuality::UpTo1080, 1080),
+            (VideoQuality::UpTo720, 720),
+            (VideoQuality::UpTo480, 480),
+        ] {
+            let chosen = selector(quality).expect("a selector");
+            assert!(chosen.contains(&format!("height<={height}")), "{quality:?}: {chosen}");
+        }
+    }
+
+    #[test]
+    fn audio_only_asks_for_audio_and_does_not_transcode() {
+        // `--extract-audio` would need ffmpeg and would re-encode a stream
+        // that was already fine, so this takes the audio the site has.
+        let chosen = selector(VideoQuality::AudioOnly).expect("a selector");
+        assert!(chosen.starts_with("ba"), "{chosen}");
+        let args = arguments(&Wanted { format: Some(chosen), ..plain() });
+        assert!(!args.iter().any(|a| a == "--extract-audio"), "{args:?}");
+    }
+
+    #[test]
+    fn the_format_cannot_turn_into_an_option_either() {
+        let args = arguments(&Wanted { format: Some("-x".to_owned()), ..plain() });
+        let dashes = args.iter().position(|a| a == "--").expect("a -- separator");
+        assert_eq!(args.len(), dashes + 2, "{args:?}");
     }
 }

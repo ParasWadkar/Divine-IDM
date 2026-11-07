@@ -684,6 +684,7 @@ function renderSettings(settings, force = false) {
   $("post-action").value = settings.post_action;
   $("countdown").value = String(settings.post_action_countdown_secs);
   $("proxy-mode").value = settings.proxy ?? "system";
+  $("video-quality").value = settings.video_quality ?? "best";
   $("proxy-address").value = settings.proxy_address ?? "";
   showProxyAddress();
   showFolder();
@@ -1242,6 +1243,7 @@ async function saveSettings(overrides = {}) {
     resume_on_start: $("resume-on-start").checked,
     post_action: $("post-action").value,
     post_action_countdown_secs: Number($("countdown").value),
+    video_quality: $("video-quality").value,
     proxy: $("proxy-mode").value,
     proxy_address: $("proxy-address").value.trim(),
     ...overrides,
