@@ -1810,6 +1810,69 @@ async fn run_sftp(
 /// until the last one arrives. The job's byte count still moves, so the
 /// window shows something advancing, but its total stays unset rather than
 /// being invented from a guess at the segment size.
+/// Whether a failed download is the kind yt-dlp might rescue.
+///
+/// One failure and one scheme, deliberately narrow. "No length, nothing to
+/// fetch in parallel" is what a video page produces and is not what a
+/// server being down, a 404, or a full disk produces -- none of which
+/// yt-dlp would improve, and all of which it would slow down by being
+/// asked. The scheme matters because yt-dlp speaks http and this engine
+/// also accepts ftp, sftp, magnet and file addresses it has its own
+/// answers for.
+fn worth_asking_yt_dlp(kind: crate::failure::Kind, url: &str) -> bool {
+    kind == crate::failure::Kind::DownloadUnknownSize
+        && (url.starts_with("http://") || url.starts_with("https://"))
+}
+
+/// Fetches the video a page is about, with yt-dlp.
+///
+/// `Err(None)` means yt-dlp is not installed, which is not its failure and
+/// must not replace the refusal the ordinary path already gave.
+async fn run_video(
+    inner: &Arc<Inner>,
+    id: JobId,
+    config: &DownloadConfig,
+) -> std::result::Result<Option<u64>, Option<Failure>> {
+    let program = crate::video::find(&crate::sidecars::dir()).map_err(|_| None)?;
+
+    let progress_inner = Arc::clone(inner);
+    let fetched = crate::video::fetch_with(
+        &program,
+        &config.url,
+        &config.output_dir,
+        config.filename.as_deref(),
+        move |progress| {
+            if let Ok(mut jobs) = progress_inner.jobs.try_lock()
+                && let Some(record) = jobs.get_mut(&id)
+            {
+                record.status.downloaded = progress.downloaded;
+                // Only when it is known. A live stream has no size, and a
+                // bar drawn against a total nobody measured is a lie that
+                // reaches 100% and keeps going.
+                if let Some(total) = progress.total {
+                    record.status.total = Some(total);
+                }
+                record.status.connections = 1;
+            }
+        },
+    )
+    .await
+    .map_err(|error| Some(Failure::from_transport(error)))?;
+
+    // The name comes from the video's title, so the one guessed from the
+    // address at enqueue is wrong by the time this finishes -- and it is
+    // the name every later step uses to find the file.
+    if let Some(name) = fetched.path.file_name().and_then(|n| n.to_str()) {
+        let mut jobs = inner.jobs.lock().await;
+        if let Some(record) = jobs.get_mut(&id) {
+            record.status.filename = name.to_owned();
+            record.status.downloaded = fetched.bytes;
+            record.status.total = Some(fetched.bytes);
+        }
+    }
+    Ok(Some(fetched.bytes))
+}
+
 async fn run_stream(
     inner: &Arc<Inner>,
     id: JobId,
@@ -1975,6 +2038,31 @@ async fn start(inner: &Arc<Inner>, id: JobId, config: DownloadConfig) {
                 run_sftp(&inner, id, &config).await
             } else {
                 run_file(&inner, id, &config).await
+            };
+
+            // A page is not a file, and the refusal above says so exactly:
+            // no length, nothing to fetch in parallel. What the person
+            // wanted is the video the page is about, and working out which
+            // of a site's streams that is -- for a thousand sites that each
+            // change quarterly -- is yt-dlp's whole job.
+            //
+            // Only after the ordinary path has tried and only on that one
+            // failure, so a plain download never pays for this; and only
+            // when yt-dlp has already been fetched, deliberately, in
+            // Settings. When it is absent the original refusal stands,
+            // because "unable to determine file size" is the true answer
+            // and installing a program uninvited is not an answer at all.
+            let outcome = match outcome {
+                Err(failure) if worth_asking_yt_dlp(failure.kind, &config.url) => {
+                    match run_video(&inner, id, &config).await {
+                        Ok(total) => Ok(total),
+                        // Its refusal when it had a go, ours when it was
+                        // never there to have one.
+                        Err(Some(theirs)) => Err(theirs),
+                        Err(None) => Err(failure),
+                    }
+                }
+                other => other,
             };
 
             match outcome {
@@ -5429,6 +5517,37 @@ milk
         assert_eq!(job.config.url, fresh, "the engine should fetch from the new address");
         assert_eq!(job.status.url, fresh, "and the window should show it");
         assert_eq!(job.status.filename, "f.bin", "the destination must not move");
+    }
+
+    #[test]
+    fn only_a_page_with_no_length_is_worth_handing_to_yt_dlp() {
+        use crate::failure::Kind;
+        let page = "https://example.invalid/watch?v=x";
+        assert!(worth_asking_yt_dlp(Kind::DownloadUnknownSize, page));
+
+        // Everything yt-dlp would not improve. Asking it would turn a
+        // quick, accurate refusal into a slow one.
+        for kind in [
+            Kind::HttpNotFound,
+            Kind::ServerRangesUnsupported,
+            Kind::Unclassified,
+            Kind::StorageInsufficientSpace,
+        ] {
+            assert!(!worth_asking_yt_dlp(kind, page), "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn schemes_the_engine_has_its_own_answers_for_are_left_alone() {
+        use crate::failure::Kind;
+        for url in [
+            "ftp://example.invalid/f.bin",
+            "sftp://example.invalid/f.bin",
+            "magnet:?xt=urn:btih:abc",
+            "file:///C:/x.bin",
+        ] {
+            assert!(!worth_asking_yt_dlp(Kind::DownloadUnknownSize, url), "{url}");
+        }
     }
 
     #[tokio::test]

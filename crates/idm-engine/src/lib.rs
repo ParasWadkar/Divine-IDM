@@ -28,6 +28,7 @@ pub mod schedule;
 pub mod serve;
 pub mod sidecars;
 pub mod unpack;
+pub mod video;
 pub mod web;
 
 pub use serve::Engine;

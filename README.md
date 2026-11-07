@@ -91,6 +91,14 @@ an extension you have not approved.
   stream no longer holds up the others. `idm --http3` insists on it and
   `idm --no-http3` refuses it, if you want to see the difference for
   yourself.
+- **A video on a page.** Paste the page's address rather than hunting for
+  the file. DivinePulse tries to fetch it directly first; when the page
+  turns out not to be a file at all, it hands the address to **yt-dlp** —
+  if you have fetched yt-dlp, in Settings, the same way as ffmpeg. Nothing
+  installs it for you: without it you get the same plain "couldn't work out
+  the size" you would have had, because a download manager that quietly
+  installs a program in order to perform a download is not a fair trade.
+  One address gives one video, not a whole playlist.
 - **Driving it from something else.** Two ways, both off until you switch
   them on in Settings.
 
