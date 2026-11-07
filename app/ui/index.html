@@ -736,6 +736,18 @@
       <div class="modal">
         <p id="ask-message"></p>
         <input id="ask-input" class="ask-input" type="text" spellcheck="false" autocomplete="off" />
+        <!-- Shown only when the caller asks for it, so the common case stays
+             a one-field prompt somebody can finish with Enter. -->
+        <label id="ask-extra-row" hidden>
+          <span id="ask-extra-label"></span>
+          <input
+            id="ask-extra"
+            class="ask-input"
+            type="text"
+            spellcheck="false"
+            autocomplete="off"
+          />
+        </label>
         <div class="modal-actions">
           <button id="ask-cancel" class="ghost">Cancel</button>
           <button id="ask-ok">OK</button>

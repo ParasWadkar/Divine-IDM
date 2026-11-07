@@ -519,9 +519,19 @@ async fn pause_job(state: State<'_, AppState>, id: u64) -> Result<(), String> {
 }
 
 /// Points a download at a new address without losing what it has.
+///
+/// Headers are optional and separate, because a signed link and the cookie
+/// that authorises it usually expire together: replacing only the address
+/// earns the same refusal a moment later.
 #[tauri::command]
-async fn refresh_link(state: State<'_, AppState>, id: u64, url: String) -> Result<(), String> {
-    state.simple(Request::RefreshUrl { id: JobId(id), url }).await
+async fn refresh_link(
+    state: State<'_, AppState>,
+    id: u64,
+    url: String,
+    referrer: Option<String>,
+    cookies: Option<String>,
+) -> Result<(), String> {
+    state.simple(Request::RefreshUrl { id: JobId(id), url, referrer, cookies }).await
 }
 
 #[tauri::command]

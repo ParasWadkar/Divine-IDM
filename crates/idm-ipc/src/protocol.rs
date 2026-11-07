@@ -600,6 +600,22 @@ pub enum Request {
     RefreshUrl {
         id: JobId,
         url: String,
+        /// Fresh headers to go with the fresh address.
+        ///
+        /// A signed link and the cookie that authorises it usually expire
+        /// together, so replacing only the address gets the same refusal a
+        /// moment later -- the download keeps the headers it was created
+        /// with, and those are exactly the stale ones. Separate from the
+        /// address because they are not always both stale: a link that
+        /// simply timed out needs no new cookie.
+        ///
+        /// `None` leaves what the download already had, which is what a
+        /// caller that only pasted an address means. Defaulted so a client
+        /// built before these existed still sends a message that parses.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        referrer: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cookies: Option<String>,
     },
     /// Asks the user to approve this client. Never self-approving: the reply
     /// is only ever "pending" until a human says otherwise in the app.

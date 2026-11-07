@@ -1028,7 +1028,13 @@ impl Engine {
     /// resumed from the address it was started with -- but the bytes on disk
     /// are still perfectly good, and the engine checks on resume that the new
     /// address serves the same file before appending to them.
-    async fn refresh_url(&self, id: JobId, url: String) -> Response {
+    async fn refresh_url(
+        &self,
+        id: JobId,
+        url: String,
+        referrer: Option<String>,
+        cookies: Option<String>,
+    ) -> Response {
         // Vetted exactly as a new download would be. A refreshed address is
         // no more trustworthy than the first one.
         let probe = DownloadRequest { url: url.clone(), ..Default::default() };
@@ -1048,6 +1054,16 @@ impl Engine {
                         abort.abort();
                     }
                     job.config.url = url.clone();
+                    // Only what was actually given. A caller that pasted an
+                    // address and nothing else means "the headers are still
+                    // good", and clearing them would turn one expired thing
+                    // into two.
+                    if let Some(referrer) = referrer {
+                        job.config.referrer = Some(referrer);
+                    }
+                    if let Some(cookies) = cookies {
+                        job.config.cookies = Some(cookies);
+                    }
                     job.status.url = url;
                     job.status.state = JobState::Queued;
                     job.status.error = None;
@@ -3128,7 +3144,9 @@ impl Handler for Engine {
             Request::Resume { id } => self.resume(id).await,
             Request::ResumeFromHistory { row_id, url } => self.resume_history(row_id, url).await,
             Request::Pause { id } => self.pause(id).await,
-            Request::RefreshUrl { id, url } => self.refresh_url(id, url).await,
+            Request::RefreshUrl { id, url, referrer, cookies } => {
+                self.refresh_url(id, url, referrer, cookies).await
+            }
             Request::RequestPairing { label } => self.request_pairing(client, label).await,
             Request::ListPairings => self.list_pairings().await,
             Request::ApprovePairing { request_id } => self.approve_pairing(request_id).await,
@@ -4872,7 +4890,12 @@ mod tests {
                 // exists, which is the worst shape in the protocol: the
                 // file keeps the name the user approved and the bytes come
                 // from somewhere else.
-                Request::RefreshUrl { id: JobId(1), url: "https://elsewhere.invalid/x.bin".into() },
+                Request::RefreshUrl {
+                    id: JobId(1),
+                    url: "https://elsewhere.invalid/x.bin".into(),
+                    referrer: None,
+                    cookies: None,
+                },
                 Request::ResumeFromHistory {
                     row_id: 1,
                     url: Some("https://elsewhere.invalid/x.bin".into()),
@@ -5394,7 +5417,10 @@ milk
 
         let fresh = "https://new.invalid/f.bin?sig=abc";
         assert!(
-            matches!(engine.refresh_url(id, fresh.into()).await, Response::Accepted { .. }),
+            matches!(
+                engine.refresh_url(id, fresh.into(), None, None).await,
+                Response::Accepted { .. }
+            ),
             "refresh"
         );
 
@@ -5403,6 +5429,57 @@ milk
         assert_eq!(job.config.url, fresh, "the engine should fetch from the new address");
         assert_eq!(job.status.url, fresh, "and the window should show it");
         assert_eq!(job.status.filename, "f.bin", "the destination must not move");
+    }
+
+    #[tokio::test]
+    async fn a_refreshed_link_can_bring_fresh_cookies_with_it() {
+        // A signed link and the cookie that authorises it usually expire
+        // together, so replacing only the address earns the same refusal a
+        // moment later.
+        let (_dir, engine) = engine();
+        let mut first = request("https://old.invalid/f.bin");
+        first.cookies = Some("session=stale".into());
+        first.referrer = Some("https://old.invalid/page".into());
+        let Response::Accepted { id } = engine.enqueue(&desktop(), first).await else {
+            panic!("expected the job to be accepted");
+        };
+        engine.pause(id).await;
+
+        engine
+            .refresh_url(
+                id,
+                "https://new.invalid/f.bin?sig=abc".into(),
+                Some("https://new.invalid/page".into()),
+                Some("session=fresh".into()),
+            )
+            .await;
+
+        let jobs = engine.inner.jobs.lock().await;
+        let job = jobs.get(&id).expect("still there");
+        assert_eq!(job.config.cookies.as_deref(), Some("session=fresh"));
+        assert_eq!(job.config.referrer.as_deref(), Some("https://new.invalid/page"));
+    }
+
+    #[tokio::test]
+    async fn a_refreshed_link_on_its_own_keeps_the_headers_it_had() {
+        // Pasting an address and nothing else means "the headers are still
+        // good". Clearing them would turn one expired thing into two, on
+        // the download somebody is trying to rescue.
+        let (_dir, engine) = engine();
+        let mut first = request("https://old.invalid/f.bin");
+        first.cookies = Some("session=good".into());
+        first.referrer = Some("https://old.invalid/page".into());
+        let Response::Accepted { id } = engine.enqueue(&desktop(), first).await else {
+            panic!("expected the job to be accepted");
+        };
+        engine.pause(id).await;
+
+        engine.refresh_url(id, "https://new.invalid/f.bin".into(), None, None).await;
+
+        let jobs = engine.inner.jobs.lock().await;
+        let job = jobs.get(&id).expect("still there");
+        assert_eq!(job.config.cookies.as_deref(), Some("session=good"), "cookies kept");
+        assert_eq!(job.config.referrer.as_deref(), Some("https://old.invalid/page"));
     }
 
     #[tokio::test]
@@ -5416,7 +5493,10 @@ milk
         };
         for hostile in ["file:///C:/Windows/system.ini", "javascript:alert(1)", "not a url"] {
             assert!(
-                matches!(engine.refresh_url(id, hostile.into()).await, Response::Rejected { .. }),
+                matches!(
+                    engine.refresh_url(id, hostile.into(), None, None).await,
+                    Response::Rejected { .. }
+                ),
                 "{hostile} should be refused"
             );
         }

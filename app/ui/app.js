@@ -517,12 +517,26 @@ function jobCard(job) {
       // Not window.prompt: the webview draws that one itself, titled
       // "tauri.localhost says", in the system's light colours -- the app
       // looking for a moment like a web page that got loose.
-      const url = await askFor(`A fresh address for ${job.filename}:`, {
+      const answer = await askFor(`A fresh address for ${job.filename}:`, {
         value: job.url,
         placeholder: "https://…",
         confirm: "Use this address",
+        // Offered, not demanded. A link that merely timed out needs no new
+        // cookie, but a signed one usually expires together with the
+        // cookie that authorised it -- and replacing only the address then
+        // earns the same refusal a moment later.
+        extra: {
+          label: "Fresh cookies, if the old ones expired too",
+          placeholder: "name=value; name=value",
+        },
       });
-      if (url && url.trim()) await act("refresh_link", { id: job.id, url: url.trim() });
+      if (answer?.value) {
+        await act("refresh_link", {
+          id: job.id,
+          url: answer.value,
+          cookies: answer.extra,
+        });
+      }
     };
     foot.append(refresh);
   }
@@ -2483,17 +2497,30 @@ function confirmDialog(message, { confirm = "Confirm", rememberKey } = {}) {
  * cannot be styled, cannot say what shape the answer should take, and is
  * a poor place to paste sixty-four characters into.
  */
-function askFor(message, { placeholder = "", value = "", confirm = "OK" } = {}) {
+function askFor(message, { placeholder = "", value = "", confirm = "OK", extra = null } = {}) {
   return new Promise((resolve) => {
     const overlay = $("ask-modal");
     const field = $("ask-input");
     const okBtn = $("ask-ok");
     const cancelBtn = $("ask-cancel");
+    const extraRow = $("ask-extra-row");
+    const extraField = $("ask-extra");
 
     $("ask-message").textContent = message;
     field.placeholder = placeholder;
     field.value = value;
     okBtn.textContent = confirm;
+
+    // A second field only when one was asked for, and always emptied:
+    // this dialog is reused, and a cookie left over from the last time
+    // would be sent with the next address without anybody typing it.
+    extraRow.hidden = !extra;
+    extraField.value = "";
+    if (extra) {
+      $("ask-extra-label").textContent = extra.label;
+      extraField.placeholder = extra.placeholder ?? "";
+    }
+
     overlay.hidden = false;
     field.focus();
     field.select();
@@ -2505,7 +2532,13 @@ function askFor(message, { placeholder = "", value = "", confirm = "OK" } = {}) 
       field.removeEventListener("keydown", onKey);
       resolve(answer);
     };
-    const onOk = () => finish(field.value.trim() || null);
+    // With a second field the answer is a pair, so a caller that asked for
+    // one cannot mistake it for the plain string the others get.
+    const onOk = () => {
+      const main = field.value.trim();
+      if (!main) return finish(null);
+      finish(extra ? { value: main, extra: extraField.value.trim() || null } : main);
+    };
     const onCancel = () => finish(null);
     // Enter and Escape, because a dialog with one field is a dialog
     // nobody should have to reach for the mouse to finish.
