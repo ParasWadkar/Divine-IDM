@@ -3842,27 +3842,128 @@ mod tests {
         }
     }
 
+    /// Everything the engine stored is everything it loads back.
+    ///
+    /// The whole struct, compared field for field, rather than the two
+    /// fields this used to name. Naming them meant a setting the write path
+    /// quietly dropped still passed, and so did every setting added
+    /// afterwards -- the test could only ever check what somebody
+    /// remembered to add to it, which for a struct that grows is the wrong
+    /// shape of test.
+    ///
+    /// What is compared is what was *sent* against what came back after the
+    /// restart, with three fields taken out of the comparison by name:
+    /// `download_dir`, `proxy_address` and `hook_program` are each
+    /// deliberately normalised on the way in, so demanding them back
+    /// verbatim would be asserting that normalisation does not happen.
+    ///
+    /// The first version of this compared stored against loaded instead --
+    /// read the settings back before the restart, and compare that to what
+    /// came back after. That sidesteps normalisation neatly and is wrong: a
+    /// field dropped on the way *in* is already missing from the
+    /// before-restart reading, so both sides agree and the test passes. It
+    /// was checked by making the write path reset `video_quality`, and it
+    /// passed. Sent against loaded catches that and the loss in between.
+    ///
+    /// The comparison goes through JSON rather than naming fields, so a
+    /// setting added later is compared without anybody remembering to add
+    /// it here. The three exclusions are the only list, and they are the
+    /// three the engine documents normalising.
     #[tokio::test]
     async fn settings_survive_a_restart() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("settings.json");
+
+        // Every field away from its default, so none of them is being
+        // checked against the value it would have had anyway. The hook is
+        // this test binary: `hook::vet` wants a real executable, and the
+        // only one certain to exist here is the one running.
+        let changed = Settings {
+            browser_integration: false,
+            post_action: PostActionSetting::Shutdown,
+            post_action_countdown_secs: 17,
+            min_takeover_bytes: 4321,
+            resume_on_start: false,
+            start_with_windows: true,
+            sort_into_folders: false,
+            speed_limit_bytes_per_sec: 1_000_000,
+            max_concurrent_downloads: 9,
+            download_dir: dir.path().display().to_string(),
+            hidden_browsers: vec!["Firefox".to_owned()],
+            video_quality: idm_ipc::protocol::VideoQuality::UpTo720,
+            proxy: idm_ipc::ProxySetting::Manual,
+            proxy_address: "http://127.0.0.1:3128".to_owned(),
+            scan_downloads: false,
+            hook_program: std::env::current_exe()
+                .map(|path| path.display().to_string())
+                .unwrap_or_default(),
+            hook_arguments: vec!["--quiet".to_owned()],
+            extract_zips: true,
+            web_interface: true,
+            web_port: 9123,
+            rpc_interface: true,
+            rpc_port: 9124,
+        };
+
         {
             let engine = Engine::with_settings_file(dir.path().into(), 8, file.clone());
-            let changed = Settings {
-                browser_integration: false,
-                post_action: PostActionSetting::Shutdown,
-                ..Settings::default()
-            };
-            engine.set_settings(changed).await;
+            let answer = engine.set_settings(changed.clone()).await;
+            assert!(
+                !matches!(answer, Response::Rejected { .. }),
+                "the engine should accept these: {answer:?}",
+            );
         }
+
         let reopened = Engine::with_settings_file(dir.path().into(), 8, file);
-        match reopened.get_settings().await {
-            Response::Settings(current) => {
-                assert!(!current.browser_integration);
-                assert_eq!(current.post_action, PostActionSetting::Shutdown);
-            }
+        let loaded = match reopened.get_settings().await {
+            Response::Settings(settings) => settings,
             other => panic!("unexpected {other:?}"),
+        };
+
+        /// The three the engine normalises on the way in. Nothing else may
+        /// join this list without a reason written next to it.
+        const NORMALISED: [&str; 3] = ["download_dir", "proxy_address", "hook_program"];
+
+        let strip = |settings: &Settings| -> serde_json::Map<String, serde_json::Value> {
+            let mut map = match serde_json::to_value(settings).expect("settings are JSON") {
+                serde_json::Value::Object(map) => map,
+                other => panic!("settings should be an object, got {other:?}"),
+            };
+            for field in NORMALISED {
+                assert!(map.remove(field).is_some(), "{field} is no longer a setting");
+            }
+            map
+        };
+
+        let sent = strip(&changed);
+        let back = strip(&loaded);
+
+        // Field by field, so a failure names the setting rather than
+        // printing two objects and leaving somebody to diff them by eye.
+        for (field, value) in &sent {
+            assert_eq!(
+                back.get(field),
+                Some(value),
+                "{field} did not survive a restart: sent {value}, got back {:?}",
+                back.get(field),
+            );
         }
+        assert_eq!(sent.len(), back.len(), "the two have different fields");
+
+        // The guard against all of that passing because nothing was
+        // actually changed from the defaults.
+        let defaults = strip(&Settings::default());
+        assert!(
+            sent.iter().all(|(field, value)| defaults.get(field) != Some(value)),
+            "every compared field should differ from its default, or it proves nothing",
+        );
+
+        // And the three left out are still checked for having arrived at
+        // all, just not for being unchanged by the vetting.
+        assert_eq!(loaded.hook_arguments, changed.hook_arguments);
+        assert!(!loaded.download_dir.is_empty(), "the download folder was lost");
+        assert!(!loaded.proxy_address.is_empty(), "the proxy address was lost");
+        assert!(!loaded.hook_program.is_empty(), "the hook program was lost");
     }
 
     #[tokio::test]
