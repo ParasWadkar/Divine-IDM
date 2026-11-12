@@ -40,17 +40,42 @@ pub use serve::Engine;
 /// none of it is needed to fetch bytes correctly. A database that will not
 /// open should cost a re-climbed ramp, never a download.
 pub fn open_store() -> Option<std::sync::Arc<idm_store::Store>> {
-    let path = store_path();
-    match idm_store::Store::open(&path) {
-        Ok(store) => Some(std::sync::Arc::new(store)),
-        Err(error) => {
-            eprintln!("note: continuing without the store ({error})");
+    match open_store_or_reason() {
+        Ok(store) => Some(store),
+        Err(reason) => {
+            eprintln!("note: continuing without the store ({reason})");
             None
         }
     }
 }
 
+/// Like [`open_store`], but hands the failure to the caller instead of a
+/// line on stderr — which, under `windows_subsystem = "windows"`, goes
+/// nowhere. The window uses this to say *why* History is empty rather than
+/// claiming nothing was ever downloaded.
+pub fn open_store_or_reason() -> Result<std::sync::Arc<idm_store::Store>, String> {
+    open_store_at(&store_path())
+}
+
+fn open_store_at(path: &std::path::Path) -> Result<std::sync::Arc<idm_store::Store>, String> {
+    idm_store::Store::open(path).map(std::sync::Arc::new).map_err(|error| error.to_string())
+}
+
 /// `%LOCALAPPDATA%\DivineIDM\state.sqlite3`, beside the other engine state.
 pub fn store_path() -> std::path::PathBuf {
     idm_ipc::state_dir().join("state.sqlite3")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_store_that_will_not_open_reports_why() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.sqlite3");
+        std::fs::write(&path, b"not a database at all").unwrap();
+        let reason = open_store_at(&path).expect_err("junk must not open as a store");
+        assert!(!reason.is_empty(), "the refusal should say what went wrong");
+    }
 }

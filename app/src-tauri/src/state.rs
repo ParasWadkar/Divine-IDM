@@ -15,6 +15,13 @@ pub struct AppState {
     /// request — would put a query on the wire that only this process can
     /// usefully answer.
     store: Option<Arc<idm_store::Store>>,
+    /// Why there is no store, when there is none.
+    ///
+    /// Carried into every snapshot so the window can say "History is
+    /// unavailable: …" instead of the far worse lie "Nothing has been
+    /// downloaded yet". Under `windows_subsystem = "windows"` this is the
+    /// only place the failure can surface at all.
+    store_error: Option<String>,
     /// Identifies the window to the engine.
     ///
     /// Not a browser client, so the engine allows it to manage pairings and
@@ -33,9 +40,14 @@ pub struct AppState {
 impl AppState {
     pub fn new() -> Self {
         let output_dir = default_download_dir();
+        let (store, store_error) = match idm_engine::open_store_or_reason() {
+            Ok(store) => (Some(store), None),
+            Err(reason) => (None, Some(reason)),
+        };
         Self {
             engine: idm_engine::Engine::new(output_dir, 16),
-            store: idm_engine::open_store(),
+            store,
+            store_error,
             client: ClientInfo { name: "desktop".to_owned(), client_id: None },
             opened: std::sync::Mutex::new(Vec::new()),
         }
@@ -141,6 +153,7 @@ impl AppState {
             "pending": pending,
             "queues": queues,
             "armed": armed,
+            "store_error": self.store_error,
         }))
     }
 
@@ -184,19 +197,26 @@ impl AppState {
         ))
     }
 
+    /// The store, or the reason there is none. A write that quietly "works"
+    /// against a missing database is a lie the next restart exposes.
+    fn store_or_reason(&self) -> Result<&Arc<idm_store::Store>, String> {
+        self.store.as_ref().ok_or_else(|| {
+            format!(
+                "the history database is unavailable ({})",
+                self.store_error.as_deref().unwrap_or("it could not be opened")
+            )
+        })
+    }
+
     pub fn clear_history(&self) -> Result<(), String> {
-        let Some(store) = &self.store else {
-            return Ok(());
-        };
+        let store = self.store_or_reason()?;
         store.clear_history().map(|_| ()).map_err(|error| error.to_string())
     }
 
     /// Forgets the cancelled and failed rows, leaving finished downloads in
     /// the list.
     pub fn clear_incomplete_history(&self) -> Result<(), String> {
-        let Some(store) = &self.store else {
-            return Ok(());
-        };
+        let store = self.store_or_reason()?;
         store.clear_incomplete_history().map(|_| ()).map_err(|error| error.to_string())
     }
 
@@ -204,15 +224,51 @@ impl AppState {
     /// so a running download cannot be made to vanish from the Downloads tab
     /// by a stale History-tab click.
     pub fn remove_history_row(&self, row_id: i64) -> Result<(), String> {
-        let Some(store) = &self.store else {
-            return Ok(());
-        };
+        let store = self.store_or_reason()?;
         match store.job(row_id).map_err(|error| error.to_string())? {
             Some(job) if job.state.is_finished() => {}
             Some(_) => return Err("that download is still going".into()),
             None => return Ok(()),
         }
         store.remove_job(row_id).map(|_| ()).map_err(|error| error.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn history_writes_fail_honestly_without_a_store() {
+        let dir = tempfile::tempdir().unwrap();
+        // Point the engine's own state at a throwaway, not the real machine.
+        // SAFETY: this test binary's only other tests touch the registry and
+        // string parsing, never the state dir, so no reader races this write.
+        unsafe { std::env::set_var("IDM_STATE_DIR", dir.path()) };
+        let state = AppState {
+            engine: idm_engine::Engine::new(dir.path().to_path_buf(), 1),
+            store: None,
+            store_error: Some("a database from the future".into()),
+            client: ClientInfo { name: "test".to_owned(), client_id: None },
+            opened: std::sync::Mutex::new(Vec::new()),
+        };
+
+        for result in
+            [state.clear_history(), state.clear_incomplete_history(), state.remove_history_row(1)]
+        {
+            let reason = result.expect_err("a write with no database must not claim success");
+            assert!(reason.contains("a database from the future"), "{reason}");
+        }
+
+        // The read stays a quiet empty list -- the snapshot's `store_error`
+        // is what explains it -- and that field must actually carry the
+        // reason.
+        let snapshot = state.snapshot().await.unwrap();
+        assert_eq!(
+            snapshot["store_error"].as_str(),
+            Some("a database from the future"),
+            "the window cannot explain what it is never told"
+        );
     }
 }
 

@@ -298,6 +298,7 @@ function askShellForIcon(extension) {
 
 function render(snapshot) {
   latest = snapshot;
+  storeError = snapshot.store_error ?? null;
   takeQueues(snapshot.queues ?? []);
   renderPairing(snapshot.pending ?? []);
   renderJobs(snapshot.jobs ?? []);
@@ -336,8 +337,19 @@ function render(snapshot) {
   $("engine-text").className = "";
   $("engine-text").textContent = running.length ? `${running.length} downloading` : "";
 
+  // History is a list of finished things, so a thing finishing while the
+  // pane is open should appear without leaving the tab and coming back.
+  const nowSettled = all.filter(settled).map((job) => job.id);
+  if (nowSettled.some((id) => !seenSettled.has(id)) && !$("panel-history").hidden) {
+    showHistory();
+  }
+  seenSettled = new Set(nowSettled);
+
   notifyOnStateChange(snapshot.jobs ?? []);
 }
+
+/** Which jobs had already finished at the last snapshot. */
+let seenSettled = new Set();
 
 function renderPairing(pending) {
   const box = $("pairing");
@@ -1328,6 +1340,14 @@ function outcomeOf(job) {
 
 /** The rows as last fetched. Filtering and searching never refetch. */
 let historyRows = [];
+/**
+ * Why the engine has no history database, when it has none.
+ *
+ * Carried on every snapshot. Without it the pane says "Nothing has been
+ * downloaded yet" over a database full of rows the app merely could not
+ * open — which is exactly the lie that hid a version mismatch for a week.
+ */
+let storeError = null;
 let historyOutcome = "all";
 let historyQuery = "";
 /** The selected row, which is all a click on one does. */
@@ -1766,6 +1786,12 @@ function historyRow(job) {
 function renderHistory() {
   closeMenu();
   const box = $("history");
+
+  // Before the empty message: an unopenable database is not an empty one.
+  if (storeError && !historyRows.length) {
+    box.replaceChildren(empty(`History is unavailable: ${storeError}`));
+    return;
+  }
 
   if (!historyRows.length) {
     box.replaceChildren(empty("Nothing has been downloaded yet."));
