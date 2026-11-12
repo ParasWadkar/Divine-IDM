@@ -75,8 +75,18 @@ pub fn secret_target() -> String {
     format!("{}rpc-interface", crate::credentials::PREFIX)
 }
 
-/// How often the supervisor looks at the setting.
-const LOOK: Duration = Duration::from_secs(5);
+/// How soon a failed bind is tried again.
+///
+/// Not a tight loop: the usual reason is a port aria2 itself already
+/// has, and hammering it would only fill the log.
+const RETRY: Duration = Duration::from_secs(30);
+
+/// The longest the supervisor sleeps with nothing to do.
+///
+/// It is woken by a settings save the moment one happens; this is the
+/// safety net behind that, so a served task that dies on its own is
+/// still noticed and restarted within a minute.
+const FALLBACK: Duration = Duration::from_secs(60);
 
 /// Reads the secret out of the vault, writing a fresh one the first time.
 ///
@@ -98,13 +108,19 @@ pub fn secret(vault: &dyn Vault) -> Result<String, String> {
 }
 
 /// Starts and stops the endpoint as the setting changes.
+///
+/// Sleeps until a save rings [`Engine::settings_saved`] rather than
+/// re-reading the settings on a timer: the switch flips a few times a
+/// year, and a poll for it would wake this task forever.
 pub async fn supervise(engine: Arc<Engine>) {
+    let mut saves = engine.settings_saved();
     let mut running: Option<(u16, tokio::task::JoinHandle<()>)> = None;
 
     loop {
         let settings = engine.settings().await;
         let wanted = settings.rpc_interface.then(|| settings.rpc_port_or_default());
 
+        let mut wait = FALLBACK;
         match (&running, wanted) {
             (Some((port, task)), Some(want)) if *port == want && !task.is_finished() => {}
             _ => {
@@ -116,17 +132,20 @@ pub async fn supervise(engine: Arc<Engine>) {
                         Ok(task) => running = Some((port, task)),
                         Err(error) => {
                             tracing::error!(%error, port, "could not open the RPC interface");
-                            // Not retried tightly: the usual reason is a
-                            // port aria2 itself already has, and hammering
-                            // it would only fill the log.
-                            tokio::time::sleep(LOOK * 6).await;
+                            wait = RETRY;
                         }
                     }
                 }
             }
         }
 
-        tokio::time::sleep(LOOK).await;
+        // A save that happened while this task was reconciling has already
+        // moved the channel's version, so `changed` returns at once rather
+        // than losing it.
+        tokio::select! {
+            _ = saves.changed() => {}
+            _ = tokio::time::sleep(wait) => {}
+        }
     }
 }
 

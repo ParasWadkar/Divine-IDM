@@ -132,6 +132,14 @@ struct Inner {
     /// to the machine's real Credential Manager, and without leaving
     /// entries behind in somebody's Control Panel.
     vault: Arc<dyn idm_core::win::credentials::Vault>,
+    /// Rung every time settings are saved.
+    ///
+    /// A watch channel rather than a `Notify` so a waiter that was busy
+    /// when the save happened still sees it: the channel keeps a version,
+    /// and `changed()` returns at once for anything not yet seen. The web
+    /// and RPC supervisors sleep on this instead of polling the settings
+    /// every few seconds for a switch that flips a few times a year.
+    settings_saved: tokio::sync::watch::Sender<()>,
     /// The torrents currently in that session, by job.
     ///
     /// Needed because cancelling aborts the job's task, and a torrent is not
@@ -227,6 +235,7 @@ impl Engine {
                 // schedules existed.
                 in_force: Mutex::new(crate::schedule::Action::Limit(starting_limit)),
                 vault: Arc::new(idm_core::win::credentials::WindowsVault),
+                settings_saved: tokio::sync::watch::Sender::new(()),
             }),
         });
         start_stall_watchdog(Arc::clone(&engine.inner));
@@ -2914,6 +2923,15 @@ impl Engine {
         self.inner.settings.lock().await.clone()
     }
 
+    /// A line that rings when settings are next saved.
+    ///
+    /// For the supervisors that keep a side door — the web interface, the
+    /// RPC endpoint — matching the switch in Settings. Waiting on this is
+    /// what lets them sleep instead of re-reading the settings on a timer.
+    pub fn settings_saved(&self) -> tokio::sync::watch::Receiver<()> {
+        self.inner.settings_saved.subscribe()
+    }
+
     async fn get_settings(&self) -> Response {
         Response::Settings(self.settings().await)
     }
@@ -2987,6 +3005,9 @@ impl Engine {
         // on the ones started afterwards — the usual reason for changing a
         // limit is that a download already running is in the way.
         apply_schedule(&self.inner).await;
+        // After the new settings are in place, so a supervisor woken by
+        // this reads what was saved, never what it was replacing.
+        let _ = self.inner.settings_saved.send(());
         Response::Settings(settings)
     }
 
@@ -3360,6 +3381,19 @@ mod tests {
     /// staged by building a second engine over the same rows.
     fn engine_with_store(dir: &std::path::Path, store: Arc<idm_store::Store>) -> Arc<Engine> {
         Engine::with_parts(dir.join("downloads"), 8, dir.join("settings.json"), Some(store))
+    }
+
+    #[tokio::test]
+    async fn saving_settings_rings_the_supervisors_line() {
+        // The web and RPC supervisors sleep on this line instead of
+        // polling, so a save that does not ring it is a switch nobody
+        // comes to flip.
+        let (_dir, engine) = engine();
+        let mut saves = engine.settings_saved();
+        assert!(!saves.has_changed().unwrap(), "nothing saved yet, nothing to wake for");
+
+        set_limit(&engine, 3).await;
+        assert!(saves.has_changed().unwrap(), "a save must wake the supervisors");
     }
 
     async fn set_resume_on_start(engine: &Arc<Engine>, resume: bool) {

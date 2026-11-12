@@ -67,8 +67,18 @@ pub fn token_target() -> String {
     format!("{}web-interface", crate::credentials::PREFIX)
 }
 
-/// How often the supervisor looks at the setting.
-const LOOK: Duration = Duration::from_secs(5);
+/// How soon a failed bind is tried again.
+///
+/// Not a tight loop: the usual reason is a port something else already
+/// has, and hammering it would only fill the log.
+const RETRY: Duration = Duration::from_secs(30);
+
+/// The longest the supervisor sleeps with nothing to do.
+///
+/// It is woken by a settings save the moment one happens; this is the
+/// safety net behind that, so a served task that dies on its own is still
+/// noticed and restarted within a minute.
+const FALLBACK: Duration = Duration::from_secs(60);
 
 /// How much of a request body will be read.
 ///
@@ -133,13 +143,18 @@ pub fn where_to_open(port: u16, token: &str) -> String {
 /// A supervisor rather than a one-off start, because the switch is in
 /// Settings: somebody turning it off expects the port to close, and
 /// somebody turning it on does not expect to have to restart the app.
+/// It sleeps until a save rings [`Engine::settings_saved`] rather than
+/// re-reading the settings on a timer: the switch flips a few times a
+/// year, and a poll for it would wake this task forever.
 pub async fn supervise(engine: Arc<Engine>) {
+    let mut saves = engine.settings_saved();
     let mut running: Option<(u16, tokio::task::JoinHandle<()>)> = None;
 
     loop {
         let settings = engine.settings().await;
         let wanted = settings.web_interface.then(|| settings.web_port_or_default());
 
+        let mut wait = FALLBACK;
         match (&running, wanted) {
             // Already serving the right port.
             (Some((port, task)), Some(want)) if *port == want && !task.is_finished() => {}
@@ -154,17 +169,20 @@ pub async fn supervise(engine: Arc<Engine>) {
                         Ok(task) => running = Some((port, task)),
                         Err(error) => {
                             tracing::error!(%error, port, "could not open the web interface");
-                            // Not retried in a tight loop: the usual reason
-                            // is a port something else already has, and
-                            // hammering it would only fill the log.
-                            tokio::time::sleep(LOOK * 6).await;
+                            wait = RETRY;
                         }
                     }
                 }
             }
         }
 
-        tokio::time::sleep(LOOK).await;
+        // A save that happened while this task was reconciling has already
+        // moved the channel's version, so `changed` returns at once rather
+        // than losing it.
+        tokio::select! {
+            _ = saves.changed() => {}
+            _ = tokio::time::sleep(wait) => {}
+        }
     }
 }
 
