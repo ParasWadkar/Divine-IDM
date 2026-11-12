@@ -328,12 +328,6 @@ function render(snapshot) {
   $("stat-active").textContent = String(all.filter((job) => !settled(job)).length);
   $("stat-done").textContent = String(all.filter((job) => job.state === "completed").length);
 
-  history.push(total);
-  while (history.length > SAMPLES) history.shift();
-  const peak = Math.max(...history, 0);
-  $("stat-peak").textContent = rate(peak);
-  drawGraph();
-
   $("engine-text").className = "";
   $("engine-text").textContent = running.length ? `${running.length} downloading` : "";
 
@@ -2733,10 +2727,36 @@ $("clear-incomplete").addEventListener("click", async () => {
 // The engine pushes; the window does not poll. A pull loop would keep the
 // renderer busy with nothing to do and put the update rate in the hands of a
 // JavaScript timer rather than the side that knows when something changed.
-listen("snapshot", (event) => render(event.payload));
+// The other side already skips unchanged snapshots; this guard catches the
+// ones it sends anyway (its heartbeat), so stillness never costs a rebuild.
+let lastSnapshotText = "";
+listen("snapshot", (event) => {
+  const text = JSON.stringify(event.payload);
+  if (text === lastSnapshotText) return;
+  lastSnapshotText = text;
+  render(event.payload);
+});
 window.addEventListener("resize", drawGraph);
 $("graph").addEventListener("mousemove", showGraphTip);
 $("graph").addEventListener("mouseleave", hideGraphTip);
+
+// The graph is a timeline, so it advances on the clock rather than on
+// snapshots -- which stop arriving while nothing changes. Pushing a sample
+// is a few array writes; the repaint stops once the line has gone flat, so
+// an idle window pays nothing for the canvas either.
+let graphWasFlat = false;
+setInterval(() => {
+  const total = (latest.jobs ?? [])
+    .filter((job) => job.state === "running")
+    .reduce((sum, job) => sum + (job.bytes_per_sec ?? 0), 0);
+  history.push(total);
+  while (history.length > SAMPLES) history.shift();
+  const flat = history.every((sample) => sample === 0);
+  if (flat && graphWasFlat) return;
+  graphWasFlat = flat;
+  $("stat-peak").textContent = rate(Math.max(...history, 0));
+  drawGraph();
+}, 500);
 
 // ---------------------------------------------------------------------------
 // Browser integration

@@ -1048,29 +1048,108 @@ fn start_rpc(app: AppHandle) {
     });
 }
 
-/// Pushes a snapshot to the window on a timer.
+/// When the ticker may slow down, and when it must not.
+///
+/// Pure policy, kept apart from the loop so it can be tested without a
+/// window: the loop reports what each snapshot looked like, and this says
+/// whether to send it and how long to sleep before the next one.
+struct TickerPace {
+    last_hash: Option<u64>,
+    unchanged_streak: u32,
+}
+
+impl TickerPace {
+    /// Unchanged snapshots before the tick stretches. Four at the fast tick
+    /// is two seconds of provable stillness.
+    const QUIET_AFTER: u32 = 4;
+    /// The stretched tick. Slow enough that an idle app costs next to
+    /// nothing, fast enough that the first changed snapshot after it is
+    /// never more than two seconds stale.
+    const QUIET: Duration = Duration::from_secs(2);
+    /// Every this-many unchanged snapshots, one is sent anyway. A webview
+    /// that reloaded mid-quiet has an empty pane and no way to say so; the
+    /// heartbeat bounds that blankness instead of letting it last forever.
+    const HEARTBEAT: u32 = 15;
+
+    fn new() -> Self {
+        Self { last_hash: None, unchanged_streak: 0 }
+    }
+
+    /// The window stopped being visible. Whatever is sent next must actually
+    /// be sent: the webview may have missed any number of changes meanwhile.
+    fn window_went_away(&mut self) {
+        self.last_hash = None;
+        self.unchanged_streak = 0;
+    }
+
+    /// Whether to emit this snapshot, and how long to sleep afterwards.
+    ///
+    /// `busy` is true while anything is moving on its own clock — a running
+    /// download, or an armed shutdown counting down. A busy window never
+    /// goes quiet, whatever the hashes say: the countdown is the one thing
+    /// the window must never be stale about.
+    fn on_snapshot(&mut self, hash: u64, busy: bool) -> (bool, Duration) {
+        let changed = self.last_hash != Some(hash);
+        self.last_hash = Some(hash);
+        self.unchanged_streak = if changed { 0 } else { self.unchanged_streak + 1 };
+
+        let heartbeat = !changed && self.unchanged_streak.is_multiple_of(Self::HEARTBEAT);
+        let quiet = !busy && self.unchanged_streak >= Self::QUIET_AFTER;
+        (changed || heartbeat, if quiet { Self::QUIET } else { TICK })
+    }
+}
+
+/// Whether anything in this snapshot is moving on its own clock.
+fn snapshot_is_busy(payload: &serde_json::Value) -> bool {
+    !payload["armed"].is_null()
+        || payload["jobs"]
+            .as_array()
+            .is_some_and(|jobs| jobs.iter().any(|job| job["state"] == "running"))
+}
+
+/// Pushes a snapshot to the window when there is something to say.
 ///
 /// The window does not poll. A pull loop in the webview keeps the renderer
 /// busy even when nothing has changed, and makes the update rate a property
 /// of JavaScript timers rather than something this side can reason about.
+/// This side, knowing when something changed, also knows when nothing did:
+/// an unchanged snapshot is not sent, and a stretch of them slows the tick
+/// itself, so an idle app wakes the webview a handful of times a minute
+/// rather than twice a second.
 fn start_ticker(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
-        let mut ticker = tokio::time::interval(TICK);
+        let mut pace = TickerPace::new();
+        let mut period = TICK;
         loop {
-            ticker.tick().await;
+            tokio::time::sleep(period).await;
 
-            // Only when someone can see it. A hidden window costs nothing to
-            // skip, and this runs for as long as the app does.
-            let visible = app
-                .get_webview_window("main")
-                .and_then(|window| window.is_visible().ok())
-                .unwrap_or(false);
-            if !visible {
+            // Only when someone can see it. A hidden or minimized window
+            // costs nothing to skip, and this runs for as long as the app
+            // does. Checked at the fast tick so reappearing is noticed
+            // promptly, and treated as departure so the first visible
+            // snapshot is always sent.
+            let seen = app.get_webview_window("main").map(|window| {
+                window.is_visible().unwrap_or(false) && !window.is_minimized().unwrap_or(false)
+            });
+            if seen != Some(true) {
+                pace.window_went_away();
+                period = TICK;
                 continue;
             }
 
             let state = app.state::<AppState>();
-            if let Ok(payload) = state.snapshot().await {
+            let Ok(payload) = state.snapshot().await else {
+                continue;
+            };
+            let hash = {
+                use std::hash::{Hash, Hasher};
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                payload.to_string().hash(&mut hasher);
+                hasher.finish()
+            };
+            let (emit, next) = pace.on_snapshot(hash, snapshot_is_busy(&payload));
+            period = next;
+            if emit {
                 let _ = app.emit("snapshot", payload);
             }
         }
@@ -1113,6 +1192,87 @@ fn reveal_window(app: &AppHandle) {
         // `show` alone, so the click would look like it did nothing.
         let _ = window.unminimize();
         let _ = window.set_focus();
+    }
+}
+
+#[cfg(test)]
+mod pace_tests {
+    use super::{TICK, TickerPace, snapshot_is_busy};
+
+    #[test]
+    fn the_first_snapshot_is_always_sent() {
+        let mut pace = TickerPace::new();
+        let (emit, period) = pace.on_snapshot(1, false);
+        assert!(emit, "the window starts blank; the first snapshot is what fills it");
+        assert_eq!(period, TICK);
+    }
+
+    #[test]
+    fn stillness_slows_the_tick_and_stops_the_sending() {
+        let mut pace = TickerPace::new();
+        pace.on_snapshot(1, false);
+        for round in 1..TickerPace::QUIET_AFTER {
+            let (emit, period) = pace.on_snapshot(1, false);
+            assert!(!emit, "an unchanged snapshot says nothing new (round {round})");
+            assert_eq!(period, TICK, "not yet proven still (round {round})");
+        }
+        let (emit, period) = pace.on_snapshot(1, false);
+        assert!(!emit);
+        assert_eq!(period, TickerPace::QUIET, "enough stillness earns the slow tick");
+    }
+
+    #[test]
+    fn any_change_snaps_straight_back_to_the_fast_tick() {
+        let mut pace = TickerPace::new();
+        for _ in 0..10 {
+            pace.on_snapshot(1, false);
+        }
+        let (emit, period) = pace.on_snapshot(2, false);
+        assert!(emit, "a changed snapshot is always sent");
+        assert_eq!(period, TICK, "and the tick is fast again at once");
+    }
+
+    #[test]
+    fn a_busy_window_never_goes_quiet() {
+        // A shutdown countdown is drawn by the window; its snapshot can hash
+        // the same while the seconds it must show keep falling.
+        let mut pace = TickerPace::new();
+        for _ in 0..20 {
+            let (_, period) = pace.on_snapshot(1, true);
+            assert_eq!(period, TICK, "busy means the fast tick, whatever the hashes say");
+        }
+    }
+
+    #[test]
+    fn coming_back_from_hidden_forces_the_next_snapshot_out() {
+        let mut pace = TickerPace::new();
+        for _ in 0..10 {
+            pace.on_snapshot(1, false);
+        }
+        pace.window_went_away();
+        let (emit, period) = pace.on_snapshot(1, false);
+        assert!(emit, "the webview may have missed anything while hidden");
+        assert_eq!(period, TICK);
+    }
+
+    #[test]
+    fn a_long_quiet_spell_still_heartbeats() {
+        // A webview that reloads mid-quiet shows an empty pane until the
+        // next emit; the heartbeat bounds how long that can last.
+        let mut pace = TickerPace::new();
+        pace.on_snapshot(1, false);
+        let sent = (0..TickerPace::HEARTBEAT).filter(|_| pace.on_snapshot(1, false).0).count();
+        assert_eq!(sent, 1, "exactly the heartbeat, nothing else");
+    }
+
+    #[test]
+    fn a_running_job_or_an_armed_action_counts_as_busy() {
+        let still = serde_json::json!({ "jobs": [{ "state": "completed" }], "armed": null });
+        assert!(!snapshot_is_busy(&still));
+        let running = serde_json::json!({ "jobs": [{ "state": "running" }], "armed": null });
+        assert!(snapshot_is_busy(&running));
+        let armed = serde_json::json!({ "jobs": [], "armed": { "action": "shutdown" } });
+        assert!(snapshot_is_busy(&armed));
     }
 }
 
