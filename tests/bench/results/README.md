@@ -462,3 +462,31 @@ Measured above, so this is only what a throughput figure cannot show.
   was built for is the thing this harness cannot show.
 - **One machine, one disk.** Five runs per tool, median reported, with a
   file-system ceiling that moved by half between sessions.
+
+## The finish-line fixes, measured (2026-11-16)
+
+Three changes landed between the 6 November numbers above and this run:
+the writer checksums blocks from the bytes in hand instead of reading
+every block back; the end of a download pays one data sync and two
+journal syncs where it stacked about ten; and a journal this run created
+is no longer re-verified against itself (resume and SetFileValidData keep
+their verification). Same harness, same machine, 128 MiB; three runs for
+the all-tools tables, five for the us-against-curl re-check.
+
+| Shape | 6 Nov | 16 Nov | best other, 16 Nov |
+|---|---|---|---|
+| Per-connection shaped | 70.1 MB/s | **71.2 MB/s** (adaptive) | aria2c 61.7, ghd 34.7 |
+| Per-IP shared bucket | 7.8 MB/s, −2.8% behind | **8.0 MB/s**, −0.6% behind | ghd 8.0 (16.69s vs our 16.87s) |
+| Unshaped loopback, vs curl same session | 0.76x | **0.88x** | curl is the reference |
+
+- **Per-connection:** the lead over aria2c grew from 10% to 15%. ghd fell
+  further behind on this machine than on the 6th (its own variance).
+- **Per-IP:** effectively a tie now — 16.87s against 16.69/16.77 — and the
+  adaptive row got there with 37 requests against their 50-56.
+- **Unshaped:** the honest comparator is the within-session ratio to curl,
+  because the absolute rates swing with machine state (curl itself ranged
+  371-436 MB/s across today's sessions). That ratio went from 0.76x to
+  0.88x: the gap to a tool that writes no journal and syncs nothing
+  roughly halved. The rest of the distance is the price of crash-safe
+  resume -- a journal, three syncs and per-block checksums -- which curl
+  does not buy, and the three it costs now are each load-bearing.

@@ -1,0 +1,83 @@
+{
+  "measuredAt": "2026-11-15T19:37:04.209Z",
+  "sizeBytes": 134217728,
+  "shaping": {
+    "mode": "per-conn",
+    "bytesPerSec": 10000000000,
+    "rttMs": 0
+  },
+  "runs": 5,
+  "sha256": "1dcc211ab7a8b5565484edd53078c7354f404e66e40f368cdfdda145341b9310",
+  "diskCeiling": {
+    "rate": 3837357776.3418975,
+    "lowest": 2837608098.1657352,
+    "highest": 4215632465.505165,
+    "steady": true
+  },
+  "server": null,
+  "tools": [
+    {
+      "label": "DivinePulse (adaptive)",
+      "ms": 424.8467,
+      "times": [
+        468.9764,
+        485.2224,
+        422.6612,
+        404.9052,
+        424.8467
+      ],
+      "requestsPerRun": 17,
+      "peakConnections": 10,
+      "settled": "None",
+      "connectionsSettledAt": 8,
+      "steals": 0,
+      "hedges": 0,
+      "retries": 0,
+      "writeMode": "Sparse",
+      "bound": "the scheduler",
+      "bytesPerSec": 315920373.16048354
+    },
+    {
+      "label": "DivinePulse (16 conn)",
+      "ms": 410.152,
+      "times": [
+        410.152,
+        421.3378,
+        407.4516,
+        393.0969,
+        420.7283
+      ],
+      "requestsPerRun": 17,
+      "peakConnections": 16,
+      "settled": "None",
+      "connectionsSettledAt": 16,
+      "steals": 0,
+      "hedges": 0,
+      "retries": 0,
+      "writeMode": "Sparse",
+      "bound": "the scheduler",
+      "bytesPerSec": 327238994.3240555
+    },
+    {
+      "label": "curl (1 conn)",
+      "ms": 361.7805,
+      "times": [
+        361.7805,
+        393.547,
+        386.6485,
+        346.3375,
+        356.2514
+      ],
+      "requestsPerRun": 1,
+      "peakConnections": 1,
+      "settled": null,
+      "connectionsSettledAt": null,
+      "steals": null,
+      "hedges": null,
+      "retries": null,
+      "writeMode": null,
+      "bound": "the scheduler",
+      "bytesPerSec": 370992156.8464856
+    }
+  ]
+}
