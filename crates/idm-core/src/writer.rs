@@ -187,6 +187,12 @@ enum ShardMsg {
     Write(WriteJob),
     /// Drain the reorder buffer and flush the handle, then reply.
     Flush(SyncSender<io::Result<()>>),
+    /// Drain the reorder buffer, without flushing, then reply.
+    ///
+    /// For the end of a download, where one `sync_all` on the caller's own
+    /// handle is about to cover every shard at once and per-shard flushes
+    /// would just be that many extra trips to the device.
+    Drain(SyncSender<io::Result<()>>),
     Stop,
 }
 
@@ -568,12 +574,17 @@ impl Shard {
                     let outcome = self.drain(true).and_then(|()| self.file.sync_data());
                     let _ = reply.send(outcome);
                 }
+                ShardMsg::Drain(reply) => {
+                    let _ = reply.send(self.drain(true));
+                }
                 ShardMsg::Stop => break,
             }
         }
         // Best effort on the way out, so a clean shutdown loses nothing.
+        // Drained, not synced: the journal never claims a byte durable
+        // before a sync it ordered itself, so a sync here bought nothing
+        // on any path and cost one more device round trip on every one.
         let _ = self.drain(true);
-        let _ = self.file.sync_data();
     }
 }
 
@@ -750,6 +761,31 @@ impl Writer {
     /// Flushes, stops the shards and waits for them.
     pub fn shutdown(mut self) -> io::Result<()> {
         self.flush_all()?;
+        self.stop_shards();
+        Ok(())
+    }
+
+    /// Drains everything to the OS, stops the shards and waits for them --
+    /// without any flush.
+    ///
+    /// For a finish line where the caller is about to `sync_all` the file
+    /// through its own handle anyway: every byte is out of this writer and
+    /// in the page cache when this returns, and that one sync will make
+    /// them the file's. Durability is the caller's explicit next step, not
+    /// something quietly done twice.
+    pub fn finish(mut self) -> io::Result<()> {
+        let mut replies = Vec::with_capacity(self.shards.len());
+        for shard in &self.shards {
+            let (tx, rx) = sync_channel(1);
+            shard
+                .tx
+                .send(ShardMsg::Drain(tx))
+                .map_err(|_| io::Error::other("writer shard has stopped"))?;
+            replies.push(rx);
+        }
+        for reply in replies {
+            reply.recv().map_err(|_| io::Error::other("writer shard dropped its reply"))??;
+        }
         self.stop_shards();
         Ok(())
     }
@@ -1225,6 +1261,26 @@ mod tests {
         // After flush_all returns, the bytes must be on disk -- this is the
         // ordering the journal's durability argument rests on.
         assert_eq!(writer.issued_bytes(), 4096);
+        let file = File::open(&harness.path).unwrap();
+        let mut got = vec![0u8; 4096];
+        pio::read_exact_at(&file, 0, &mut got).unwrap();
+        assert_eq!(got, (0..4096u64).map(byte_at).collect::<Vec<u8>>());
+    }
+
+    #[test]
+    fn finish_drains_everything_for_the_callers_own_sync() {
+        // The finish line's contract: after `finish`, every queued byte is
+        // out of the writer and in the page cache, so the caller's one
+        // `sync_all` covers them all. No flush happens in here.
+        let harness = harness(TOTAL);
+        let config = WriterConfig::new(1, TOTAL);
+        let (writer, acks) = Writer::spawn(&harness.path, config).unwrap();
+
+        let range = ByteRange::new(0, 4096);
+        writer.write(WriteJob::new(1, range.start(), content(range))).unwrap();
+        writer.finish().unwrap();
+        drop(acks);
+
         let file = File::open(&harness.path).unwrap();
         let mut got = vec![0u8; 4096];
         pio::read_exact_at(&file, 0, &mut got).unwrap();

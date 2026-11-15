@@ -848,6 +848,47 @@ impl Journal {
         self.snapshot()
     }
 
+    /// The last commit of a download, folded straight into a snapshot.
+    ///
+    /// The caller must have synced the data file already -- that sync is
+    /// this method's precondition, standing in for the one `commit` does
+    /// itself, and the one call site does it on the adjacent line. With
+    /// the download over there is no point appending records only for the
+    /// snapshot to absorb them in the same breath, so the ranges go into
+    /// the durable set directly and the snapshot writes the complete
+    /// picture: two journal syncs, by the slot-then-header discipline
+    /// `snapshot` keeps, instead of commit's record sync plus both.
+    ///
+    /// Torn anywhere, the previous header still points at the previous
+    /// snapshot and log, which describe the pre-final state of a data
+    /// file that was already synced: a resume re-fetches at most what
+    /// this call was about to claim.
+    pub fn finalize(
+        &mut self,
+        newly_durable: &[ByteRange],
+        block_crcs: &[(u32, u32)],
+    ) -> Result<(), JournalError> {
+        // Advisory checksums, covered by the snapshot's own sync below.
+        for &(index, crc) in block_crcs {
+            if let Some(slot) = self.block_crc.get_mut(index as usize) {
+                *slot = crc;
+                pio::write_all_at(
+                    &self.file,
+                    self.layout.block_crc_off + u64::from(index) * 4,
+                    &crc.to_le_bytes(),
+                )?;
+            }
+        }
+        for range in newly_durable {
+            if !range.is_empty() {
+                self.durable.insert(*range);
+            }
+        }
+        self.header.committed_bytes = self.durable.total_bytes();
+        self.durable.assert_invariants();
+        self.snapshot()
+    }
+
     pub fn durable(&self) -> &RangeSet {
         &self.durable
     }
@@ -984,6 +1025,24 @@ mod tests {
 
     fn reopen_data(fixture: &Fixture) -> File {
         File::options().read(true).write(true).open(&fixture.data_path).unwrap()
+    }
+
+    #[test]
+    fn finalize_claims_the_ranges_and_survives_a_reopen() {
+        // The finish line's one journal step: ranges folded straight into
+        // the snapshot, no records in between, and what a crash-and-reopen
+        // replays is the complete picture.
+        let (fixture, mut journal, data) = fixture();
+        data.sync_all().unwrap(); // the precondition `finalize` states
+
+        let whole = ByteRange::new(0, TOTAL);
+        journal.finalize(&[whole], &[]).unwrap();
+        assert!(journal.is_complete());
+        drop(journal);
+
+        let reopened = Journal::open(&fixture.journal_path).unwrap();
+        assert!(reopened.is_complete(), "the snapshot must carry the final picture");
+        assert_eq!(reopened.durable().total_bytes(), TOTAL);
     }
 
     #[test]

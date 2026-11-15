@@ -1259,9 +1259,26 @@ pub async fn download_with_progress<F: FnMut(Progress)>(
     // Drain anything still running before finalising.
     phase("transfer done");
     while tasks.join_next().await.is_some() {}
-    checkpoint(&acks, &writer, &mut journal, &mut ledger, &data)?;
-    writer.shutdown()?;
-    journal.checkpoint_now(&data)?;
+
+    // The finish line costs one data sync and the two the journal's
+    // snapshot needs, where checkpoint + shutdown + checkpoint_now used
+    // to stack about ten. The ordering invariant is intact and merely
+    // spelled out across three lines: every queued byte reaches the OS
+    // (`finish`), one sync makes them the file's, and only then does the
+    // journal claim them.
+    writer.finish()?;
+    let mut final_ranges = Vec::new();
+    let mut final_crcs = Vec::new();
+    while let Ok(ack) = acks.try_recv() {
+        ledger.mark_acked(ack.range);
+        final_ranges.push(ack.range);
+        final_crcs.extend(ack.block_crcs);
+    }
+    data.sync_all()?;
+    journal.finalize(&final_ranges, &final_crcs)?;
+    for range in final_ranges {
+        ledger.mark_durable(range);
+    }
     phase("flushed");
 
     // Verify before declaring victory. `SetFileValidData` forces a full pass,
@@ -1280,11 +1297,13 @@ pub async fn download_with_progress<F: FnMut(Progress)>(
         return Err(DownloadError::Stalled { attempts: stats.requests as u32 });
     }
 
-    // Finalise: no holes remain, so sparseness can be dropped safely.
+    // Finalise: no holes remain, so sparseness can be dropped safely. The
+    // bytes were synced before the journal claimed them; dropping the
+    // sparse attribute is bookkeeping the rename's own durability covers,
+    // not something worth another trip to the device.
     if write_mode == WriteMode::Sparse {
         let _ = prealloc::clear_sparse(&data);
     }
-    data.sync_all()?;
     drop(data);
     phase("synced");
 
