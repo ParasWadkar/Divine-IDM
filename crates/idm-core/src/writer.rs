@@ -287,6 +287,12 @@ struct Shard {
     /// become complete and can be checksummed.
     written: RangeSet,
     crc_emitted: BTreeSet<u32>,
+    /// Checksums of the pieces written into blocks that are not complete
+    /// yet: `(absolute offset, crc, length)`, stitched together with
+    /// `crc32c_combine` the moment the block is. This is what lets a block
+    /// be checksummed without ever being read back -- every byte was
+    /// checksummed while it was still in hand.
+    block_parts: std::collections::HashMap<u32, Vec<(u64, u32, u32)>>,
     scratch: Vec<u8>,
     read_back: Vec<u8>,
     config: WriterConfig,
@@ -403,6 +409,12 @@ impl Shard {
         self.issued_bytes.fetch_add(range.len(), Ordering::Relaxed);
         self.written.insert(range);
 
+        // Checksummed now, while the bytes are still in hand, so completing
+        // a block does not need them read back off the disk later.
+        let buffer = std::mem::take(&mut self.scratch);
+        self.note_part_crcs(start, &buffer);
+        self.scratch = buffer;
+
         // The permits are released here and not before: the budget must reflect
         // bytes still owed to the disk, not bytes merely queued.
         drop(permits);
@@ -414,11 +426,62 @@ impl Shard {
         Ok(true)
     }
 
+    /// Remembers the checksum of each block-sized slice of a just-issued
+    /// write, so `checksum_completed_blocks` can stitch block checksums out
+    /// of what was already in hand instead of reading the file back.
+    fn note_part_crcs(&mut self, start: u64, buffer: &[u8]) {
+        let mut offset = start;
+        let mut rest = buffer;
+        while !rest.is_empty() {
+            let block = (offset / BLOCK_SIZE) as u32;
+            let take = (((offset / BLOCK_SIZE + 1) * BLOCK_SIZE - offset) as usize).min(rest.len());
+            let (piece, tail) = rest.split_at(take);
+            // A block whose checksum is already out needs no bookkeeping;
+            // nothing re-writes into it within one generation anyway.
+            if !self.crc_emitted.contains(&block) {
+                self.block_parts.entry(block).or_default().push((
+                    offset,
+                    crc32c::crc32c(piece),
+                    take as u32,
+                ));
+            }
+            offset += take as u64;
+            rest = tail;
+        }
+    }
+
+    /// The block's checksum stitched from the pieces that were checksummed
+    /// as they were written, or `None` if the pieces do not line up -- an
+    /// overlap, say -- in which case the one honest answer left is the disk.
+    fn stitch(&mut self, index: u32, block_range: ByteRange) -> Option<u32> {
+        let mut parts = self.block_parts.remove(&index)?;
+        parts.sort_unstable_by_key(|(offset, _, _)| *offset);
+
+        let mut cursor = block_range.start();
+        let mut sofar: Option<u32> = None;
+        for (offset, crc, len) in parts {
+            if offset != cursor {
+                return None;
+            }
+            sofar = Some(match sofar {
+                None => crc,
+                Some(head) => crc32c::crc32c_combine(head, crc, len as usize),
+            });
+            cursor += u64::from(len);
+        }
+        if cursor != block_range.end() {
+            return None;
+        }
+        sofar
+    }
+
     /// Checksums every block this write completed.
     ///
-    /// Blocks are read back rather than checksummed from the write buffer: a
-    /// block is often completed by several writes, and the bytes are still in
-    /// the OS cache, so this is a memory copy rather than disk I/O.
+    /// Normally free of I/O: every byte was checksummed on its way to the
+    /// disk, so a completed block's checksum is a stitch of what is already
+    /// known. The read-back only remains for pieces that did not line up,
+    /// which nothing in the scheduler produces -- but a checksum that
+    /// guards resume is not the place to assume that.
     fn checksum_completed_blocks(&mut self, range: ByteRange) -> io::Result<Vec<(u32, u32)>> {
         let first = range.start() / BLOCK_SIZE;
         let last = range.end().div_ceil(BLOCK_SIZE);
@@ -440,12 +503,18 @@ impl Shard {
                 continue;
             }
 
-            let len = block_range.len() as usize;
-            if self.read_back.len() < len {
-                self.read_back.resize(len, 0);
-            }
-            pio::read_exact_at(&self.file, start, &mut self.read_back[..len])?;
-            out.push((index, crc32c::crc32c(&self.read_back[..len])));
+            let crc = match self.stitch(index, block_range) {
+                Some(crc) => crc,
+                None => {
+                    let len = block_range.len() as usize;
+                    if self.read_back.len() < len {
+                        self.read_back.resize(len, 0);
+                    }
+                    pio::read_exact_at(&self.file, start, &mut self.read_back[..len])?;
+                    crc32c::crc32c(&self.read_back[..len])
+                }
+            };
+            out.push((index, crc));
             self.crc_emitted.insert(index);
         }
         Ok(out)
@@ -588,6 +657,7 @@ impl Writer {
                 pending_bytes: 0,
                 written: RangeSet::new(),
                 crc_emitted: BTreeSet::new(),
+                block_parts: std::collections::HashMap::new(),
                 scratch: Vec::with_capacity(config.io_batch),
                 read_back: Vec::new(),
                 config: config.clone(),
@@ -730,6 +800,7 @@ mod tests {
             pending_bytes: 0,
             written: RangeSet::new(),
             crc_emitted: BTreeSet::new(),
+            block_parts: std::collections::HashMap::new(),
             scratch: Vec::new(),
             read_back: Vec::new(),
             config,
@@ -1003,6 +1074,64 @@ mod tests {
         assert_eq!(crcs[0].1, crc32c::crc32c(&expected));
 
         writer.shutdown().unwrap();
+    }
+
+    #[test]
+    fn a_block_built_from_shuffled_pieces_checksums_the_same_as_one_written_whole() {
+        // The checksum now comes from stitching per-piece CRCs computed as
+        // the pieces were written, in whatever order they arrived. The one
+        // thing that matters is that the stitched answer is byte-for-byte
+        // the answer a single pass over the finished block would give.
+        let harness = harness(TOTAL);
+        let config = WriterConfig::new(1, TOTAL);
+        let (writer, acks) = Writer::spawn(&harness.path, config).unwrap();
+
+        // Uneven pieces, shuffled, each forced to the disk on its own so
+        // every piece is a separate issued write with its own CRC.
+        let cuts = [0u64, 37 * 1024, 64 * 1024, 300 * 1024, 511 * 1024, 777 * 1024, BLOCK_SIZE];
+        let mut pieces: Vec<ByteRange> =
+            cuts.windows(2).map(|w| ByteRange::new(w[0], w[1])).collect();
+        pieces.swap(0, 4);
+        pieces.swap(1, 3);
+        for piece in &pieces {
+            writer.write(WriteJob::new(1, piece.start(), content(*piece))).unwrap();
+            writer.flush_all().unwrap();
+        }
+
+        let acks = collect_acks(&acks, BLOCK_SIZE);
+        writer.shutdown().unwrap();
+
+        let crcs: Vec<(u32, u32)> = acks.iter().flat_map(|ack| ack.block_crcs.clone()).collect();
+        assert_eq!(crcs.len(), 1, "one completed block, one checksum: {crcs:?}");
+        let whole: Vec<u8> = (0..BLOCK_SIZE).map(byte_at).collect();
+        assert_eq!(crcs[0], (0, crc32c::crc32c(&whole)));
+    }
+
+    #[test]
+    fn pieces_that_do_not_line_up_fall_back_to_reading_the_disk() {
+        // Nothing in the scheduler writes the same range twice within one
+        // generation, but the checksum guards resume, so the stitcher
+        // refuses anything irregular and the disk is asked instead.
+        let harness = harness(TOTAL);
+        let config = WriterConfig::new(1, TOTAL);
+        let (writer, acks) = Writer::spawn(&harness.path, config).unwrap();
+
+        let head = ByteRange::new(0, 256 * 1024);
+        let tail = ByteRange::new(256 * 1024, BLOCK_SIZE);
+        writer.write(WriteJob::new(1, head.start(), content(head))).unwrap();
+        writer.flush_all().unwrap();
+        // The same head again: a duplicate piece the stitcher must refuse.
+        writer.write(WriteJob::new(1, head.start(), content(head))).unwrap();
+        writer.flush_all().unwrap();
+        writer.write(WriteJob::new(1, tail.start(), content(tail))).unwrap();
+        writer.flush_all().unwrap();
+
+        let acks = collect_acks(&acks, BLOCK_SIZE + head.len());
+        writer.shutdown().unwrap();
+
+        let crcs: Vec<(u32, u32)> = acks.iter().flat_map(|ack| ack.block_crcs.clone()).collect();
+        let whole: Vec<u8> = (0..BLOCK_SIZE).map(byte_at).collect();
+        assert_eq!(crcs, vec![(0, crc32c::crc32c(&whole))]);
     }
 
     #[test]
