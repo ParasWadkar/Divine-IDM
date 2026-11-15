@@ -15,7 +15,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use crate::failure::Failure;
 use crate::pairing::{PairingOutcome, PairingStore};
@@ -100,13 +100,23 @@ struct Inner {
     /// is not something anyone can act on, and for three of the four
     /// actions the thing about to happen is the machine going away.
     armed: Mutex<Option<Armed>>,
-    /// The BitTorrent session, started the first time one is needed.
+    /// The BitTorrent session, while anything needs one.
     ///
     /// Lazy on purpose. A session listens on a port, joins the DHT and
     /// announces itself; somebody who never opens a torrent should have this
     /// app doing none of that. One for the whole engine, not one per job:
-    /// see `idm_torrent::Torrents`.
-    torrents: tokio::sync::OnceCell<Arc<idm_torrent::Torrents>>,
+    /// see `idm_torrent::Torrents`. And put away again once the last
+    /// torrent is done — see `stop_torrents_when_idle` — because the same
+    /// person should not have the app in the DHT for the rest of the day
+    /// over one torrent this morning.
+    torrents: Mutex<Option<Arc<idm_torrent::Torrents>>>,
+    /// How many `run_torrent` tasks are alive right now.
+    ///
+    /// `live_torrents` cannot answer this: a magnet spends its first
+    /// minutes looking up metadata before it has an entry there, and the
+    /// session must not be torn down under it. Counted by a guard, so a
+    /// pause or cancel that aborts the task still counts back down.
+    torrent_users: AtomicUsize,
     /// The named queues, mirrored from the store.
     ///
     /// A mirror rather than a lookup: `pump` consults this while holding the
@@ -226,7 +236,8 @@ impl Engine {
                 limiter: Arc::new(idm_net::limiter::RateLimiter::new(starting_limit)),
                 claimed: Mutex::new(std::collections::HashSet::new()),
                 armed: Mutex::new(None),
-                torrents: tokio::sync::OnceCell::new(),
+                torrents: Mutex::new(None),
+                torrent_users: AtomicUsize::new(0),
                 live_torrents: Mutex::new(HashMap::new()),
                 queues: Mutex::new(queues),
                 rules: Mutex::new(rules),
@@ -1138,10 +1149,13 @@ impl Engine {
         // into files that already exist, some of those files may have been
         // there before this job and belong to somebody else. Deleting them on
         // a cancel is not a risk worth taking to save some disk.
-        if let Some(torrent) = self.inner.live_torrents.lock().await.remove(&id)
-            && let Err(error) = torrent.remove(false).await
-        {
-            tracing::warn!(%error, "could not remove a cancelled torrent from the session");
+        if let Some(torrent) = self.inner.live_torrents.lock().await.remove(&id) {
+            if let Err(error) = torrent.remove(false).await {
+                tracing::warn!(%error, "could not remove a cancelled torrent from the session");
+            }
+            // A paused torrent's task is long gone, so its guard cannot be
+            // the one to notice this was the last: the removal here is.
+            stop_torrents_when_idle(&self.inner);
         }
 
         write_state(&self.inner, id, JobState::Cancelled, None).await;
@@ -1582,28 +1596,86 @@ fn record_transfer(inner: &Inner, id: JobId, done: u64, total: Option<u64>) {
 
 /// The BitTorrent session, started on first use.
 ///
-/// `OnceCell` rather than a field set at construction, so that an app nobody
-/// torrents with never opens a listening socket or joins the DHT.
+/// Not a field set at construction, so that an app nobody torrents with
+/// never opens a listening socket or joins the DHT. The lock is held
+/// across the build so two torrents arriving together still share one
+/// session.
 async fn torrent_session(
     inner: &Arc<Inner>,
 ) -> std::result::Result<Arc<idm_torrent::Torrents>, Failure> {
-    // Read before the session starts and not re-read afterwards: librqbit
-    // takes its rate limit when the session is built. A limit changed later
-    // applies to the next run of the app, which is worth saying out loud
-    // rather than pretending otherwise.
-    let limit = inner.settings.lock().await.speed_limit_bytes_per_sec;
-    let download_dir = inner.output_dir.clone();
+    let mut slot = inner.torrents.lock().await;
+    if let Some(session) = slot.as_ref() {
+        return Ok(Arc::clone(session));
+    }
 
-    inner
-        .torrents
-        .get_or_try_init(|| async {
-            idm_torrent::Torrents::start(&idm_ipc::state_dir(), download_dir, limit)
-                .await
-                .map(Arc::new)
-                .map_err(Failure::from_transport)
-        })
-        .await
-        .cloned()
+    // Read as the session starts: librqbit takes its rate limit when the
+    // session is built. Since an idle session is torn down, a changed
+    // limit now reaches the next torrent after an idle spell, not only
+    // the next run of the app.
+    let limit = inner.settings.lock().await.speed_limit_bytes_per_sec;
+    let session =
+        idm_torrent::Torrents::start(&idm_ipc::state_dir(), inner.output_dir.clone(), limit)
+            .await
+            .map(Arc::new)
+            .map_err(Failure::from_transport)?;
+    *slot = Some(Arc::clone(&session));
+    Ok(session)
+}
+
+/// How long an idle BitTorrent session lingers before it is put away.
+///
+/// Long enough that a batch of torrents added one after another reuses
+/// one session; short enough that finishing a torrent does not leave the
+/// app on the DHT for the rest of the day.
+const TORRENT_LINGER: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Holds the session open for one `run_torrent`, however that task ends.
+///
+/// A guard rather than calls at the exits, because pause and cancel end
+/// the task by aborting it: no exit line ever runs, but the drop does.
+struct TorrentUse(Arc<Inner>);
+
+impl TorrentUse {
+    fn begin(inner: &Arc<Inner>) -> Self {
+        inner.torrent_users.fetch_add(1, Ordering::SeqCst);
+        Self(Arc::clone(inner))
+    }
+}
+
+impl Drop for TorrentUse {
+    fn drop(&mut self) {
+        self.0.torrent_users.fetch_sub(1, Ordering::SeqCst);
+        stop_torrents_when_idle(&self.0);
+    }
+}
+
+/// Puts the BitTorrent stack away once nothing has used it for a while.
+///
+/// A grace period after the last user leaves, then — if no task is running
+/// and no torrent is live, a paused one included, since it lives *in* the
+/// session — the session is taken out and stopped: the listening socket
+/// closes, the DHT node leaves, and librqbit writes its resume data. The
+/// next torrent simply builds a fresh session.
+///
+/// The users check happens under the slot's lock, and a new task counts
+/// itself in before asking for the session: whichever side gets the lock
+/// first, a session is never stopped under someone who was handed it.
+fn stop_torrents_when_idle(inner: &Arc<Inner>) {
+    let inner = Arc::clone(inner);
+    tokio::spawn(async move {
+        tokio::time::sleep(TORRENT_LINGER).await;
+        let mut slot = inner.torrents.lock().await;
+        if inner.torrent_users.load(Ordering::SeqCst) != 0 {
+            return;
+        }
+        if !inner.live_torrents.lock().await.is_empty() {
+            return;
+        }
+        if let Some(session) = slot.take() {
+            session.stop().await;
+            tracing::debug!("stopped the idle BitTorrent session");
+        }
+    });
 }
 
 /// How often a running torrent's statistics are read.
@@ -1624,6 +1696,7 @@ async fn run_torrent(
     config: &DownloadConfig,
     source: idm_torrent::Source,
 ) -> std::result::Result<Option<u64>, Failure> {
+    let _using = TorrentUse::begin(inner);
     // A torrent this job already has is one that was paused: librqbit kept
     // it, along with the record of which pieces are verified, so resuming is
     // unpausing rather than adding it again. Adding again would throw that
@@ -3383,13 +3456,54 @@ mod tests {
         Engine::with_parts(dir.join("downloads"), 8, dir.join("settings.json"), Some(store))
     }
 
+    /// A sessionless stand-in in the slot, so these tests never open a
+    /// socket or join a swarm.
+    async fn parked_session(dir: &std::path::Path) -> Arc<idm_torrent::Torrents> {
+        Arc::new(idm_torrent::Torrents::offline(dir, dir.to_path_buf()).await.unwrap())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_idle_torrent_session_is_put_away() {
+        let (dir, engine) = engine();
+        *engine.inner.torrents.lock().await = Some(parked_session(dir.path()).await);
+
+        stop_torrents_when_idle(&engine.inner);
+        tokio::time::sleep(TORRENT_LINGER * 2).await;
+
+        assert!(
+            engine.inner.torrents.lock().await.is_none(),
+            "nothing is using the session, so the DHT and the listener should be gone"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_session_with_a_task_still_running_is_left_alone() {
+        let (dir, engine) = engine();
+        *engine.inner.torrents.lock().await = Some(parked_session(dir.path()).await);
+
+        // A magnet in its metadata lookup: counted in, nothing in
+        // `live_torrents` yet. Exactly the window a teardown must survive.
+        let using = TorrentUse::begin(&engine.inner);
+        stop_torrents_when_idle(&engine.inner);
+        tokio::time::sleep(TORRENT_LINGER * 2).await;
+        assert!(
+            engine.inner.torrents.lock().await.is_some(),
+            "a session must never be stopped under a task that was handed it"
+        );
+
+        // The guard leaving is what schedules the check that finally wins.
+        drop(using);
+        tokio::time::sleep(TORRENT_LINGER * 2).await;
+        assert!(engine.inner.torrents.lock().await.is_none());
+    }
+
     #[tokio::test]
     async fn saving_settings_rings_the_supervisors_line() {
         // The web and RPC supervisors sleep on this line instead of
         // polling, so a save that does not ring it is a switch nobody
         // comes to flip.
         let (_dir, engine) = engine();
-        let mut saves = engine.settings_saved();
+        let saves = engine.settings_saved();
         assert!(!saves.has_changed().unwrap(), "nothing saved yet, nothing to wake for");
 
         set_limit(&engine, 3).await;

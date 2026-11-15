@@ -157,11 +157,11 @@ impl Torrents {
 
     /// A session that touches no network at all.
     ///
-    /// For testing `inspect`, which needs a session but not a swarm when the
-    /// metadata is already in a local `.torrent`. No DHT, no trackers, no
-    /// listener: a unit test must not announce this machine to anybody.
-    #[cfg(test)]
-    async fn offline(state_dir: &Path, download_dir: PathBuf) -> Result<Self> {
+    /// For tests — here of `inspect`, in the engine of putting an idle
+    /// session away — which need a session but not a swarm. No DHT, no
+    /// trackers, no listener: a test must not announce this machine to
+    /// anybody.
+    pub async fn offline(state_dir: &Path, download_dir: PathBuf) -> Result<Self> {
         let options = SessionOptions {
             dht: None,
             disable_trackers: true,
