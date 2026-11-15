@@ -234,6 +234,15 @@ impl AppState {
     }
 }
 
+/// `%USERPROFILE%\Downloads`, which is where a download manager should put
+/// things unless told otherwise.
+fn default_download_dir() -> std::path::PathBuf {
+    std::env::var_os("USERPROFILE")
+        .map(std::path::PathBuf::from)
+        .map(|home| home.join("Downloads"))
+        .unwrap_or_else(std::env::temp_dir)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -270,13 +279,4 @@ mod tests {
             "the window cannot explain what it is never told"
         );
     }
-}
-
-/// `%USERPROFILE%\Downloads`, which is where a download manager should put
-/// things unless told otherwise.
-fn default_download_dir() -> std::path::PathBuf {
-    std::env::var_os("USERPROFILE")
-        .map(std::path::PathBuf::from)
-        .map(|home| home.join("Downloads"))
-        .unwrap_or_else(std::env::temp_dir)
 }

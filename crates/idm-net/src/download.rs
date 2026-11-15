@@ -797,13 +797,9 @@ pub async fn download_with_progress<F: FnMut(Progress)>(
     // Identity of what is being downloaded from, for the learned profile.
     // Computed before the connection count is chosen, because a profile that
     // arrives after the lane topology is fixed cannot change it.
-    let host = reqwest::Url::parse(&target.pinned_url)
-        .ok()
-        .and_then(|url| url.host_str().map(str::to_owned));
-    let port = reqwest::Url::parse(&target.pinned_url)
-        .ok()
-        .and_then(|url| url.port_or_known_default())
-        .unwrap_or(443);
+    let pinned = reqwest::Url::parse(&target.pinned_url).ok();
+    let host = pinned.as_ref().and_then(|url| url.host_str().map(str::to_owned));
+    let port = pinned.as_ref().and_then(|url| url.port_or_known_default()).unwrap_or(443);
     let host_key = host
         .as_ref()
         .map(|host| HostKey::new(host.as_str(), port, alpn_label(&target.http_version)));

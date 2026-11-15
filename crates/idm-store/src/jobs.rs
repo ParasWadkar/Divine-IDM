@@ -261,7 +261,6 @@ impl Store {
         Ok(())
     }
 
-    /// Moves a job to a new state, stamping the finish time when it stops.
     /// Records what a row turned out to be called, and where it went.
     ///
     /// For the one case where a download knows neither when it starts: a
