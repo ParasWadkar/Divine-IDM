@@ -755,10 +755,10 @@ pub async fn download_with_progress<F: FnMut(Progress)>(
 
     phase("part opened");
     // Resume when a journal describes this very file; otherwise start fresh.
-    let (mut journal, write_mode) = match open_resumable(&journal_path, &data, &target) {
+    let (mut journal, write_mode, resumed) = match open_resumable(&journal_path, &data, &target) {
         Some(journal) => {
             let mode = mode_from_flags(journal.flags());
-            (journal, mode)
+            (journal, mode, true)
         }
         None => {
             let prepared = prealloc::preallocate(
@@ -784,7 +784,7 @@ pub async fn download_with_progress<F: FnMut(Progress)>(
                     content_type: String::new(),
                 },
             };
-            (Journal::create(&journal_path, &meta)?, prepared.mode)
+            (Journal::create(&journal_path, &meta)?, prepared.mode, false)
         }
     };
 
@@ -1281,18 +1281,28 @@ pub async fn download_with_progress<F: FnMut(Progress)>(
     }
     phase("flushed");
 
-    // Verify before declaring victory. `SetFileValidData` forces a full pass,
-    // because unwritten regions there hold plausible stale content.
-    let verify_mode =
-        if write_mode.requires_full_verification() { VerifyMode::Full } else { VerifyMode::Fast };
-    let report = journal.verify(&data, verify_mode)?;
-    phase("verified");
-    if report.blocks_failed > 0 {
-        tracing::warn!(
-            failed = report.blocks_failed,
-            "verification trimmed bad blocks; the file is incomplete"
-        );
+    // Verify before declaring victory -- where there is anything not of
+    // this run's own making to verify. On resume the bytes predate this
+    // process and the journal was taken on trust, so the pass earns its
+    // keep; under `SetFileValidData` unwritten regions hold plausible
+    // stale content, so a full pass stays mandatory. A journal this run
+    // created describes only writes it checksummed as it made them, so
+    // re-reading the file here only ever compared it with itself.
+    if resumed || write_mode.requires_full_verification() {
+        let verify_mode = if write_mode.requires_full_verification() {
+            VerifyMode::Full
+        } else {
+            VerifyMode::Fast
+        };
+        let report = journal.verify(&data, verify_mode)?;
+        if report.blocks_failed > 0 {
+            tracing::warn!(
+                failed = report.blocks_failed,
+                "verification trimmed bad blocks; the file is incomplete"
+            );
+        }
     }
+    phase("verified");
     if !journal.is_complete() {
         return Err(DownloadError::Stalled { attempts: stats.requests as u32 });
     }
